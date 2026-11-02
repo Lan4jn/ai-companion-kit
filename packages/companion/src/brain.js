@@ -413,6 +413,8 @@ export class Brain {
     let cqImageToSend = '';
     let voiceB64ToSend = '';
     let out = '';
+    let lastMsg = null;
+    let lastJson = null;
 
     for (let round = 0; round < 3; round++) {
       const reqPayload = {
@@ -439,6 +441,8 @@ export class Brain {
       try { json = JSON.parse(raw); } catch { throw new Error('模型返回不是 JSON：' + raw.slice(0, 200)); }
       const choice = json.choices?.[0];
       const msg = choice?.message;
+      lastJson = json;
+      lastMsg = msg;
       let content = String(msg?.content || '').trim();
 
       // 提取工具调用：支持标准 tool_calls 与 DeepSeek DSML 文本格式
@@ -569,7 +573,7 @@ export class Brain {
       this.memory.remember(userId, { name: userName, topic: (typeof text === 'string' ? text : '').slice(0, 40) + ' → ' + out.slice(0, 40) });
       this.memory.logTurn({ where: key, who: userName || userId, text, reply: out });
     }
-    return { text: out, voiceB64: voiceB64ToSend, reasoning: msg?.reasoning_content, raw: json };
+    return { text: out, voiceB64: voiceB64ToSend, reasoning: lastMsg?.reasoning_content, raw: lastJson };
   }
 
   remember(userId, { trait, fact, topic, pending, name }) {
