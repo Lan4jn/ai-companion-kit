@@ -6,6 +6,7 @@
  *   - 合并转发聊天记录（多层嵌套套娃转发、content 节点数组、QQ Ark multimsg、resid 自动解析）
  *   - 引用回复消息自动追溯
  */
+import { checkOutput } from './safety.js';
 
 /** 从消息段里提取所有图片 URL / 本地文件路径（支持段对象与 CQ 码字符串） */
 function extractImages(segs) {
@@ -553,6 +554,14 @@ export class OneBot {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
     let message = String(text);
+
+    // 终极安全防线：物理发包前校验，如果含敏感涉政/控评，坚决不向 QQ 发送！
+    const safeCheck = checkOutput(message);
+    if (!safeCheck.ok) {
+      console.error(`   [OneBot Guard] 物理终极拦截：阻止向 ${key} 发送敏感内容！(${safeCheck.why}) -> "${message.slice(0, 50)}"`);
+      return Promise.resolve({ ok: false, error: 'BLOCKED_BY_SAFETY_GUARD' });
+    }
+
     if (atUserId) message = '[CQ:at,qq=' + atUserId + '] ' + message;
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })

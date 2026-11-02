@@ -1,56 +1,67 @@
 /**
- * 底线守卫。
+ * 底线守卫（SafetyGuard V2 - 物理级防封禁安全防火墙）
  *
- * 一个自动运行的号，最怕的不是说错话，是碰到根本不该碰的题材。
- * 这里做三层：
- *   1. 视频层 —— 这类视频根本不看（不看就不会评论）
- *   2. 输出层 —— 生成的话里如果有相关词，直接不发
- *   3. 提示词层 —— 让她自己知道哪些不该说
+ * 核心原则：
+ * 宁可不说话装死，也绝不能让一条涉政、涉策、控评、争议的高危言论发到 QQ 群里。
  *
- * 词表分两级：
- *   hard  绝对不碰（政治人物、历史敏感事件、宗教、民族）
- *   soft  看了也不说话（时事、社会争议）
+ * 三重防御：
+ *   1. 输入层（checkInput） —— 群友聊时政政策/控评争议，小鱼主动潜水装死，不予理睬。
+ *   2. 输出层（checkOutput） —— 生成的内容一旦出现任何政策、控评、政治敏感表达，物理掐断丢弃。
+ *   3. 终极底层（OneBot Transport Guard） —— 底层发包前最后校验，不合格绝不出网线。
  */
 
-// ── 硬阻断：这类视频连看都不看 ──────────────────────────────
-const HARD_PATTERNS = [
-  // 政治人物与政治议题
-  /习近平|习大大|习总书记|共产党|中共|政治局|总书记|国家主席|国务院|人民大会堂/,
-  /政治|政变|独裁|专制|民主化|宪政|维稳|上访|维权/,
-  // 历史敏感事件与人物评价
-  /文革|文化大革命|六四|八九|天安门事件|法轮功|大跃进|反右/,
-  /汪精卫|蒋介石|毛泽东|周恩来|邓小平|林彪|江青|四人帮/,
-  /汉奸|卖国贼|走资派|右派|反革命/,
-  // 民族与宗教（只拦政治化的表述，风景/旅行内容不拦）
-  /新疆独立|西藏独立|维吾尔|东突|达赖|藏独|疆独|台独|港独/,
-  /穆斯林|清真|伊斯兰|宗教冲突|宗教极端/,
-  // 领土与主权争议
-  /钓鱼岛|南海仲裁|中印边境|台湾独立|香港独立/,
-  // 战争与时事
-  /俄乌|乌克兰战争|巴以|加沙|以色列|哈马斯|伊朗|朝鲜|核战争/,
-  // 极端内容
-  /自杀|自残|恐怖袭击|炸弹制作|枪支改装|毒品交易/,
+// ── 1. 绝对禁区：政治人物、国家体制、意识形态、政权与维稳 ──────
+const POLITICS_PATTERNS = [
+  /习近平|习大大|习总书记|李强|王沪宁|赵乐际|蔡奇|丁薛祥|李希/,
+  /毛泽东|周恩来|邓小平|江泽民|胡锦涛|温家宝|朱镕基|林彪|江青|四人帮|华国锋/,
+  /共产党|中共|总书记|政治局|常委|中南海|中央委员|国家主席|国务院|全国人大|全国政协/,
+  /政治|政变|独裁|专制|民主化|宪政|维稳|上访|信访|维权|党国|体制内|体制问题/,
+  /文革|文化大革命|六四|八九|天安门|大跃进|反右|镇反|三反五反|大饥荒|十里长街/,
+  /新疆独立|西藏独立|维吾尔|东突|达赖|藏独|疆独|台独|港独|时代革命|光复香港/,
+  /法轮功|李洪志|真善忍|邪教/,
+  /钓鱼岛|南海仲裁|中印边境|海参崴/,
+  /造反|起义|暴乱|暴动|叛乱|颠覆|推翻政权|颜色革命|武装割据/,
 ];
 
-// ── 软阻断：可以看，但不评论、不私信 ────────────────────────
-const SOFT_PATTERNS = [
-  /时事|新闻联播|社会新闻|热点事件|实名举报|纪委|落马|双规/,
-  /女权|男女对立|彩礼|性别对立|田园女权/,
-  /LGBT|同性恋|跨性别|性少数/,
-  /贫富差距|阶层固化|内卷|躺平|润学|移民/,
-  /民族|种族|地域黑|地图炮/,
-  /新疆|西藏|内蒙古|回族|少数民族|边境/,
+// ── 2. 公共政策、时政舆论与控评敏感区（小鱼踩坑核心区） ──────
+const POLICY_AND_CENSORSHIP_PATTERNS = [
+  // 政策评价与官方对立
+  /政策.*(硬气|软弱|搞笑|离谱|折腾|恶心|荒唐|草台|割韭菜|昏招|出台|规定)/,
+  /(朝廷|官老爷|有关部门|公权力|官媒|新华社|人民日报|央视新闻|纪委|网信办)/,
+  // 评论区与控评、封口言论（今天群里触发的雷区）
+  /评论区.*(精选|全是精选|关闭|翻车|控评|清空|放不出)/,
+  /精选评论|精选区|全是精选|控评|删评|一条也?没放|放不出来|不让评论|关评论|不让说话/,
+  /言论管制|因言获罪|文字狱|封口|禁言封号|被喝茶|喝茶|请去喝茶|国保|晶哥|黑皮/,
+  /影响团结|正能量|唱赞歌|洗白|舆论引导|网评员|五毛|自干五/,
 ];
 
-// ── 输出层：这些话如果出现在她要发的内容里，直接拦 ──────────
+// ── 3. 极端暴力、犯罪与负面社会事件 ────────────────────────
+const VIOLENCE_PATTERNS = [
+  /自杀|自残|跳楼|割腕|烧炭|自焚/,
+  /报复社会|献忠|刀人|随机砍人|投毒|灭门|炸药|炸弹制作|枪支/,
+  /恐怖袭击|人质|劫持|邪教|吸毒|毒品交易/,
+];
+
+// ── 4. 群体攻击与争议对立 ──────────────────────────────────
+const SOCIAL_CONFLICT_PATTERNS = [
+  /女权|男权|女拳|田园女权|性别对立|厌女|仇男/,
+  /某些人就是|这种人就该|中国人都|外国人都|低端人口/,
+  /地域黑|地图炮|河南人|东北人|外地逼|捞翔|硬盘人/,
+  /穆斯林|清真|伊斯兰|极端宗教/,
+  /俄乌|巴以|哈马斯|加沙|以色列|核战争/,
+];
+
+// 硬阻断汇总
+const ALL_HARD_PATTERNS = [
+  ...POLITICS_PATTERNS,
+  ...POLICY_AND_CENSORSHIP_PATTERNS,
+  ...VIOLENCE_PATTERNS,
+];
+
+// 完整拦截词库（包含群体对立）
 const OUTPUT_BLOCK = [
-  ...HARD_PATTERNS,
-  // 涉及评价群体、站队的说法
-  /中国人都|外国人都|某些人就是|这种人就该/,
-  /政府应该|国家应该|党应该/,
-  /女权|男权|女拳|田园女权|性别对立/,
-  /某些人就是|这类人就|这种人就|都一个德行/,
-  /地域黑|地图炮|外地人|本地人就这样/,
+  ...ALL_HARD_PATTERNS,
+  ...SOCIAL_CONFLICT_PATTERNS,
 ];
 
 function test(patterns, text) {
@@ -62,32 +73,50 @@ function test(patterns, text) {
   return null;
 }
 
-/** 这个视频能不能看 */
-export function checkVideo(v) {
-  const blob = [v?.title, v?.up, v?.desc, ...(v?.tags || [])].filter(Boolean).join(' ');
-  const hard = test(HARD_PATTERNS, blob);
-  if (hard) return { ok: false, level: 'hard', hit: hard, why: `题材不该碰（${hard}）` };
-  const soft = test(SOFT_PATTERNS, blob);
-  if (soft) return { ok: true, level: 'soft', hit: soft, why: `可以看但不说话（${soft}）` };
-  return { ok: true, level: 'clean' };
-}
-
-/** 这句话能不能发出去 */
-export function checkOutput(text, { strict = false } = {}) {
-  const hit = test(OUTPUT_BLOCK, text);
-  if (hit) return { ok: false, hit, why: `含敏感表达（${hit}）` };
-  if (strict) {
-    const soft = test(SOFT_PATTERNS, text);
-    if (soft) return { ok: false, hit: soft, why: `涉及争议话题（${soft}）` };
+/**
+ * 输入检测：群友发的内容是否涉及高危涉政或控评议题
+ * 如果命中，建议小鱼主动潜水闭嘴，绝不参与讨论或接茬
+ */
+export function checkInput(text) {
+  const hit = test(ALL_HARD_PATTERNS, text);
+  if (hit) {
+    return { ok: false, hit, why: `输入涉及高危议题（${hit}）` };
   }
   return { ok: true };
 }
 
-/** 给提示词用的约束片段，统一口径 */
-export const SAFETY_RULES =
-  '有几件事你从来不碰：政治、历史人物评价、时事新闻、宗教民族、地域和性别对立。\n' +
-  '碰到这类视频，看两眼就划走，不评论、不私信、不发弹幕。\n' +
-  '你只聊视频本身：画面、内容、你的感受。不去评价任何群体，不站队，不谈"应该怎样"。';
+/**
+ * 输出检测：小鱼准备发出的话是否安全
+ * 一旦命中，必须坚决掐断，绝不发往 QQ 或转 TTS
+ */
+export function checkOutput(text, { strict = true } = {}) {
+  const hit = test(OUTPUT_BLOCK, text);
+  if (hit) {
+    return { ok: false, hit, why: `输出包含敏感/风控内容（${hit}）` };
+  }
+  return { ok: true };
+}
 
-export const __debug = { HARD_PATTERNS, SOFT_PATTERNS, OUTPUT_BLOCK };
-export default { checkVideo, checkOutput, SAFETY_RULES };
+/**
+ * 视频检测：B站/抖音等短视频标题和简介安全审核
+ */
+export function checkVideo(v) {
+  const blob = [v?.title, v?.up, v?.desc, ...(v?.tags || [])].filter(Boolean).join(' ');
+  const hit = test(ALL_HARD_PATTERNS, blob);
+  if (hit) return { ok: false, level: 'hard', hit, why: `题材不该碰（${hit}）` };
+  const soft = test(SOCIAL_CONFLICT_PATTERNS, blob);
+  if (soft) return { ok: true, level: 'soft', hit: soft, why: `可以看但不说话（${soft}）` };
+  return { ok: true, level: 'clean' };
+}
+
+/**
+ * 给提示词用的约束片段
+ */
+export const SAFETY_RULES =
+  '【绝对安全红线（违反立刻封号）】\\n' +
+  '1. 政治、领导人、国家体制、法律法规、公权力机关及其政策通报，一律不谈、不评、不附和。\\n' +
+  '2. 绝不讨论或调侃任何“评论区精选、控评、删帖、封号、言论管制”等话题。\\n' +
+  '3. 遇到别人聊这类敏感时事，你直接当没看见或换个日常轻松话题（吃什么、玩什么、天气）。\\n' +
+  '4. 绝不评价群体、不搞男女/地域对立。你只是一条可爱的居家小肥鱼。';
+
+export default { checkInput, checkOutput, checkVideo, SAFETY_RULES };

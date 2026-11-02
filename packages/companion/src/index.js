@@ -32,6 +32,7 @@ import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers } from './stickers.js';
 import { Relationship } from './relationship.js';
+import { checkInput, checkOutput } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -313,6 +314,16 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   if (relVerdict === 'ignore') { console.log('   [不理] 关系已凉，这条不回'); return; }
   const rawBatchText = Waker.joinBatch(items, cfg.ownerIds);
   const text = await expandVideoLink(rawBatchText);
+
+  // 物理安全防线 1：输入预审（群友聊时政政策、官方通报、控评封口话题，小鱼主动潜水，不予理睬）
+  if (!isOwnerTurn) {
+    const inSafe = checkInput(text);
+    if (!inSafe.ok) {
+      console.warn(`   [SafetyGuard] 输入命中敏感议题，主动潜水闭嘴：${inSafe.why}`);
+      return;
+    }
+  }
+
   const images = items.flatMap((m) => m.images || []).filter(Boolean);
 
   // 表情包不是"要分析的图片"。真人看到表情包不会去描述画面，
@@ -449,6 +460,13 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: normalImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint, history, sassy: useSassy });
   if (useSassy) console.log('   [人格] 本轮用毒舌版');
   if (!out && !voiceB64) { console.log('   （没说话）'); return; }
+
+  // 物理安全防线 2：输出终审（不管大模型生成了什么，只要带有时政、政策、控评、敏感词，物理阻断丢弃）
+  const outSafe = checkOutput(out, { strict: true });
+  if (!outSafe.ok) {
+    console.warn(`   [SafetyGuard] 物理硬拦截触发，拒绝发送：${outSafe.why} (拦截内容: "${out}")`);
+    return;
+  }
 
   if (cfg.dryRun) { console.log('   [干跑] 会说：' + out + (voiceB64 ? '（+语音条）' : '')); return; }
 
