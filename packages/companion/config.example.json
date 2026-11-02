@@ -38,7 +38,7 @@
     "minMs": 1200,
     "maxMs": 6000,
     "jitter": 0.2,
-    "burstMax": 4,
+    "burstMax": 2,
     "gapRange": [
       700,
       2600

@@ -224,18 +224,43 @@ export class Humanizer {
         }
       }
     }
-    // 超量就把多余的平均分进各组，而不是一股脑堆到最后一条
+    // 超量时主动精简：真人老群友在群里从不长篇大论刷屏。
+    // 如果切出来的句子超过 max（默认 2 条），智能提炼前 max 条核心表述，多余长句废话直接丢弃
     let res = merged;
     if (merged.length > max) {
       const textParts = merged.filter((p) => !p.startsWith('__CQ_IMAGE_'));
       const imgParts = merged.filter((p) => p.startsWith('__CQ_IMAGE_'));
       const textLimit = Math.max(1, max - imgParts.length);
-      const per = Math.ceil(textParts.length / textLimit);
+
       const head = [];
-      for (let i = 0; i < textParts.length; i += per) {
-        head.push(textParts.slice(i, i + per).join(''));
+      let cur = '';
+      for (const part of textParts) {
+        if (head.length >= textLimit) break;
+        if (!cur) {
+          cur = part;
+        } else {
+          const curLen = [...cur.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
+          const partLen = [...part.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
+          if (curLen + partLen <= 24 && head.length + 1 < textLimit) {
+            cur += ' ' + part;
+          } else {
+            head.push(cur);
+            cur = part;
+          }
+        }
       }
-      res = [...head.filter(Boolean), ...imgParts];
+      if (cur && head.length < textLimit) head.push(cur);
+
+      // 单条超过 32 字进行自然断句截取，坚决不发大长段
+      const trimmedHead = head.map((s) => {
+        if (s.length > 32) {
+          const cut = s.slice(0, 32).replace(/[，,；;、\s][^，,；;、\s]*$/, '');
+          return (cut.length >= 8 ? cut : s.slice(0, 32));
+        }
+        return s;
+      });
+
+      res = [...trimmedHead.filter(Boolean), ...imgParts];
     }
 
     // 还原 CQ:image 码与空格，并去掉句尾句号

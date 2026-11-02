@@ -374,7 +374,7 @@ export class Brain {
         const descs = (await Promise.all(dataUrls.map((d) => this.describeImage(d)))).filter(Boolean);
         if (descs.length > 0) {
           const hint = descs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
-          userContent = `${String(text || '').trim()}\n\n【对方发了${descs.length}张图，画面核心内容已提炼如下。真人老群友看图法则：直接针对图中的文字、槽点、胜负或事情发表看法，绝对禁止报备图片的形状或说“这是一张长方形截图”等机械废话】\n${hint}`.trim();
+          userContent = `${String(text || '').trim()}\n\n【对方发了${descs.length}张图，画面核心内容已提炼如下。真人老群友看图法则：只挑图中最亮眼或最有槽点的一个细节随口吐一句（最多1~2个短句），绝对禁止报备形状尺寸，绝对禁止面面俱到地把图里所有细节挨个点评一遍！越精简越真实】\n${hint}`.trim();
         } else {
           userContent = `${String(text || '[图片]').trim()}\n\n（图片没加载出来，你根本没看到画面内容。禁止编造任何画面细节、禁止假装看懂了——只能老实说没看清或打不开，让对方说一句）`;
         }
