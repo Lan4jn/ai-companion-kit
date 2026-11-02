@@ -51,11 +51,13 @@ export class Waker {
       atMention: true,
       nameMention: true,
       keywords: [],
-      question: true,
+      question: false,
       poke: true,
       speakerIds: [],
       probability: this.probability,
       anyMessage: false,
+      cooldownMs: 90000,
+      ownerMustCall: false,
       ...cfg,
     });
   }
@@ -88,6 +90,30 @@ export class Waker {
   }
 
   /**
+   * 检查是否明确是在呼叫小鱼本尊：
+   * 凡是问到“谁的小鱼/谁家的小鱼”，只要不是涉及到老爸（578021239 / 織梦行云），
+   * 都说明是在说别人家的小鱼，不属于呼叫本尊。
+   */
+  findDirectNameCall(text, msg = {}) {
+    if (!text || msg.isPureShareCard) return { hitName: null, cleaned: '' };
+    let cleaned = String(text);
+    const uid = String(msg.userId || '');
+    const isOwner = this.ownerIds.includes(uid);
+    const isAtOwner = Boolean(msg.isAtOwner);
+
+    // 凡是提到“谁的小鱼/谁家的小鱼/谁的鱼”：
+    cleaned = cleaned.replace(/(?:[^\s，。！？!?~]{1,6})?(?:的|家|家的)\s*(?:小鱼|小肥鱼|肥鱼|大肥鱼|鱼鱼|鱼妹|鱼)/g, (match) => {
+      if (isOwner && /(?:我|咱|俺)/.test(match)) return match; // 老爸说“我的小鱼”
+      if (/老爸|爸爸|織梦行云|织梦行云/.test(match)) return match;   // 别人说“老爸的小鱼”
+      if (isAtOwner && /(?:你|您)/.test(match)) return match;    // 别人艾特老爸问“你的小鱼”
+      return '__OTHER_FISH__';
+    });
+
+    const hitName = this.names.find((n) => n && cleaned.includes(n)) || null;
+    return { hitName, cleaned };
+  }
+
+  /**
    * 判定一条消息要不要唤醒
    *
    * @param {object} msg
@@ -104,9 +130,31 @@ export class Waker {
     const c = this.getConfig(msg.key);
     const text = String(msg.text || '');
     const uid = String(msg.userId || '');
+    const isOwner = this.ownerIds.includes(uid);
 
-    // 主人（或指定的人）说话 → 一定醒
-    if (this.ownerIds.includes(uid) && c.mode !== 'active') return { wake: true, reason: 'owner' };
+    // 群聊中纯分享卡片/小程序（无额外手打文字）判定：
+    // 除非明确被 @ 或引用回复，否则绝不当作对话，不触发问句、关键词、概率冒头或老爸闲聊搭腔
+    if (msg.isGroup && msg.isPureShareCard && !msg.isAtMe && !msg.isQuoteMe) {
+      return { wake: false, reason: 'group-pure-share-card' };
+    }
+
+    const { hitName: directlyCalledName, cleaned: cleanedText } = this.findDirectNameCall(text, msg);
+    const directlyCalled = Boolean(msg.isAtMe || msg.isQuoteMe || directlyCalledName);
+
+    // 1. 主人（老爸）说话判定：
+    // 私聊中每条必醒；群聊中若开启了 ownerMustCall，没叫小鱼时当背景潜水；
+    // 若未开启 ownerMustCall（如熟人小群），老爸说话时小鱼可主动搭腔，但在发言冷却期内且未被明确呼叫时保持礼貌倾听
+    if (isOwner && c.mode !== 'active') {
+      if (msg.isGroup) {
+        if (c.ownerMustCall && !directlyCalled) {
+          return { wake: false, reason: 'owner-chatting-with-group' };
+        }
+        if (!directlyCalled && c.cooldownMs > 0 && c.lastWakeAt && (Date.now() - c.lastWakeAt < c.cooldownMs)) {
+          return { wake: false, reason: 'owner-cooldown' };
+        }
+      }
+      return { wake: true, reason: 'owner' };
+    }
     if (Array.isArray(c.speakerIds) && c.speakerIds.map(String).includes(uid)) {
       return { wake: true, reason: 'speaker' };
     }
@@ -114,25 +162,31 @@ export class Waker {
     if (c.anyMessage) return { wake: true, reason: 'anyMessage' };
     if (c.mode === 'active') return { wake: true, reason: 'active' };
 
+    // 2. 显式呼叫：被 @ / 被引用 / 被直接叫名字本尊 / 被拍一拍（最高优先级，在冷却期间也必定唤醒）
     if (c.atMention && (msg.isAtMe || msg.isQuoteMe)) return { wake: true, reason: 'atMention' };
-
     if (c.poke && msg.isPoke) return { wake: true, reason: 'poke' };
-
-    if (c.nameMention) {
-      const hit = this.names.find((n) => text.includes(n));
-      if (hit) return { wake: true, reason: 'name:' + hit };
+    if (c.nameMention && directlyCalledName) {
+      return { wake: true, reason: 'name:' + directlyCalledName };
     }
 
-    const kw = [...(c.keywords || []), ...this.keywords];
+    // 3. 关键词检查（使用清洗后的文本；潜水群聊不响应通用日常词，除非该群配置了专属 keywords）
+    const kw = c.mode === 'diving' ? (c.keywords || []) : [...(c.keywords || []), ...this.keywords];
     if (kw.length) {
-      const hit = kw.find((k) => k && text.includes(k));
+      const hit = kw.find((k) => k && cleanedText.includes(k));
       if (hit) return { wake: true, reason: 'keyword:' + hit };
     }
 
+    // 4. 冷却检查：如果处于发言冷却期内（如 90 秒内），不再进行普通问句或随机概率冒头
+    if (c.cooldownMs > 0 && c.lastWakeAt && (Date.now() - c.lastWakeAt < c.cooldownMs)) {
+      return { wake: false, reason: 'cooldown' };
+    }
+
+    // 5. 问句触发（若开启）
     if (c.question && QUESTION_HINTS.test(text) && [...text].length >= 4) {
       return { wake: true, reason: 'question' };
     }
 
+    // 6. 随缘低频冒头（受 probability 与 cooldownMs 双重约束）
     if (Number(c.probability) > 0 && Math.random() < Number(c.probability)) {
       return { wake: true, reason: 'probability' };
     }
@@ -141,13 +195,14 @@ export class Waker {
   }
 
   /**
-   * 多条消息合并 —— 真人在群里说话是一串一串的，
-   * 等一小会儿把连着的几条凑一起再回，比一条条追着回自然得多。
+   * 把消息放进合并缓冲区
    *
+   * @param {object} msg
+   * @param {string} [customKey] 自定义缓冲键（如群聊按用户隔离）
    * @returns {{ready:boolean, batch:object[]}}
    */
-  batch(msg) {
-    const key = msg.key;
+  batch(msg, customKey = null) {
+    const key = customKey || msg.key;
     let b = this.buffers.get(key);
     if (!b) { b = { items: [], timer: null }; this.buffers.set(key, b); }
     b.items.push(msg);
@@ -166,11 +221,13 @@ export class Waker {
   /** 合并窗口到了，把攒的都取出来 */
   flush(key) { return this.#flush(key); }
 
-  /** 把一批消息拼成一段给模型的输入 */
-  static joinBatch(items) {
+  /** 把一批消息拼成一段给模型的输入（自动标注主人身份） */
+  static joinBatch(items, ownerIds = []) {
     return items.map((m) => {
+      const isOwner = Array.isArray(ownerIds) && ownerIds.map(String).includes(String(m.userId));
       const who = m.name || m.userId || '某人';
-      return who + '：' + String(m.text || '').trim();
+      const label = isOwner ? `${who}（你的爸爸）` : who;
+      return label + '：' + String(m.text || '').trim();
     }).join('\n');
   }
 }

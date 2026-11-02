@@ -28,7 +28,7 @@ export class Memory {
    * @param {number} [opts.maxTopics]    每人最多留多少条话题
    * @param {number} [opts.maxTurns]     共享对话流最多留多少条
    */
-  constructor({ dir, maxTopics = 20, maxTurns = 400 } = {}) {
+  constructor({ dir, maxTopics = 50, maxTurns = 5000 } = {}) {
     this.dir = dir;
     this.peopleFile = path.join(dir, 'people.json');
     this.turnsFile = path.join(dir, 'turns.jsonl');
@@ -135,6 +135,18 @@ export class Memory {
     } catch { /* 写失败不影响主流程 */ }
   }
 
+  /** 取指定会话 key 的最近真实对话历史（用于连续对话上下文记忆） */
+  sessionTurns(key, n = 12) {
+    if (!key) return [];
+    let rows = [];
+    try {
+      rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+    } catch { return []; }
+    return rows.filter((r) => r.where === key).slice(-n);
+  }
+
   /** 取最近 n 轮（可按来源过滤） */
   recentTurns(n = 20, { excludeWhere, sinceMs } = {}) {
     let rows = [];
@@ -148,6 +160,50 @@ export class Memory {
     return rows.slice(-n);
   }
 
+  /**
+   * 关联回忆：按关键词从历史长程对话中检索相关的聊天记录（排除已在最近滑窗里的记录）
+   */
+  recallTurns(query, { where, limit = 4, excludeRecent = 80 } = {}) {
+    try {
+      const q = String(query || '').trim().toLowerCase();
+      if (!q || q.length < 2) return [];
+      const stopWords = new Set(['你', '我', '他', '她', '它', '在', '了', '的', '呢', '吗', '吧', '这', '那', '有', '个', '是', '也', '不', '去', '说', '啊', '哦', '嗯', '么', '着', '得', '到', '事', '会']);
+      const clean = q.replace(/[\s,，。？?！!、～~“”"'…\-_]+/g, ' ').trim();
+      const tokens = new Set();
+      for (const segment of clean.split(' ')) {
+        if (!segment) continue;
+        if (segment.length >= 2) {
+          tokens.add(segment);
+          for (let i = 0; i < segment.length - 1; i++) {
+            const bi = segment.slice(i, i + 2);
+            if (!stopWords.has(bi[0]) || !stopWords.has(bi[1])) tokens.add(bi);
+          }
+        }
+        for (const ch of segment) {
+          if (!stopWords.has(ch)) tokens.add(ch);
+        }
+      }
+      const words = Array.from(tokens);
+      if (!words.length) return [];
+      const rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+      const pool = excludeRecent > 0 ? rows.slice(0, -excludeRecent) : rows;
+      const scored = [];
+      for (const r of pool) {
+        if (where && r.where !== where) continue;
+        const text = `${r.text || ''} ${r.reply || ''}`.toLowerCase();
+        let score = 0;
+        for (const w of words) {
+          if (text.includes(w)) score += (w.length >= 2 ? 3 : 1);
+        }
+        if (score >= 2) scored.push({ r, score });
+      }
+      scored.sort((a, b) => b.score - a.score || b.r.t - a.r.t);
+      return scored.slice(0, limit).map((x) => x.r);
+    } catch { return []; }
+  }
+
   // ── 给提示词用 ──────────────────────────────────────────────
   /** 把某人的账渲染成一段可注入的文字 */
   renderPerson(id) {
@@ -155,12 +211,130 @@ export class Memory {
     if (!p) return '';
     const L = [];
     if (p.traits?.length) L.push('你了解他：' + p.traits.slice(-12).join('；'));
-    if (p.facts?.length) L.push('他告诉过你：' + p.facts.slice(-12).join('；'));
-    if (p.topics?.length) L.push('你们聊过：' + p.topics.slice(-8).join('；'));
+    if (p.facts?.length) L.push('他告诉过你：' + p.facts.slice(-15).join('；'));
+    if (p.topics?.length) L.push('你们聊过：' + p.topics.slice(-16).join('；'));
     if (p.pending?.length) L.push('⚠️ 你心里还记着没说出口的事：' + p.pending.slice(-4).join('；'));
     if (p.interactions) L.push('你们互动过 ' + p.interactions + ' 次');
     if (!L.length) return '';
     return '【关于 ' + (p.name || id) + '（' + id + '）的一本账】\n' + L.join('\n') + '\n';
+  }
+
+  // ── 小鱼自主生活日记与经历沉淀 ─────────────────────────────
+  /**
+   * 记录一条生活日记/事件经历到持久化记忆中
+   */
+  logDiary({ category = '日常', activity = '', details = '', mood = '' }) {
+    const rec = {
+      t: Date.now(),
+      category: String(category).slice(0, 20),
+      activity: String(activity).slice(0, 40),
+      details: String(details).slice(0, 150),
+      mood: String(mood).slice(0, 150),
+    };
+    if (!rec.activity && !rec.details) return;
+    try {
+      const diaryFile = path.join(this.dir, 'diary.jsonl');
+      fs.appendFileSync(diaryFile, JSON.stringify(rec) + '\n', 'utf8');
+      const lines = fs.readFileSync(diaryFile, 'utf8').trim().split('\n');
+      if (lines.length > 200) {
+        fs.writeFileSync(diaryFile, lines.slice(-150).join('\n') + '\n', 'utf8');
+      }
+    } catch {}
+  }
+
+  /**
+   * 取最近 n 条生活经历
+   */
+  recentDiary(n = 6) {
+    try {
+      const diaryFile = path.join(this.dir, 'diary.jsonl');
+      const lines = fs.readFileSync(diaryFile, 'utf8').trim().split('\n');
+      return lines.map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean).slice(-n);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 渲染为提示词文本注入大脑
+   */
+  renderDiary(n = 6) {
+    const list = this.recentDiary(n);
+    if (!list.length) return '';
+    const lines = list.map(r => {
+      const d = new Date(r.t);
+      const timeStr = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      return `· ${timeStr} [${r.category}] ${r.details}（${r.mood}）`;
+    });
+    return '【小鱼的生活经历日记（你今天真实经历过的点滴，有真实回忆）】\n' + lines.join('\n')
+      + '\n（老爸或群友问起你今天干嘛了、之前在玩啥，你可以自然调取这些真实记忆如实分享）\n';
+  }
+
+  // ── 群聊潜水与群上下文记忆 ─────────────────────────────────
+  /**
+   * 记录群聊消息（即使小鱼潜水没回复，也沉淀下来作为环境背景）
+   */
+  logGroupChatter({ groupKey, userId, name, text }) {
+    if (!groupKey || !text) return;
+    const cleanText = String(text).replace(/\s+/g, ' ').trim().slice(0, 200);
+    const cleanName = String(name || userId).slice(0, 30);
+    const rec = {
+      t: Date.now(),
+      group: String(groupKey),
+      userId: String(userId),
+      name: cleanName,
+      text: cleanText,
+    };
+
+    try {
+      const chatterFile = path.join(this.dir, 'group-chatter.jsonl');
+      fs.appendFileSync(chatterFile, JSON.stringify(rec) + '\n', 'utf8');
+      const lines = fs.readFileSync(chatterFile, 'utf8').trim().split('\n');
+      if (lines.length > 2000) {
+        fs.writeFileSync(chatterFile, lines.slice(-1500).join('\n') + '\n', 'utf8');
+      }
+    } catch {}
+
+    // 如果群聊提到了核心梗（如姐夫、炸弹机、装机、或者老爸说话），自动记入生活日记
+    if (/姐夫|炸弹机|电源|2060/i.test(cleanText)) {
+      this.logDiary({
+        category: '群聊',
+        activity: '群友玩梗',
+        details: `${cleanName}在群里又提起姐夫和炸弹机的话题`,
+        mood: '潜水看群友吐槽姐夫的装机名场面，笑得肚子疼'
+      });
+    }
+  }
+
+  /**
+   * 取指定群或全群最近潜水看到的群聊流
+   */
+  recentGroupChatter(groupKey = null, n = 200) {
+    try {
+      const chatterFile = path.join(this.dir, 'group-chatter.jsonl');
+      const lines = fs.readFileSync(chatterFile, 'utf8').trim().split('\n');
+      let rows = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      if (groupKey) {
+        rows = rows.filter(r => r.group === groupKey);
+      }
+      return rows.slice(-n);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 把群聊潜水流渲染成上下文提示词
+   */
+  renderGroupChatter(groupKey = null, n = 200) {
+    const rows = this.recentGroupChatter(groupKey, n);
+    if (!rows.length) return '';
+    const lines = rows.map(r => {
+      const timeStr = new Date(r.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      return `  [${timeStr}] ${r.name}：${r.text}`;
+    });
+    return `【群聊前文脉络背景流（你潜水看到的最近 ${lines.length} 条群消息，仅供了解来龙去脉与话题演变，严禁挑选前文旧消息回复，必须针对末尾最新发言回复）：】\n` + lines.join('\n') + '\n';
   }
 
   /** 把最近对话渲染成一段可注入的文字 */
