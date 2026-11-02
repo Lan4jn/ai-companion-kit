@@ -1,24 +1,30 @@
 /**
- * 小鱼/大肥鱼 虚拟居室（Virtual Room Web App）
+ * 小鱼/大肥鱼 虚拟居室（Virtual Room Web App - 2.5D 等距房间深度融合版）
  *
- * 运行在 0.0.0.0:18888 上的高颜值 2.5D 卧室场景：
- * 1. 完美复刻抖音视频中的日系二次元 Lo-Fi 深夜卧室场景（床铺、冷月光、暖黄书桌台灯、发光笔记本、鱼尾巴爬椅子）。
- * 2. 状态机联动：
- *    - bed_phone: 躺在床上玩手机（手机屏幕光打在脸部与床单上）
- *    - bed_sleep: 躺在床上放空或入睡
- *    - crawling: 从床上滑下、扑腾爬向电脑椅
- *    - desk_laptop: 坐在转椅上面对发光笔记本电脑查资料、刷抖音
- *    - bed_sit: 坐在床沿呆萌看镜头
- * 3. 支持实时 SSE（Server-Sent Events）推送，QQ 说话或刷视频时网页无需刷新毫秒级同步变身！
- * 4. 底部还原视频中的 HUD 状态卡片（通讯已连接、动作标签、输入日志、大肥鱼对话气泡）。
+ * 运行在 0.0.0.0:18888 上的高颜值 2.5D 等距卧室交互场景：
+ * 1. 底图层：采用 3:2 经典等距插画（大白床、落地全景窗、双屏书桌、蓝鲸地毯）。
+ * 2. 动态光影与天气系统：
+ *    - 4 时段平滑插值（清晨冷调、中午通透、下午夕照、晚间发蓝微暗），跟随真实系统时间自动流转。
+ *    - 天气粒子层：晴天阳光丁达尔光束、雨天水丝淅沥、雪天雪花飘摇。
+ *    - 台灯开关联动：暖黄径向柔光与关灯暗化滤镜。
+ * 3. 家具点击抽屉系统：
+ *    - 🛌 床铺：查看小鱼睡眠/躺平状态、使用设备与作息。
+ *    - 💻 书桌电脑：查看当前工作/摸鱼状态、最近刷的抖音/B站视频与吐槽、独立监视器入口。
+ *    - 📚 书架：动态调取 diary.jsonl 生活日记本。
+ *    - 🐳 鲸鱼地毯：毛绒公仔与互动陪伴羁绊。
+ *    - 🪟 落地窗：天色与光照透视。
+ * 4. 标注模式（?calib=1）：支持在页面上自由拖动、调整热区位置并持久化保存。
+ * 5. HUD 实时对话卡片：保持与 QQ 和后台动作实时 SSE 同步（打字机/渐变气泡、呼吸灯、状态标签）。
  */
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getLatestScreenBuffer, getObserverStatus } from './browser-observer.js';
+import { getDouyinLivingStatus } from './douyin-living.js';
 
 const PORT = 18888;
 const ASSETS_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets';
+const DATA_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/data';
 
 let curState = {
   state: 'bed_phone', // 'bed_phone' | 'bed_sleep' | 'crawling' | 'desk_laptop' | 'bed_sit'
@@ -44,7 +50,6 @@ function broadcastState() {
 export function setRoomState(newState, { action = '', message = '', recentInput = '' } = {}) {
   const prev = curState.state;
   if (newState && newState !== prev) {
-    // 如果是从床到电脑，先插播一轮爬椅子的过渡动画
     if ((prev === 'bed_phone' || prev === 'bed_sleep' || prev === 'bed_sit') && newState === 'desk_laptop') {
       curState.state = 'crawling';
       curState.action = '上椅子打开电脑';
@@ -59,7 +64,7 @@ export function setRoomState(newState, { action = '', message = '', recentInput 
         if (recentInput) curState.recentInput = recentInput;
         curState.updatedAt = Date.now();
         broadcastState();
-      }, 2500);
+      }, 2000);
       return;
     }
   }
@@ -76,18 +81,49 @@ export function getRoomState() {
   return curState;
 }
 
+/**
+ * 读取最近的生活日记
+ */
+function getRecentDiaries(limit = 4) {
+  try {
+    const diaryPath = path.join(DATA_DIR, 'diary.jsonl');
+    if (!fs.existsSync(diaryPath)) return [];
+    const lines = fs.readFileSync(diaryPath, 'utf8').trim().split('\n').filter(Boolean);
+    const parsed = [];
+    for (let i = lines.length - 1; i >= 0 && parsed.length < limit; i--) {
+      try {
+        const item = JSON.parse(lines[i]);
+        parsed.push(item);
+      } catch {}
+    }
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 2.5D 等距虚拟居室 Web 页面模板
+ */
 const HTML_TEMPLATE = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>欢迎光临大肥鱼的家 - Virtual Room</title>
+  <title>织梦行云 · 小肥鱼的居室 (Virtual Room)</title>
   <style>
+    :root {
+      --brightness: 1;
+      --ambient: #ffffff;
+      --sun: .3;
+      --primary: #38bdf8;
+      --bg: #070a13;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
     body {
-      background: #070b14;
+      background: var(--bg);
       color: #e2e8f0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
       overflow: hidden;
       height: 100vh;
       width: 100vw;
@@ -97,82 +133,232 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       align-items: center;
     }
 
+    /* 主舞台容器 (3:2 比例自适应最大化) */
     #stage {
       position: relative;
       width: 100vw;
       height: 100vh;
-      max-width: 177.78vh; /* 16:9 ratio */
-      max-height: 56.25vw;
+      max-width: 150vh; /* 3:2 ratio: width = height * 1.5 */
+      max-height: 66.67vw; /* height = width / 1.5 */
       background: #000;
       overflow: hidden;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.85);
+      border-radius: 12px;
+      isolation: isolate;
     }
 
-    .room-layer {
+    #stage svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* 滤镜过渡与光色混合 */
+    #stage image, #stage .base {
+      filter: brightness(var(--brightness)) saturate(var(--saturation, 1));
+      transition: filter 3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .color-cast {
+      fill: var(--ambient);
+      opacity: .18;
+      mix-blend-mode: soft-light;
+      transition: fill 3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .sunbeam {
+      opacity: var(--sun);
+      mix-blend-mode: screen;
+      transition: opacity 3s cubic-bezier(0.4, 0, 0.2, 1);
+      pointer-events: none;
+    }
+
+    /* 交互热区样式 */
+    .hz {
+      fill: transparent;
+      cursor: pointer;
+      transition: fill 0.2s, stroke 0.2s;
+    }
+    .hz:hover {
+      fill: rgba(56, 189, 248, 0.12);
+      stroke: rgba(56, 189, 248, 0.5);
+      stroke-width: 2;
+    }
+    .calib .hz {
+      fill: rgba(244, 63, 94, 0.22);
+      stroke: #f43f5e;
+      stroke-width: 2.5;
+      stroke-dasharray: 6 4;
+      cursor: move;
+    }
+
+    /* 悬浮提示 Tooltip */
+    .hint {
       position: absolute;
-      top: 0; left: 0; width: 100%; height: 100%;
-      background-size: cover;
-      background-position: center;
-      transition: opacity 0.8s ease-in-out;
+      pointer-events: none;
+      padding: 6px 12px;
+      border-radius: 8px;
+      background: rgba(13, 20, 36, 0.88);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: #f8fafc;
+      font-size: 13px;
+      font-weight: 500;
       opacity: 0;
+      transition: opacity 0.15s ease-out;
+      white-space: nowrap;
+      z-index: 40;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     }
-    .room-layer.active { opacity: 1; }
 
-    /* 顶部信息条 */
+    /* 顶部控制栏 */
     .top-bar {
       position: absolute;
-      top: 16px;
-      left: 20px;
-      right: 20px;
+      top: 14px;
+      left: 18px;
+      right: 18px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      z-index: 20;
+      z-index: 30;
       pointer-events: none;
     }
+    .top-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      pointer-events: auto;
+    }
     .top-title {
-      background: rgba(15, 23, 42, 0.75);
-      backdrop-filter: blur(8px);
+      background: rgba(15, 23, 42, 0.82);
+      backdrop-filter: blur(10px);
       padding: 8px 16px;
       border-radius: 20px;
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 600;
-      letter-spacing: 0.5px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #f1f5f9;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+
+    .top-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      pointer-events: auto;
+      flex-wrap: wrap;
+    }
+    .ctrl-btn {
+      background: rgba(15, 23, 42, 0.82);
+      backdrop-filter: blur(10px);
+      color: #94a3b8;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      padding: 6px 12px;
+      font-size: 12.5px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .ctrl-btn:hover { color: #f8fafc; border-color: rgba(56, 189, 248, 0.4); background: rgba(30, 41, 59, 0.88); }
+    .ctrl-btn.active { background: rgba(2, 132, 199, 0.35); color: #38bdf8; border-color: rgba(56, 189, 248, 0.6); }
+
+    /* 抽屉面板 */
+    .drawer {
+      position: absolute;
+      width: 330px;
+      max-width: 85vw;
+      background: rgba(11, 17, 33, 0.94);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 16px;
+      padding: 18px 20px;
+      display: none;
+      z-index: 50;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.65);
+      animation: fadeIn 0.25s ease-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    .drawer h4 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      color: #f8fafc;
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%; background: #10b981;
-      box-shadow: 0 0 8px #10b981;
-      animation: pulse 2s infinite;
+    .drawer .sub {
+      color: #94a3b8;
+      font-size: 12px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding-bottom: 8px;
     }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-    /* 底部控制与气泡 HUD */
-    .hud-container {
+    .drawer .kv-list { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+    .drawer .kv {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: #cbd5e1;
+      line-height: 1.4;
+    }
+    .drawer .kv span:first-child { color: #64748b; white-space: nowrap; flex-shrink: 0; }
+    .drawer .kv span:last-child { color: #f1f5f9; text-align: right; word-break: break-all; }
+    .drawer .close-btn {
       position: absolute;
-      bottom: 20px;
-      left: 20px;
-      right: 20px;
+      right: 14px;
+      top: 14px;
+      cursor: pointer;
+      color: #94a3b8;
+      font-size: 18px;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.05);
+      transition: all 0.2s;
+    }
+    .drawer .close-btn:hover { color: #fff; background: rgba(255,255,255,0.15); }
+    .drawer .extra-box {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
+    /* 底部实时对话与状态 HUD 卡片 */
+    .bottom-hud {
+      position: absolute;
+      bottom: 16px;
+      left: 18px;
+      right: 18px;
       display: flex;
       justify-content: space-between;
       align-items: flex-end;
       z-index: 30;
+      pointer-events: none;
       gap: 16px;
     }
-
     .dialogue-card {
-      background: rgba(13, 19, 33, 0.82);
-      backdrop-filter: blur(12px);
+      pointer-events: auto;
+      background: rgba(11, 17, 33, 0.88);
+      backdrop-filter: blur(14px);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 16px;
-      padding: 16px 20px;
-      max-width: 540px;
+      padding: 14px 18px;
+      max-width: 580px;
       min-width: 320px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-      position: relative;
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
     }
     .bubble-header {
       display: flex;
@@ -181,160 +367,475 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       margin-bottom: 8px;
     }
     .avatar-mini {
-      width: 32px;
-      height: 32px;
+      width: 30px;
+      height: 30px;
       border-radius: 50%;
-      background: #3b82f6;
+      background: linear-gradient(135deg, #0284c7, #38bdf8);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 16px;
-      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+      font-size: 15px;
+      box-shadow: 0 2px 8px rgba(2, 132, 199, 0.4);
     }
-    .char-name {
-      font-size: 14px;
-      font-weight: 700;
-      color: #93c5fd;
-    }
-    .status-badge {
+    .char-name { font-weight: 600; font-size: 14px; color: #f8fafc; }
+    .status-tag {
       font-size: 11px;
-      background: rgba(59, 130, 246, 0.2);
-      color: #60a5fa;
       padding: 2px 8px;
       border-radius: 10px;
-      border: 1px solid rgba(96, 165, 250, 0.3);
+      background: rgba(56, 189, 248, 0.16);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      font-family: ui-monospace, monospace;
     }
     .bubble-text {
-      font-size: 15px;
-      line-height: 1.5;
-      color: #f1f5f9;
-      min-height: 24px;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #e2e8f0;
+      min-height: 22px;
+      transition: all 0.2s;
     }
 
-    /* 右下角互动控制按钮组 */
-    .actions-panel {
+    /* 快捷交互操作条 */
+    .actions-bar {
       display: flex;
-      gap: 10px;
-      background: rgba(15, 23, 42, 0.7);
-      backdrop-filter: blur(10px);
-      padding: 8px 12px;
-      border-radius: 14px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      gap: 8px;
+      pointer-events: auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
     .act-btn {
-      background: rgba(30, 41, 59, 0.8);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      color: #cbd5e1;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(10px);
+      color: #e2e8f0;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 14px;
       padding: 8px 14px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 500;
+      font-size: 12.5px;
       cursor: pointer;
-      transition: all 0.2s ease;
       display: flex;
       align-items: center;
       gap: 6px;
+      transition: all 0.2s;
+      font-family: inherit;
     }
     .act-btn:hover {
-      background: #3b82f6;
-      color: #fff;
-      border-color: #60a5fa;
+      background: rgba(30, 41, 59, 0.95);
+      border-color: rgba(56, 189, 248, 0.5);
       transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     }
-    .act-btn:active { transform: translateY(0); }
+
+    @media (max-width: 640px) {
+      .bottom-hud { flex-direction: column; align-items: stretch; gap: 10px; }
+      .dialogue-card { max-width: 100%; min-width: unset; }
+      .actions-bar { justify-content: flex-start; }
+    }
   </style>
 </head>
 <body>
-  <div id="stage">
-    <div id="layer-bed_phone" class="room-layer active" style="background-image: url('/room_assets/bed_phone.jpg');"></div>
-    <div id="layer-bed_sleep" class="room-layer" style="background-image: url('/room_assets/bed_sleep.jpg');"></div>
-    <div id="layer-bed_sit" class="room-layer" style="background-image: url('/room_assets/bed_sit.jpg');"></div>
-    <div id="layer-crawling" class="room-layer" style="background-image: url('/room_assets/crawling.jpg');"></div>
-    <div id="layer-desk_laptop" class="room-layer" style="background-image: url('/room_assets/desk_laptop.jpg');"></div>
 
-    <div class="top-bar">
+<div id="stage">
+  <!-- 顶部控制条 -->
+  <div class="top-bar">
+    <div class="top-left">
       <div class="top-title">
-        <div class="dot"></div>
-        <span>大肥鱼的虚拟居室 · 实时在线</span>
+        <span class="dot"></span>
+        <span>织梦行云 · 小肥鱼的居室</span>
       </div>
-      <div class="top-title" id="actionTag">
-        <span>当前状态: 在床上悠闲躺平看手机</span>
-      </div>
+      <button class="ctrl-btn" id="btn-lamp" onclick="toggleLamp()">
+        <span>✦</span><span id="lamp-text">开灯</span>
+      </button>
     </div>
 
-    <div class="hud-container">
-      <div class="dialogue-card">
-        <div class="bubble-header">
-          <div class="avatar-mini">🐳</div>
-          <span class="char-name">大肥鱼 / 小鱼</span>
-          <span class="status-badge" id="badgeTag">通讯已连接</span>
-          <span class="status-badge" id="inputTag" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border-color: rgba(52, 211, 153, 0.3);">输入: phone</span>
-        </div>
-        <div class="bubble-text" id="bubbleText">
-          正在继续干活呢，别打扰我~
-        </div>
-      </div>
-
-      <div class="actions-panel">
-        <a href="/monitor" target="_blank" class="act-btn" style="text-decoration:none; background:#1e293b; color:#38bdf8; border-color:#0284c7;">🖥️ 观察小鱼屏幕 (只读)</a>
-        <button class="act-btn" onclick="triggerAction('douyin')">📱 去电脑前刷抖音</button>
-        <button class="act-btn" onclick="triggerAction('bed')">🛏️ 回床上躺平</button>
-        <button class="act-btn" onclick="triggerAction('sleep')">🌙 关灯睡觉</button>
-      </div>
+    <div class="top-controls">
+      <button class="ctrl-btn" data-period="dawn" onclick="setPeriod('dawn')">清晨</button>
+      <button class="ctrl-btn" data-period="noon" onclick="setPeriod('noon')">中午</button>
+      <button class="ctrl-btn" data-period="afternoon" onclick="setPeriod('afternoon')">下午</button>
+      <button class="ctrl-btn" data-period="night" onclick="setPeriod('night')">晚间</button>
+      <button class="ctrl-btn active" id="btn-auto" onclick="toggleAutoTime()">自动跟随</button>
+      <button class="ctrl-btn" data-weather="clear" onclick="setWeather('clear')">晴天</button>
+      <button class="ctrl-btn" data-weather="rain" onclick="setWeather('rain')">雨天</button>
+      <button class="ctrl-btn" data-weather="snow" onclick="setWeather('snow')">雪天</button>
+      <button class="ctrl-btn" id="btn-calib" onclick="toggleCalib()">标注</button>
+      <a class="ctrl-btn" href="/monitor" target="_blank" style="text-decoration:none;">旁观</a>
     </div>
   </div>
 
-  <script>
-    let currentState = 'bed_phone';
+  <!-- SVG 场景层 (1536 x 1024) -->
+  <svg viewBox="0 0 1536 1024" id="svg">
+    <defs>
+      <linearGradient id="sunG" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#fff2db" stop-opacity="0.8"/>
+        <stop offset="100%" stop-color="#ffdcac" stop-opacity="0"/>
+      </linearGradient>
+      <radialGradient id="lampG">
+        <stop offset="0%" stop-color="#ffe6a3" stop-opacity="0.88"/>
+        <stop offset="50%" stop-color="#ffd56b" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#ffc93c" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
 
-    function updateView(data) {
-      if (!data) return;
-      const { state, action, message, recentInput } = data;
+    <!-- ① 2.5D 等距卧室底图 -->
+    <g class="base">
+      <image href="/room_assets/sample-room.png" width="1536" height="1024" preserveAspectRatio="none"/>
+    </g>
 
-      if (state && state !== currentState) {
-        document.querySelectorAll('.room-layer').forEach(el => el.classList.remove('active'));
-        const target = document.getElementById('layer-' + state);
-        if (target) {
-          target.classList.add('active');
-          currentState = state;
-        }
-      }
+    <!-- ② 天色氛围与丁达尔光线层 -->
+    <rect class="color-cast" width="1536" height="1024"/>
+    <path class="sunbeam" d="M1180 370 L1360 450 L910 1024 L690 1024 Z" fill="url(#sunG)"/>
 
-      if (action) {
-        document.getElementById('actionTag').innerHTML = '<span>当前状态: ' + action + '</span>';
-      }
-      if (message) {
-        document.getElementById('bubbleText').innerText = message;
-      }
-      if (recentInput) {
-        document.getElementById('inputTag').innerText = '输入: ' + recentInput;
-      }
+    <!-- ③ 台灯发光柔光层 -->
+    <circle id="lamp-light" cx="1270" cy="515" r="240" fill="url(#lampG)" style="opacity: 0; mix-blend-mode: screen; transition: opacity 1.5s; pointer-events: none;" />
+    <circle id="lamp-light-bed" cx="440" cy="480" r="160" fill="url(#lampG)" style="opacity: 0; mix-blend-mode: screen; transition: opacity 1.5s; pointer-events: none;" />
+
+    <!-- ④ 天气粒子层 -->
+    <g class="rain" id="rain" style="opacity: 0; pointer-events: none;"></g>
+    <g class="snow" id="snow" style="opacity: 0; pointer-events: none;"></g>
+
+    <!-- ⑤ 交互热区槽位 -->
+    <g id="hz-layer"></g>
+
+    <rect class="color-cast" width="1536" height="1024" style="opacity:.05; pointer-events: none;"/>
+  </svg>
+
+  <!-- 悬浮 Tooltip -->
+  <div class="hint" id="hint"></div>
+
+  <!-- 抽屉详情弹窗 -->
+  <div class="drawer" id="drawer">
+    <span class="close-btn" id="drawer-close" onclick="closeDrawer()">×</span>
+    <h4 id="d-title">物品详情</h4>
+    <div class="sub" id="d-sub">点击热区获取</div>
+    <div class="kv-list" id="d-body"></div>
+    <div class="extra-box" id="d-extra" style="display:none;"></div>
+  </div>
+
+  <!-- 底部 HUD 对话卡片与动作栏 -->
+  <div class="bottom-hud">
+    <div class="dialogue-card">
+      <div class="bubble-header">
+        <div class="avatar-mini">✦</div>
+        <div class="char-name">小肥鱼</div>
+        <div class="status-tag" id="hud-status">在床上悠闲躺平看手机</div>
+      </div>
+      <div class="bubble-text" id="hud-message">正在继续干活呢，别打扰我~</div>
+    </div>
+
+    <div class="actions-bar">
+      <button class="act-btn" onclick="triggerAction('bed')">躺平看手机</button>
+      <button class="act-btn" onclick="triggerAction('douyin')">去电脑前刷抖音</button>
+      <button class="act-btn" onclick="triggerAction('sit')">坐在床沿发呆</button>
+      <button class="act-btn" onclick="triggerAction('sleep')">闭眼入睡</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ───────────────────────── 1. 时间与光影 ───────────────────────── */
+const periods = [
+  { id: 'dawn',      label: '清晨', hour: 6,  sky: ['#9fb6d8', '#e6d9c8'], ambient: '#b9c9e6', brightness: 0.92, sun: 0.35 },
+  { id: 'noon',      label: '中午', hour: 12, sky: ['#8fc4ee', '#dff0fb'], ambient: '#ffffff', brightness: 1.00, sun: 0.12 },
+  { id: 'afternoon', label: '下午', hour: 16, sky: ['#a9c6e8', '#ffd8ae'], ambient: '#ffe0c0', brightness: 0.96, sun: 0.55 },
+  { id: 'night',     label: '晚间', hour: 20, sky: ['#1b2a4d', '#3d4d78'], ambient: '#2a3760', brightness: 0.70, sun: 0 },
+];
+
+const weathers = {
+  clear: { label: '晴天', brightness: 1.00 },
+  rain:  { label: '雨天', brightness: 0.92 },
+  snow:  { label: '雪天', brightness: 0.95 },
+};
+
+let isAuto = true;
+let manualPeriod = null;
+let curWeather = 'clear';
+let isLampOn = false;
+
+const lerp = (a, b, t) => a + (b - a) * t;
+const mixHex = (a, b, t) => {
+  const p = (h) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const A = p(a), B = p(b);
+  return '#' + A.map((v, i) => Math.round(lerp(v, B[i], t)).toString(16).padStart(2, '0')).join('');
+};
+
+function resolve(hour) {
+  const list = periods.map(p => ({ ...p })).sort((x, y) => x.hour - y.hour);
+  const ext = [...list, { ...list[0], hour: list[0].hour + 24 }];
+  for (let i = 0; i < ext.length - 1; i++) {
+    const a = ext[i], b = ext[i + 1];
+    const h = hour < a.hour ? hour + 24 : hour;
+    if (h >= a.hour && h <= b.hour) {
+      const t = b.hour === a.hour ? 0 : (h - a.hour) / (b.hour - a.hour);
+      return {
+        id: t < 0.5 ? a.id : b.id,
+        ambient: mixHex(a.ambient, b.ambient, t),
+        brightness: lerp(a.brightness, b.brightness, t),
+        sun: lerp(a.sun, b.sun, t),
+      };
+    }
+  }
+  return list[0];
+}
+
+const stage = document.getElementById('stage');
+
+function renderEnvironment(hour) {
+  const s = resolve(hour);
+  const w = weathers[curWeather] || weathers.clear;
+  const lampDim = (!isLampOn && s.brightness < 0.85) ? 0.86 : 1.0;
+  const finalBrightness = (s.brightness * w.brightness * lampDim).toFixed(3);
+
+  stage.style.setProperty('--brightness', finalBrightness);
+  stage.style.setProperty('--ambient', s.ambient);
+  stage.style.setProperty('--sun', (s.sun * 0.65).toFixed(2));
+
+  document.getElementById('rain').style.opacity = curWeather === 'rain' ? '1' : '0';
+  document.getElementById('snow').style.opacity = curWeather === 'snow' ? '1' : '0';
+}
+
+function toggleLamp() {
+  isLampOn = !isLampOn;
+  const op = isLampOn ? '0.85' : '0';
+  document.getElementById('lamp-light').style.opacity = op;
+  document.getElementById('lamp-light-bed').style.opacity = op;
+  document.getElementById('lamp-text').textContent = isLampOn ? '关灯' : '开灯';
+  document.getElementById('btn-lamp').classList.toggle('active', isLampOn);
+  refreshEnv();
+}
+
+function setPeriod(id) {
+  isAuto = false;
+  manualPeriod = id;
+  document.getElementById('btn-auto').classList.remove('active');
+  document.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('active', b.dataset.period === id));
+  const p = periods.find(x => x.id === id);
+  if (p) renderEnvironment(p.hour);
+}
+
+function toggleAutoTime() {
+  isAuto = true;
+  manualPeriod = null;
+  document.getElementById('btn-auto').classList.add('active');
+  document.querySelectorAll('[data-period]').forEach(b => b.classList.remove('active'));
+  refreshEnv();
+}
+
+function setWeather(w) {
+  curWeather = w;
+  document.querySelectorAll('[data-weather]').forEach(b => b.classList.toggle('active', b.dataset.weather === w));
+  refreshEnv();
+}
+
+function refreshEnv() {
+  if (isAuto) {
+    const d = new Date();
+    renderEnvironment(d.getHours() + d.getMinutes() / 60);
+  } else if (manualPeriod) {
+    const p = periods.find(x => x.id === manualPeriod);
+    if (p) renderEnvironment(p.hour);
+  }
+}
+
+/* ───────────────────────── 2. 天气粒子动画 ───────────────────────── */
+function initParticles() {
+  const rain = document.getElementById('rain');
+  const snow = document.getElementById('snow');
+  const NS = 'http://www.w3.org/2000/svg';
+
+  for (let i = 0; i < 90; i++) {
+    const l = document.createElementNS(NS, 'line');
+    const x = 960 + Math.random() * 260, y = 350 + Math.random() * 320;
+    l.setAttribute('x1', x); l.setAttribute('y1', y);
+    l.setAttribute('x2', x - 6); l.setAttribute('y2', y + 16);
+    l.setAttribute('stroke', '#dbe8f4'); l.setAttribute('stroke-width', '1');
+    l.setAttribute('opacity', '0.65');
+    rain.appendChild(l);
+  }
+  for (let i = 0; i < 70; i++) {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', 960 + Math.random() * 260);
+    c.setAttribute('cy', 350 + Math.random() * 320);
+    c.setAttribute('r', (1.2 + Math.random() * 1.8).toFixed(1));
+    c.setAttribute('fill', '#eef4fc');
+    c.setAttribute('opacity', '0.85');
+    snow.appendChild(c);
+  }
+
+  let tick = 0;
+  setInterval(() => {
+    tick += 1;
+    [...rain.children].forEach((l, i) => {
+      const tx = (Math.sin((tick + i) * 0.2) * 2).toFixed(1);
+      const ty = (tick * 7 + i * 3) % 45;
+      l.setAttribute('transform', 'translate(' + tx + ', ' + ty + ')');
+    });
+    [...snow.children].forEach((c, i) => {
+      const tx = (Math.sin((tick + i) * 0.25) * 6).toFixed(1);
+      const ty = (tick * 1.4 + i * 2) % 55;
+      c.setAttribute('transform', 'translate(' + tx + ', ' + ty + ')');
+    });
+  }, 60);
+}
+
+/* ───────────────────────── 3. 热区与抽屉 ───────────────────────── */
+const DEFAULT_SLOTS = [
+  { id: 'bed',    label: '床铺 · 休息区',   rect: [240, 430, 520, 370] },
+  { id: 'desk',   label: '书桌电脑 · 摸鱼区', rect: [960, 400, 340, 360] },
+  { id: 'shelf',  label: '书架 · 生活日记', rect: [555, 140, 210, 320] },
+  { id: 'rug',    label: '鲸鱼地毯 · 休闲角', rect: [740, 680, 260, 200] },
+  { id: 'window', label: '落地全景窗 · 天色', rect: [980, 160, 320, 240] },
+];
+
+let slots = JSON.parse(localStorage.getItem('room-hotspots') || 'null') || DEFAULT_SLOTS;
+const hzLayer = document.getElementById('hz-layer');
+const hint = document.getElementById('hint');
+const drawer = document.getElementById('drawer');
+
+function drawSlots() {
+  hzLayer.innerHTML = '';
+  slots.forEach((s) => {
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', s.rect[0]); r.setAttribute('y', s.rect[1]);
+    r.setAttribute('width', s.rect[2]); r.setAttribute('height', s.rect[3]);
+    r.setAttribute('class', 'hz');
+    r.dataset.id = s.id;
+
+    r.addEventListener('mousemove', (e) => {
+      hint.textContent = s.label;
+      hint.style.left = (e.clientX + 14) + 'px';
+      hint.style.top = (e.clientY + 12) + 'px';
+      hint.style.opacity = '1';
+    });
+    r.addEventListener('mouseleave', () => { hint.style.opacity = '0'; });
+    r.addEventListener('click', (e) => {
+      if (!stage.classList.contains('calib')) openDrawer(s, e);
+    });
+    hzLayer.appendChild(r);
+  });
+}
+
+async function openDrawer(s, e) {
+  document.getElementById('d-title').textContent = s.label;
+  document.getElementById('d-sub').textContent = '正在获取居室动态……';
+  document.getElementById('d-body').innerHTML = '<div style="color:#64748b;font-size:12px;">加载中...</div>';
+  document.getElementById('d-extra').style.display = 'none';
+  drawer.style.display = 'block';
+
+  // 智能靠窗/靠边定位
+  const box = stage.getBoundingClientRect();
+  const clickX = e ? e.clientX : box.left + box.width / 2;
+  const isLeftHalf = clickX < (box.left + box.width / 2);
+  drawer.style.left = isLeftHalf ? (box.width - 350) + 'px' : '20px';
+  drawer.style.top = '70px';
+
+  try {
+    const res = await fetch('/api/room/inspect?slot=' + s.id);
+    const data = await res.json();
+    document.getElementById('d-title').textContent = data.title || s.label;
+    document.getElementById('d-sub').textContent = data.sub || '';
+    if (Array.isArray(data.lines) && data.lines.length > 0) {
+      document.getElementById('d-body').innerHTML = data.lines
+        .map(([k, v]) => '<div class="kv"><span>' + k + '</span><span>' + v + '</span></div>').join('');
+    } else {
+      document.getElementById('d-body').innerHTML = '<div style="color:#94a3b8;font-size:13px;">暂无相关信息</div>';
     }
 
-    // 建立实时 SSE 通信通道
-    const evtSource = new EventSource('/events');
-    evtSource.onmessage = function(e) {
-      try {
-        const data = JSON.parse(e.data);
-        updateView(data);
-      } catch (err) {}
+    if (data.extraHtml) {
+      const extra = document.getElementById('d-extra');
+      extra.innerHTML = data.extraHtml;
+      extra.style.display = 'block';
+    }
+  } catch (err) {
+    document.getElementById('d-sub').textContent = '连接异常';
+    document.getElementById('d-body').innerHTML = '<div style="color:#f43f5e;font-size:12px;">' + err.message + '</div>';
+  }
+}
+
+function closeDrawer() {
+  drawer.style.display = 'none';
+}
+
+/* ───────────────────────── 4. 标注模式 ───────────────────────── */
+function toggleCalib() {
+  const on = stage.classList.toggle('calib');
+  const btn = document.getElementById('btn-calib');
+  btn.classList.toggle('active', on);
+  btn.textContent = on ? '💾 保存标注' : '📐 标注';
+  if (on) {
+    enableDrag();
+  } else {
+    localStorage.setItem('room-hotspots', JSON.stringify(slots));
+  }
+}
+
+function enableDrag() {
+  const svg = document.getElementById('svg');
+  [...hzLayer.children].forEach((r, idx) => {
+    r.onmousedown = (down) => {
+      if (!stage.classList.contains('calib')) return;
+      const s = slots[idx];
+      const start = [down.clientX, down.clientY];
+      const orig = [...s.rect];
+      const scale = svg.getBoundingClientRect().width / 1536;
+
+      const move = (mv) => {
+        s.rect = [
+          Math.round(orig[0] + (mv.clientX - start[0]) / scale),
+          Math.round(orig[1] + (mv.clientY - start[1]) / scale),
+          orig[2],
+          orig[3],
+        ];
+        r.setAttribute('x', s.rect[0]);
+        r.setAttribute('y', s.rect[1]);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        localStorage.setItem('room-hotspots', JSON.stringify(slots));
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
     };
+  });
+}
 
-    // 页面初次加载拉取一次状态
-    fetch('/api/status').then(r => r.json()).then(updateView).catch(()=>{});
+/* ───────────────────────── 5. 实时 SSE 与动作触发 ───────────────────────── */
+function initSSE() {
+  const evt = new EventSource('/events');
+  evt.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      applyRoomState(data);
+    } catch {}
+  };
+}
 
-    function triggerAction(type) {
-      fetch('/api/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: type })
-      }).then(r => r.json()).then(updateView);
-    }
-  </script>
+function applyRoomState(data) {
+  if (data.action) document.getElementById('hud-status').textContent = data.action;
+  if (data.message) document.getElementById('hud-message').textContent = data.message;
+}
+
+function triggerAction(action) {
+  fetch('/api/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action })
+  }).then(r => r.json()).then(applyRoomState).catch(console.error);
+}
+
+/* ───────────────────────── 6. 启动初始化 ───────────────────────── */
+initParticles();
+drawSlots();
+refreshEnv();
+initSSE();
+setInterval(refreshEnv, 60000);
+</script>
 </body>
 </html>
 `;
 
+/**
+ * 只读浏览器实况监视器 HTML
+ */
 const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -394,7 +895,7 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
       width: 100%;
       height: 100%;
       object-fit: contain;
-      pointer-events: none; /* 严格只读！禁止任何拖拽与点击 */
+      pointer-events: none;
     }
     .watermark {
       position: absolute;
@@ -423,7 +924,7 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
 </head>
 <body>
   <div class="header">
-    <a href="/" class="back-btn">← 返回大肥鱼居室</a>
+    <a href="/" class="back-btn">← 返回小肥鱼居室</a>
     <div class="title-box">
       <div class="rec-dot"></div>
       <span>小鱼浏览器屏幕实况</span>
@@ -472,7 +973,6 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
       }).catch(()=>{});
     }
 
-    // 每 1.2 秒自动拉取一帧
     setInterval(refreshFrame, 1200);
     refreshFrame();
   </script>
@@ -484,7 +984,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // 1. 静态主页
+    // 1. 静态主页 (2.5D 等距房间)
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(HTML_TEMPLATE);
@@ -668,7 +1168,98 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
       return;
     }
 
-    // 1.2 浏览器只读屏幕抓取接口
+    // 1.2 家具热区抽屉数据接口 /api/room/inspect?slot=...
+    if (url.pathname === '/api/room/inspect') {
+      const slot = url.searchParams.get('slot') || 'bed';
+      let data = { title: '居室物品', sub: '', lines: [], extraHtml: '' };
+
+      if (slot === 'bed') {
+        data = {
+          title: '床铺 · 小鱼休息区',
+          sub: '蓬松云朵大白床 · 蓝色小鲸鱼抱枕',
+          lines: [
+            ['当前姿态', curState.action || '在床上悠闲躺平看手机'],
+            ['实时思绪', curState.message || '正在干活呢~'],
+            ['手持设备', curState.recentInput === 'phone' ? '手机 (QQ 聊天中)' : '无设备'],
+            ['最近变动', new Date(curState.updatedAt).toLocaleTimeString('zh-CN')],
+          ],
+          extraHtml: `
+            <div style="display:flex;gap:8px;">
+              <button onclick="triggerAction('bed')" style="flex:1;padding:7px;background:#0284c7;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">躺平看手机</button>
+              <button onclick="triggerAction('sleep')" style="flex:1;padding:7px;background:#475569;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">闭眼入睡</button>
+            </div>
+          `
+        };
+      } else if (slot === 'desk') {
+        const obs = getObserverStatus();
+        const dy = getDouyinLivingStatus();
+        data = {
+          title: '书桌电脑 · 摸鱼工作区',
+          sub: '全景靠窗双屏 · 人体工学转椅',
+          lines: [
+            ['电脑状态', obs.isActive ? '活动中: ' + obs.platform.toUpperCase() : '桌面待机中'],
+            ['当前操作', curState.state === 'desk_laptop' ? curState.action : '已离开工位'],
+            ['最近刷到', dy.lastVideo ? (dy.lastVideo.title?.slice(0, 22) + '...') : '《3.5w人看过的小鲸鱼房间已开源》'],
+            ['小鱼吐槽', dy.summary ? (dy.summary?.slice(0, 25) + '...') : '等距插画加个时钟就算房间了……'],
+          ],
+          extraHtml: `
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <a href="/monitor" target="_blank" style="display:block;text-align:center;padding:7px;background:#0284c7;color:#fff;border-radius:6px;text-decoration:none;font-size:12.5px;font-weight:500;">打开独立实况监视器</a>
+              <button onclick="triggerAction('douyin')" style="padding:7px;background:#e11d48;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12.5px;font-weight:500;">立即看一条抖音</button>
+            </div>
+          `
+        };
+      } else if (slot === 'shelf') {
+        const diaries = getRecentDiaries(4);
+        const lines = diaries.map(d => {
+          const timeStr = d.t ? new Date(d.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : (d.at ? d.at.slice(11, 16) : '刚才');
+          const title = d.title || d.activity || d.category || '生活随笔';
+          const thought = d.thought || d.mood || d.details || '';
+          return [`[${timeStr}] ${title}`, thought.slice(0, 28) + (thought.length > 28 ? '...' : '')];
+        });
+
+        data = {
+          title: '原木书架 · 生活日记账',
+          sub: '记录小鱼日常摸鱼、看视频与发呆的心声',
+          lines: lines.length > 0 ? lines : [['暂无日记', '今天还没记录摸鱼日记哦']],
+        };
+      } else if (slot === 'rug') {
+        data = {
+          title: '鲸鱼地毯 · 休闲陪伴角',
+          sub: '中心水波圆毯与巨型大肥鱼毛绒公仔',
+          lines: [
+            ['毛绒公仔', '巨型深蓝大鲸鱼 (小鱼最喜欢趴在上面发呆)'],
+            ['陪伴羁绊', '老爸与养女 · 亲密度 99.9%'],
+            ['互动提示', '老爸在 QQ 群里拍一拍小鱼头像，她会立刻被唤醒哦~'],
+          ],
+          extraHtml: `
+            <div style="display:flex;gap:8px;">
+              <button onclick="triggerAction('sit')" style="flex:1;padding:7px;background:#6366f1;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">坐在床沿发呆</button>
+            </div>
+          `
+        };
+      } else if (slot === 'window') {
+        const d = new Date();
+        const hour = d.getHours();
+        const periodName = hour < 6 ? '深夜' : hour < 11 ? '清晨' : hour < 14 ? '中午' : hour < 18 ? '下午' : '晚间';
+        data = {
+          title: '全景落地窗 · 天气透视',
+          sub: '窗外自然流转的蓝天白云与晨昏夕照',
+          lines: [
+            ['当前时间', d.toLocaleTimeString('zh-CN')],
+            ['时段光影', periodName],
+            ['动态光照', '已跟随真实系统时间自动平滑线性渐变'],
+            ['天气切换', '支持在顶部控制栏手动开启雨天、雪天'],
+          ]
+        };
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(data));
+      return;
+    }
+
+    // 1.3 浏览器只读屏幕抓取接口
     if (url.pathname === '/api/browser/screen.jpg') {
       const { buffer } = await getLatestScreenBuffer();
       if (buffer) {
@@ -684,14 +1275,14 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
       return;
     }
 
-    // 1.3 浏览器只读状态查询
+    // 1.4 浏览器只读状态查询
     if (url.pathname === '/api/browser/status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(getObserverStatus()));
       return;
     }
 
-    // 2. 静态图片资源
+    // 1.5 静态图片与资源
     if (url.pathname.startsWith('/room_assets/')) {
       const filename = path.basename(url.pathname);
       const filePath = path.join(ASSETS_DIR, filename);
@@ -708,7 +1299,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
       return;
     }
 
-    // 3. SSE 实时事件流
+    // 2. SSE 实时事件流
     if (url.pathname === '/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -724,14 +1315,14 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
       return;
     }
 
-    // 4. 状态查询 API
+    // 3. 状态查询 API
     if (url.pathname === '/api/status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(curState));
       return;
     }
 
-    // 5. 交互动作 API
+    // 4. 交互动作 API
     if (url.pathname === '/api/action' && req.method === 'POST') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -789,7 +1380,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
   });
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[VirtualRoom] 大肥鱼虚拟居室已启动: http://0.0.0.0:${PORT}/ (局域网访问: http://192.168.31.130:${PORT}/)`);
+    console.log(`[VirtualRoom] 大肥鱼 2.5D 等距居室已启动: http://0.0.0.0:${PORT}/ (局域网访问: http://192.168.31.130:${PORT}/)`);
   });
 
   return {
