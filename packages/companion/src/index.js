@@ -439,14 +439,20 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     voiceHint = '\n【系统强制指令·必须调用语音工具】：对方正在明确要求听你的真实声音（如“哭一个听听”、“说句话”、“发语音”、“来一个”等）！你必须且只能立即调用 `voice_say` 工具把你想说的话发成语音条，绝对严禁只用打字文字敷衍回复！发语音时请在 emotion 参数里带上对应的真实情绪（如哭腔、抽泣、娇哼或撒娇）！';
   }
 
-  // 抖音动态与实时汇报检测
+  // 抖音动态与实时汇报检测（支持解析抖音链接与主动互动）
   let douyinHint = '';
-  const wantsDouyin = /(刷抖音|看抖音|打开抖音|去刷.*抖音|汇报.*抖音|抖音.*汇报|刷两下抖音)/i.test(text);
+  const douyinUrlMatch = text.match(/https?:\/\/(?:v\.douyin\.com\/[a-zA-Z0-9_\-\/]+|www\.douyin\.com\/video\/\d+)/i);
+  const wantsDouyin = /(刷抖音|看抖音|打开抖音|去刷.*抖音|汇报.*抖音|抖音.*汇报|刷两下抖音)/i.test(text) || (Boolean(douyinUrlMatch) && /(看|瞅|瞧|评|说|觉得|怎么样)/i.test(text));
   if (wantsDouyin) {
     try {
-      console.log('   [抖音生活] 收到查岗/刷抖音指令，正在打开电脑抓取推荐流...');
-      const dRes = await browseDouyinLive({ isOwner: isOwnerTurn, prompt: text });
-      douyinHint = `\n【系统特别指令·你刚刚在电脑上刷了一条抖音短视频】：\n你刚才确实按对方要求在电脑上打开了抖音，第一条推荐刷到了：\n- 视频标题：《${dRes.video.title}》\n- 创作者：${dRes.video.author}\n- 播放/点赞量：${dRes.video.views}\n- 你的真实感悟或槽点：${dRes.thought}\n请按照老群友的随性自然口吻向对方如实汇报并吐槽你刚刷到的这个视频（可像大肥鱼那样说“开了，正刷着呢，第一条就是……”）！`;
+      console.log('   [抖音生活] 收到查岗/看视频指令，正在打开电脑抓取视频...');
+      const targetUrl = douyinUrlMatch ? douyinUrlMatch[0] : null;
+      const dRes = await browseDouyinLive({ isOwner: isOwnerTurn, prompt: text, targetUrl });
+      if (targetUrl) {
+        douyinHint = `\n【系统特别指令·你刚才在电脑上看了对方发来的这个抖音视频】：\n- 视频标题：《${dRes.video.title}》\n- 创作者：${dRes.video.author}\n- 点赞量：${dRes.video.likes || '未知'}\n- 你的真实感悟或槽点：${dRes.thought}\n- 你的互动动作：${dRes.liked ? '顺手给点了赞' : ''} ${dRes.followed ? '顺手点了关注' : ''}\n请按照老群友极简随性的口吻向对方说说你的评价和吐槽（1~2句，挑核心槽点，严禁机械套话和括号描写）！`;
+      } else {
+        douyinHint = `\n【系统特别指令·你刚刚在电脑上刷了一条抖音短视频】：\n你刚才确实按对方要求在电脑上打开了抖音，第一条推荐刷到了：\n- 视频标题：《${dRes.video.title}》\n- 创作者：${dRes.video.author}\n- 播放/点赞量：${dRes.video.views}\n- 你的真实感悟或槽点：${dRes.thought}\n请按照老群友的随性自然口吻向对方如实汇报并吐槽你刚刷到的这个视频（可像大肥鱼那样说“开了，正刷着呢，第一条就是……”）！`;
+      }
     } catch (e) {
       console.log('   [抖音生活] 实时抓取失败:', e?.message || e);
     }
