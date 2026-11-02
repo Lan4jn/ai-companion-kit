@@ -139,7 +139,7 @@ export class Waker {
     }
 
     const { hitName: directlyCalledName, cleaned: cleanedText } = this.findDirectNameCall(text, msg);
-    const directlyCalled = Boolean(msg.isAtMe || msg.isQuoteMe || directlyCalledName);
+    const directlyCalled = Boolean(msg.isAtMe || msg.isQuoteMe || msg.isPoke || directlyCalledName);
 
     // 1. 主人（老爸）说话判定：
     // 私聊中每条必醒；群聊中若开启了 ownerMustCall，没叫小鱼时当背景潜水；
