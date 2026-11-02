@@ -32,7 +32,7 @@ import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers } from './stickers.js';
 import { Relationship } from './relationship.js';
-import { checkInput, checkOutput } from './safety.js';
+import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -484,8 +484,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   // 没有语音或语音发送失败时，才发送常规打字文本
   if (!voiceSentSuccess && out) {
-    // 清洗方括号情绪控制词（保护 CQ 码）、所有圆括号动作神态描写与星号，绝不能把动作描述发出来！
-    const cleanOut = out
+    // 清洗模型内部工具标签/DSML、方括号情绪控制词（保护 CQ 码）、所有圆括号动作神态描写与星号
+    const cleanOut = cleanAllToolArtifacts(out)
       .replace(/\[(?!CQ:)[^\]]+\]/g, '')
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/\*[^*]+\*/g, '')

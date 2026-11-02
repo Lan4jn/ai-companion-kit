@@ -6,7 +6,7 @@
  *   - 合并转发聊天记录（多层嵌套套娃转发、content 节点数组、QQ Ark multimsg、resid 自动解析）
  *   - 引用回复消息自动追溯
  */
-import { checkOutput } from './safety.js';
+import { checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 /** 从消息段里提取所有图片 URL / 本地文件路径（支持段对象与 CQ 码字符串） */
 function extractImages(segs) {
@@ -554,6 +554,13 @@ export class OneBot {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
     let message = String(text);
+
+    // 终极清洗：彻底剥除任何 DSML 或模型内部工具语法
+    message = cleanAllToolArtifacts(message);
+    if (!message) {
+      console.warn(`   [OneBot Guard] 消息被工具标签清洗器清空（避免泄漏内部工具语法）：阻止向 ${key} 发送`);
+      return Promise.resolve({ ok: true, blocked: true, reason: 'CLEANED_EMPTY' });
+    }
 
     // 终极安全防线：物理发包前校验，如果含敏感涉政/控评，坚决不向 QQ 发送！
     const safeCheck = checkOutput(message);

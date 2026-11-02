@@ -19,6 +19,7 @@ import { PHONE_TOOLS, executePhoneTool } from './phone-tools.js';
 import { loopGuard } from './loop-guard.js';
 import { LEGAL_TOOLS, executeLegalTool } from './legal-tools.js';
 import { SEARCH_TOOLS, executeSearchTool } from './search-tools.js';
+import { cleanAllToolArtifacts, parseDsmlToolCalls } from './safety.js';
 
 const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS];
 
@@ -407,110 +408,113 @@ export class Brain {
     }
     messages.push({ role: 'user', content: userContent });
 
-    // 第一次调用模型（仅在需要时挂载工具，B站内部与私信禁用手机工具避免误调用）
+    // 工具调用循环（最多支持 2 轮工具调用，支持标准 API tool_calls 与 DeepSeek DSML 格式）
     const enableTools = input.tools !== false && !String(key || '').startsWith('__bili_');
-    const reqPayload = {
-      model: this.model,
-      messages,
-      temperature: 1.1,
-      stream: false,
-    };
-    if (enableTools) {
-      reqPayload.tools = ALL_TOOLS;
-      reqPayload.tool_choice = 'auto';
-    }
-
-    const res = await fetch(this.baseUrl + '/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey },
-      body: JSON.stringify(reqPayload),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-    const raw = await res.text();
-    if (!res.ok) throw new Error('模型返回 ' + res.status + '：' + raw.slice(0, 300));
-
-    let json;
-    try { json = JSON.parse(raw); } catch { throw new Error('模型返回不是 JSON：' + raw.slice(0, 200)); }
-    const choice = json.choices?.[0];
-    let msg = choice?.message;
-    let out = String(msg?.content || '').trim();
     let cqImageToSend = '';
     let voiceB64ToSend = '';
+    let out = '';
 
-    // 如果模型决定调用手机工具
-    if (msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-      console.log(`[工具调用] 小鱼触发了 ${msg.tool_calls.length} 个操作：` + msg.tool_calls.map(tc => `${tc.function.name}(${tc.function.arguments || ''})`).join(', '));
-      messages.push(msg);
-
-      for (const tc of msg.tool_calls) {
-        let args = {};
-        try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
-        let execRes;
-        if (tc.function.name === 'web_search') {
-          execRes = await executeSearchTool(tc.function.name, args);
-        } else if (tc.function.name === 'legal_lookup') {
-          execRes = await executeLegalTool(tc.function.name, args);
-        } else {
-          execRes = await executePhoneTool(tc.function.name, args);
-        }
-        
-        if (execRes.cq_image) {
-          cqImageToSend = execRes.cq_image;
-        }
-        if (execRes.voice_b64) {
-          voiceB64ToSend = execRes.voice_b64;
-        }
-
-        const toolMsg = {
-          role: 'tool',
-          tool_call_id: tc.id,
-          content: JSON.stringify(execRes)
-        };
-        messages.push(toolMsg);
-
-        if (execRes.image_b64) {
-          messages.push({
-            role: 'user',
-            content: [
-              { type: 'text', text: '【这是刚刚手机屏幕截取到的最新真实画面，请观察画面回答】' },
-              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${execRes.image_b64}` } }
-            ]
-          });
-        }
-        if (Array.isArray(execRes.images_b64) && execRes.images_b64.length > 0) {
-          const content = [{ type: 'text', text: `【这是录屏/视频抽出的 ${execRes.images_b64.length} 张连续关键画面，请观察动态过程回答】` }];
-          for (const b64 of execRes.images_b64) {
-            content.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } });
-          }
-          messages.push({ role: 'user', content });
-        }
+    for (let round = 0; round < 3; round++) {
+      const reqPayload = {
+        model: this.model,
+        messages,
+        temperature: 1.1,
+        stream: false,
+      };
+      if (enableTools && round < 2) {
+        reqPayload.tools = ALL_TOOLS;
+        reqPayload.tool_choice = 'auto';
       }
 
-      const res2 = await fetch(this.baseUrl + '/chat/completions', {
+      const res = await fetch(this.baseUrl + '/chat/completions', {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey },
-        body: JSON.stringify({
-          model: this.model,
-          messages,
-          temperature: 1.1,
-          stream: false
-        }),
+        body: JSON.stringify(reqPayload),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-      const raw2 = await res2.text();
-      if (res2.ok) {
-        const json2 = JSON.parse(raw2);
-        out = String(json2.choices?.[0]?.message?.content || '').trim();
+      const raw = await res.text();
+      if (!res.ok) throw new Error('模型返回 ' + res.status + '：' + raw.slice(0, 300));
+
+      let json;
+      try { json = JSON.parse(raw); } catch { throw new Error('模型返回不是 JSON：' + raw.slice(0, 200)); }
+      const choice = json.choices?.[0];
+      const msg = choice?.message;
+      let content = String(msg?.content || '').trim();
+
+      // 提取工具调用：支持标准 tool_calls 与 DeepSeek DSML 文本格式
+      let toolCalls = (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) ? [...msg.tool_calls] : [];
+      if (enableTools && toolCalls.length === 0 && content) {
+        const dsmlCalls = parseDsmlToolCalls(content);
+        if (dsmlCalls.length > 0) {
+          toolCalls = dsmlCalls;
+        }
       }
+
+      // 如果模型触发了工具调用，且未超过轮次限制
+      if (toolCalls.length > 0 && round < 2) {
+        console.log(`[工具调用] 第 ${round + 1} 轮，小鱼触发了 ${toolCalls.length} 个操作：` + toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments || ''})`).join(', '));
+        messages.push({
+          role: 'assistant',
+          content: content || null,
+          tool_calls: toolCalls.map((tc, idx) => ({
+            id: tc.id || `call_${round}_${idx}`,
+            type: 'function',
+            function: tc.function
+          }))
+        });
+
+        for (const tc of toolCalls) {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
+          let execRes;
+          if (tc.function.name === 'web_search') {
+            execRes = await executeSearchTool(tc.function.name, args);
+          } else if (tc.function.name === 'legal_lookup') {
+            execRes = await executeLegalTool(tc.function.name, args);
+          } else {
+            execRes = await executePhoneTool(tc.function.name, args);
+          }
+
+          if (execRes.cq_image) cqImageToSend = execRes.cq_image;
+          if (execRes.voice_b64) voiceB64ToSend = execRes.voice_b64;
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id || `call_${round}_0`,
+            content: JSON.stringify(execRes)
+          });
+
+          if (execRes.image_b64) {
+            messages.push({
+              role: 'user',
+              content: [
+                { type: 'text', text: '【这是刚刚手机屏幕截取到的最新真实画面，请观察画面回答】' },
+                { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${execRes.image_b64}` } }
+              ]
+            });
+          }
+          if (Array.isArray(execRes.images_b64) && execRes.images_b64.length > 0) {
+            const contentParts = [{ type: 'text', text: `【这是录屏/视频抽出的 ${execRes.images_b64.length} 张连续关键画面，请观察动态过程回答】` }];
+            for (const b64 of execRes.images_b64) {
+              contentParts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } });
+            }
+            messages.push({ role: 'user', content: contentParts });
+          }
+        }
+        continue;
+      }
+
+      // 提取最终输出内容
+      out = content;
+      break;
     }
 
-    // 清洗模型思维链和系统提示词内部标签（防止推理模型将思考内容漏出到 QQ 聊天框）
-    out = out.replace(/<think>[\s\S]*?<\/think>/gi, '');
-    out = out.replace(/<system_reminder>[\s\S]*?<\/system_reminder>/gi, '');
+    // 彻底清洗模型思维链、DSML、内部工具标签与系统提示词残留
+    out = cleanAllToolArtifacts(out);
 
     // 捕获草稿箱内容用于动态情绪状态机跃迁（在清洗前提取）
     let draftMoodText = '';
-    const draftMatches = out.match(/[（(]{2}([\s\S]*?)[）)]{2}/g);
+    const draftMatches = out.match(/[（(]{2}([\\s\\S]*?)[）)]{2}/g);
     if (draftMatches) {
       draftMoodText = draftMatches.join(' ');
     }
@@ -524,6 +528,9 @@ export class Brain {
     out = out.replace(/\*[^*]+\*/g, '');
     out = out.replace(/[（）()]/g, '');
     out = out.replace(/\s{2,}/g, ' ').trim();
+
+    // 兜底再次清除任何残留的孤立标签
+    out = cleanAllToolArtifacts(out);
 
     if (cqImageToSend) {
       out = out ? `${out}\n${cqImageToSend}` : cqImageToSend;

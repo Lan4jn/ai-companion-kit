@@ -51,6 +51,15 @@ const SOCIAL_CONFLICT_PATTERNS = [
   /俄乌|巴以|哈马斯|加沙|以色列|核战争/,
 ];
 
+// ── 5. 模型内部语法与工具调用泄漏（DSML/XML/特殊Token） ──────────
+const MODEL_SYNTAX_PATTERNS = [
+  /<[｜|][\s\S]*?[｜|]>/,
+  /<\/?(?:calls|invoke|parameter|tool_call|function)\b/i,
+  /\bDSML\b/i,
+  /\binvoke\s+name=/i,
+  /<think>/i,
+];
+
 // 硬阻断汇总
 const ALL_HARD_PATTERNS = [
   ...POLITICS_PATTERNS,
@@ -58,10 +67,11 @@ const ALL_HARD_PATTERNS = [
   ...VIOLENCE_PATTERNS,
 ];
 
-// 完整拦截词库（包含群体对立）
+// 完整拦截词库（包含群体对立与模型语法泄漏）
 const OUTPUT_BLOCK = [
   ...ALL_HARD_PATTERNS,
   ...SOCIAL_CONFLICT_PATTERNS,
+  ...MODEL_SYNTAX_PATTERNS,
 ];
 
 function test(patterns, text) {
@@ -119,4 +129,67 @@ export const SAFETY_RULES =
   '3. 遇到别人聊这类敏感时事，你直接当没看见或换个日常轻松话题（吃什么、玩什么、天气）。\\n' +
   '4. 绝不评价群体、不搞男女/地域对立。你只是一条可爱的居家小肥鱼。';
 
-export default { checkInput, checkOutput, checkVideo, SAFETY_RULES };
+/**
+ * 清除所有模型内部工具调用语法、思考链、DSML 标签，防止内部语法泄漏到 QQ 聊天中
+ */
+export function cleanAllToolArtifacts(text) {
+  let s = String(text || '');
+
+  // 1. 清除模型思维链与系统提醒标签
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  s = s.replace(/<system_reminder>[\s\S]*?<\/system_reminder>/gi, '');
+
+  // 2. 彻底清除 DeepSeek DSML 标签和整块调用结构
+  s = s.replace(/<[｜|][^>]*?calls>[\s\S]*?(?:<\/[｜|][^>]*?calls>|$)/gi, '');
+  s = s.replace(/<[｜|][^>]*?invoke[^>]*>[\s\S]*?(?:<\/[｜|][^>]*?invoke>|$)/gi, '');
+  s = s.replace(/<invoke[^>]*>[\s\S]*?(?:<\/invoke>|$)/gi, '');
+  s = s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '');
+
+  // 3. 清除所有 DeepSeek 特殊标记：<｜...｜> 与未闭合的 <｜...
+  s = s.replace(/<[｜|][\s\S]*?[｜|]>/g, '');
+  s = s.replace(/<\/?[｜|][^>]*>/g, '');
+
+  // 4. 清除残留的 invoke / parameter 伪标签
+  s = s.replace(/<\/?(?:calls|invoke|parameter|tool_call|function)\b[^>]*>/gi, '');
+  s = s.replace(/\b(?:invoke|parameter)\s+name=["'][^"']*["'][^>]*>/gi, '');
+
+  // 5. 清除纯代码块工具输出
+  s = s.replace(/```(?:json|xml)?\s*\{[\s\S]*?\}\s*```/g, '');
+
+  // 6. 零散清理
+  s = s.replace(/<[｜|][^>]*$/g, '');
+
+  return s.trim();
+}
+
+/**
+ * 从文本中提取 DeepSeek DSML 格式的工具调用（应对模型未走标准 tool_calls API 的情况）
+ */
+export function parseDsmlToolCalls(text) {
+  const toolCalls = [];
+  if (!text || typeof text !== 'string') return toolCalls;
+
+  const invokePattern = /<[｜|]?[^>]*?invoke\s+name=["']([^"']+)["'][^>]*>([\s\S]*?)(?:<\/[｜|]?[^>]*?invoke>|$)/gi;
+  let match;
+  while ((match = invokePattern.exec(text)) !== null) {
+    const name = match[1];
+    const body = match[2];
+    const args = {};
+    const paramPattern = /<[｜|]?[^>]*?parameter\s+name=["']([^"']+)["'][^>]*>([\s\S]*?)(?:<\/[｜|]?[^>]*?parameter>|$)/gi;
+    let pm;
+    while ((pm = paramPattern.exec(body)) !== null) {
+      args[pm[1]] = pm[2].replace(/<[^>]+>/g, '').trim();
+    }
+    toolCalls.push({
+      id: 'dsml_' + Math.random().toString(36).slice(2, 9),
+      type: 'function',
+      function: {
+        name,
+        arguments: JSON.stringify(args)
+      }
+    });
+  }
+  return toolCalls;
+}
+
+export default { checkInput, checkOutput, checkVideo, cleanAllToolArtifacts, parseDsmlToolCalls, SAFETY_RULES };
