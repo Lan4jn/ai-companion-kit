@@ -152,9 +152,12 @@ export class Humanizer {
     const raw = String(text || '').trim();
     if (!raw) return [];
 
+    // 兼容模型输出的字面量反斜杠换行 \n 与真实换行
+    const normalized = raw.replace(/\\n/g, '\n');
+
     // 抽取出 CQ:image 码，防止被分句切割
     const cqImages = [];
-    const sanitized = raw.replace(/\[CQ:image,[^\]]+\]/g, (match) => {
+    const sanitized = normalized.replace(/\[CQ:image,[^\]]+\]/g, (match) => {
       const token = `__CQ_IMAGE_${cqImages.length}__`;
       cqImages.push(match);
       return `\n${token}\n`;
@@ -220,7 +223,7 @@ export class Humanizer {
       res = [...head.filter(Boolean), ...imgParts];
     }
 
-    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹，并做适度单句上限保护（<=32字）
+    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹
     return res.map((part) => {
       let back = part.replace(/\u200B/g, ' ');
       back = back.replace(/__CQ_IMAGE_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
@@ -229,9 +232,14 @@ export class Humanizer {
       back = this.stripTail(back);
       if (back.startsWith('[CQ:')) return back;
       const chars = [...back.trim()];
-      if (chars.length <= 32) return back.trim();
-      const cut = back.slice(0, 32).replace(/[，,；;、\s][^，,；;、\s]*$/, '');
-      return (cut.length >= 8 ? cut : back.slice(0, 32)).trim();
+      if (chars.length <= 36) return back.trim();
+      // 超长单句温和保护（>=36字），优先在后半段标点停顿处自然截断，绝不倒退过深腰斩
+      const head36 = chars.slice(0, 36).join('');
+      const pMatch = head36.match(/^(.{18,36}?)[，,；;、。！？!?\s][^，,；;、。！？!?\s]*$/);
+      if (pMatch && pMatch[1]) {
+        return pMatch[1].trim();
+      }
+      return head36.trim();
     }).filter(Boolean);
   }
 

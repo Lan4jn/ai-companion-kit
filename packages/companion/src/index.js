@@ -539,7 +539,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
         setTyping: (on) => bot.setTyping(key, on),
         send: (m) => bot.send(key, m),
       });
-      console.log('   发出 ' + r.sent + ' 条：' + r.parts.map((p) => p.slice(0, 18)).join(' | '));
+      console.log('   发出 ' + r.sent + ' 条：' + r.parts.map((p) => p.slice(0, 50)).join(' | '));
       try {
         setRoomState(null, { message: cleanOut.slice(0, 80), recentInput: text.slice(0, 20) });
       } catch {}
