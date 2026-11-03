@@ -220,13 +220,22 @@ export class Humanizer {
       res = [...head.filter(Boolean), ...imgParts];
     }
 
-    // 4) 还原 CQ:image 码与空格，并去掉句尾句号与 AI Markdown 痕迹
+    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹，并严格限制单条不超过 10 个字
     return res.map((part) => {
       let back = part.replace(/\u200B/g, ' ');
       back = back.replace(/__CQ_IMAGE_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
       // 去掉 Markdown 粗体 ** 痕迹
       back = back.replace(/\*\*([^*]+)\*\*/g, '$1');
-      return this.stripTail(back);
+      back = this.stripTail(back);
+      if (back.startsWith('[CQ:')) return back;
+      const chars = [...back.trim()];
+      if (chars.length <= 10) return back.trim();
+      const sub = chars.slice(0, 11).join('');
+      const match = sub.match(/^[^\s，,。！？!?；;、~…]{1,10}(?=[\s，,。！？!?；;、~…])/);
+      if (match && match[0].trim().length >= 2) {
+        return match[0].trim();
+      }
+      return chars.slice(0, 10).join('').trim();
     }).filter(Boolean);
   }
 

@@ -334,7 +334,7 @@ export class Memory {
       const timeStr = new Date(r.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
       return `  [${timeStr}] ${r.name}：${r.text}`;
     });
-    return `【群聊前文脉络背景流（你潜水看到的最近 ${lines.length} 条群消息，仅供了解来龙去脉与话题演变，严禁挑选前文旧消息回复，必须针对末尾最新发言回复）：】\n` + lines.join('\n') + '\n';
+    return `【群聊前文脉络背景流（仔细看上面群友怎么打字说话的！真人老群友发言极其短促随性，日常 1~8 个字，绝不带句号，绝不长篇大论分析！你要深度学习模仿群友的口吻接话，且本次回复严格绝不能超过 10 个字）：】\n` + lines.join('\n') + '\n';
   }
 
   /** 把最近对话渲染成一段可注入的文字 */
