@@ -28,6 +28,7 @@ import { OneBot } from './transport-onebot.js';
 import { startPhoneLiving, getPhoneLivingStatus, setVideoBrain } from './phone-living.js';
 import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living.js';
 import { startDouyinLiving, browseDouyinLive, getDouyinLivingStatus, setDouyinRoom } from './douyin-living.js';
+import { startWebLiving, browseWebTopic, getWebLivingStatus } from './web-living.js';
 import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
@@ -255,6 +256,9 @@ async function main() {
   // 启动小鱼抖音自主生活系统（支持抓取真实推荐流、写日记、向老爸汇报）
   startDouyinLiving({ brain, memory, room });
 
+  // 启动小鱼全网冲浪与吃瓜系统（自主看微博/B站/百度热搜、查背景、写日记、聊天分享）
+  startWebLiving({ brain, memory });
+
   // 她自己上网刷B站看视频（不依赖手机，按作息随机醒）
   const biliCfg = cfg.bili || {};
   if (biliCfg.enabled !== false) {
@@ -480,7 +484,27 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
-  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: normalImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint, history, sassy: useSassy });
+  // 全网冲浪与实时热搜吃瓜检测
+  let webHint = '';
+  const wantsWebSurfing = /(去(网上|互联网)?看看|去冲浪|看看热搜|看(看)?热榜|网上有(什么|啥)|今天有什么(瓜|新鲜事|热点)|热搜有(什么|啥))/i.test(text);
+  if (wantsWebSurfing) {
+    try {
+      console.log('   [WebLiving] 收到上网冲浪/看热搜指令，正在实时浏览热搜...');
+      const wRes = await browseWebTopic({ brain, memory, prompt: text });
+      if (wRes && wRes.success) {
+        webHint = `\n【系统特别指令·你刚刚真的在网上冲浪吃瓜逛了一圈热搜】：\n你刚才打开热搜榜看了一圈，重点看了话题：“${wRes.topic}”\n你看到的内容概括：${wRes.details}\n你的随性吐槽感悟：${wRes.mood}\n请按照老群友/贴心闺女随性自然的口吻向对方说两句你刚在网上看到的这个热点/瓜（1~2句，挑核心槽点，严禁机械汇报）！`;
+      }
+    } catch (e) {
+      console.log('   [WebLiving] 实时冲浪失败:', e?.message || e);
+    }
+  } else {
+    const wStatus = getWebLivingStatus();
+    if (wStatus && wStatus.isRecent && wStatus.summary) {
+      webHint = `\n【你今天在网上冲浪吃到的瓜】：${wStatus.summary}。如果聊到网上的事或问你在干嘛，你可以顺口提一嘴。`;
+    }
+  }
+
+  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: normalImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint, history, sassy: useSassy });
   if (useSassy) console.log('   [人格] 本轮用毒舌版');
   if (!out && !voiceB64) { console.log('   （没说话）'); return; }
 
