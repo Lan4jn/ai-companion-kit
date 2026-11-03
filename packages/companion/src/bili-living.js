@@ -483,11 +483,11 @@ export function startBiliLiving({
     timer = setTimeout(loop, gap);
   };
 
-  // 有人回复她 / @她 / 老爸发私信 —— 保持活跃轮询（早8点到深夜24点，每3分钟检查一次），不再被 windowStart(20:00) 屏蔽
+  // 有人回复她 / @她 —— 独立节奏，不受刷视频和每日限额影响
   const mentionLoop = async () => {
     if (!running) return;
     const h = new Date().getHours();
-    if (h >= 8 || h < 2) {
+    if (inWindow(h, ctx.windowStart, ctx.windowEnd)) {
       try {
         await checkMentions();
       } catch (e) {
@@ -499,7 +499,7 @@ export function startBiliLiving({
         console.log('[BiliLiving] 看私信出错: ' + (e?.message || e));
       }
     }
-    if (running) mentionTimer = setTimeout(mentionLoop, ctx.mentionPollMs || 180000);
+    if (running) mentionTimer = setTimeout(mentionLoop, ctx.mentionPollMs || 480000);
   };
   mentionTimer = setTimeout(mentionLoop, 60000);
 
@@ -864,11 +864,11 @@ async function checkPrivateMessages() {
       userId: ownerId,
       userName: ctx.ownerName || '老爸',
       text:
-        `老爸在B站私信跟你聊天/训话。\n\n他说：\n${combinedSaid}\n\n` +
-        `这是B站私信就你们俩。老爸找你说话必须回复，绝不允许装死不回！如果老爸批评你或分享了视频，你可以顺着内容吐槽、辩解、认错或调侃两句；像平时女儿跟老爸说话那样回，随意、亲近、带点小调皮，15~50字，别客套、别长篇大论。\n\n` +
-        `只输出 JSON：{"reply": true, "text": "..."}`,
+        `老爸在B站私信跟你聊天。\n\n他说：\n${combinedSaid}\n\n` +
+        `这是B站私信就你们俩。如果老爸分享了视频，你可以顺着视频内容吐槽、调侃或聊两句；像平时傲娇女儿跟老爸说话那样回，随意、亲近、带点小调皮，15~50字，别客套、别长篇、别说教。\n\n` +
+        `只输出 JSON：{"reply": false} 或 {"reply": true, "text": "..."}`,
       images: [],
-      situation: '你在B站刷视频，老爸在私信里找你聊天、批评或分享视频',
+      situation: '你在B站刷视频，老爸在私信里找你聊天、分享视频',
       history,
       record: false,
       tools: false,
@@ -876,13 +876,8 @@ async function checkPrivateMessages() {
     const raw = String(out?.text || '').trim();
     const mt = raw.match(/\{[\s\S]*\}/);
     if (mt) {
-      try {
-        const j = JSON.parse(mt[0]);
-        if (j.text) text = String(j.text).trim().slice(0, 200);
-      } catch {}
-    }
-    if (!text && raw) {
-      text = raw.replace(/^\{.*\}\s*/, '').trim().slice(0, 200);
+      const j = JSON.parse(mt[0]);
+      if (j.reply && j.text) text = String(j.text).trim().slice(0, 200);
     }
   } catch (e) {}
 
