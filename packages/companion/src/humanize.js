@@ -220,7 +220,7 @@ export class Humanizer {
       res = [...head.filter(Boolean), ...imgParts];
     }
 
-    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹，并严格限制单条不超过 10 个字
+    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹，并做适度单句上限保护（<=32字）
     return res.map((part) => {
       let back = part.replace(/\u200B/g, ' ');
       back = back.replace(/__CQ_IMAGE_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
@@ -229,13 +229,9 @@ export class Humanizer {
       back = this.stripTail(back);
       if (back.startsWith('[CQ:')) return back;
       const chars = [...back.trim()];
-      if (chars.length <= 10) return back.trim();
-      const sub = chars.slice(0, 11).join('');
-      const match = sub.match(/^[^\s，,。！？!?；;、~…]{1,10}(?=[\s，,。！？!?；;、~…])/);
-      if (match && match[0].trim().length >= 2) {
-        return match[0].trim();
-      }
-      return chars.slice(0, 10).join('').trim();
+      if (chars.length <= 32) return back.trim();
+      const cut = back.slice(0, 32).replace(/[，,；;、\s][^，,；;、\s]*$/, '');
+      return (cut.length >= 8 ? cut : back.slice(0, 32)).trim();
     }).filter(Boolean);
   }
 

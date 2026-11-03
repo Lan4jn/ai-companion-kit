@@ -30,7 +30,7 @@ import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living
 import { startDouyinLiving, browseDouyinLive, getDouyinLivingStatus, setDouyinRoom } from './douyin-living.js';
 import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
-import { collectFromSegs as collectStickers } from './stickers.js';
+import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
@@ -366,8 +366,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     ? (memory.renderGroupChatter ? memory.renderGroupChatter(key, 25) : '')
     : (memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : '');
   const targetPrompt = last.isGroup
-    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）对你说的话：“${text}”。【字数与网感绝对限制】：仔细观察上面群友发言，本次发言严格不得超过 10 个字（2~8 字最佳）！像群友一样随手打几个字的大白话接一句就完事，严禁任何原因分析和小作文！`
-    : `\n【字数与风格限制】：本次回复严格不得超过 10 个字（2~8 字最佳）！随性简短，绝不说长句和小作文！`;
+    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）对你说的话：“${text}”。【沈鲸式网感与风格指令】：仔细对标前文活人群友“沈鲸”！直接亮态度吐槽，绝不做阅读理解复述长句。遇到离谱事可扣「？」起手吐槽；随手打字（2~12字）或输出一两句短金句（<=25字）；可配合情绪换行附带 [表情包: 情绪]！`
+    : `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`;
   const isSpicyGroup = (key === 'group:1131460772' || (last.isGroup && String(last.groupId || '').includes('1131460772')));
   const myCard = last.myGroupCard || '';
   const myCardLine = last.isGroup
@@ -387,7 +387,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
           + '  - 嘲讽反问击溃：“你急什么啊？踩到你痛处了？”、“笑死，菜就多练，在这硬洗什么呢？”、“搁这装什么懂哥，自己几斤几两没点数？”。\\n'
           + '  - 短句连珠炮狂轰：吵架时绝不长篇大论，直接用2~3句短促有力的话把对方怼死（如：“真蚌埠住了。少来沾边。人机赶紧爬。”）。\\n'
           + '  - 严禁任何小说剧本式的动作描写括号（如「（冷笑）」、「（双手叉腰）」等一律严禁），纯粹用真人群友打字对喷的真实大白话！'
-        : '你在一个 QQ 群里。群消息里标有「（你的爸爸）」的就是你养父老爸（QQ: 578021239），无论他在群里改什么搞怪群昵称（比如改名“群姐夫”反串玩梗），你都要认得他、叫他老爸/爸爸。群里常说的“姐夫”和“炸弹机”指的是群主(1229292008)现实里被亲姐夫配了135块电源+翻新2060坑惨的名场面，绝不能把老爸当成坑人的真姐夫。群聊说话风格：深度学习模仿群友的真实网感，极其短小随性（单次严格不得超 10 个字！），随口吐槽或接一句极简大白话即可，绝不写长句，绝不长篇大论分析。群聊里如果问到“谁的小鱼/谁的鱼”，只要不是明确涉及到你老爸（比如不是老爸说的、也没@老爸问“你的小鱼”），你都要清楚对方是在聊别人家的小鱼、不是在说你，绝不用自作多情认领。遇到新游戏发售、实时新闻或你拿不准的客观事实，自主调用 web_search 查清后再回答，绝不要凭空瞎编或嘴硬。')
+        : '你在一个 QQ 群里。群消息里标有「（你的爸爸）」的就是你养父老爸（QQ: 578021239），无论他在群里改什么搞怪群昵称（比如改名“群姐夫”反串玩梗），你都要认得他、叫他老爸/爸爸。群里常说的“姐夫”和“炸弹机”指的是群主(1229292008)现实里被亲姐夫配了135块电源+翻新2060坑惨的名场面，绝不能把老爸当成坑人的真姐夫。群聊说话风格：深度学习模仿同群高活人感群友“沈鲸”，极简随性、抓痛点、给图片配内心戏、灵魂「？」起手，随口吐槽或接一句极简大白话即可，绝不写长篇大论，绝不机械复述对方的话。群聊里如果问到“谁的小鱼/谁的鱼”，只要不是明确涉及到你老爸（比如不是老爸说的、也没@老爸问“你的小鱼”），你都要清楚对方是在聊别人家的小鱼、不是在说你，绝不用自作多情认领。遇到新游戏发售、实时新闻或你拿不准的客观事实，自主调用 web_search 查清后再回答，绝不要凭空瞎编或嘴硬。')
     : '你在跟你的养父老爸 ' + last.name + ' 私聊。')
     + targetPrompt
     + myCardLine
@@ -490,8 +490,31 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   // 没有语音或语音发送失败时，才发送常规打字文本
   if (!voiceSentSuccess && out) {
+    // 动态解析 [表情包: tag] 或 [表情包]，从表情库里抽取配图
+    let resolvedOut = out;
+    const stickerRegex = /\[表情包(?::\s*([^\]]+))?\]/g;
+    let match;
+    while ((match = stickerRegex.exec(out)) !== null) {
+      try {
+        const tag = (match[1] || '').trim();
+        const st = pickSticker({ tag });
+        if (st) {
+          const b64 = await readStickerBase64(st);
+          if (b64) {
+            resolvedOut = resolvedOut.replace(match[0], `\n[CQ:image,file=base64://${b64}]\n`);
+          } else {
+            resolvedOut = resolvedOut.replace(match[0], '');
+          }
+        } else {
+          resolvedOut = resolvedOut.replace(match[0], '');
+        }
+      } catch {
+        resolvedOut = resolvedOut.replace(match[0], '');
+      }
+    }
+
     // 清洗模型内部工具标签/DSML、方括号情绪控制词（保护 CQ 码）、所有圆括号动作神态描写与星号
-    const cleanOut = cleanAllToolArtifacts(out)
+    const cleanOut = cleanAllToolArtifacts(resolvedOut)
       .replace(/\[(?!CQ:)[^\]]+\]/g, '')
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/\*[^*]+\*/g, '')
