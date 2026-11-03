@@ -429,23 +429,14 @@ export class Brain {
       }
     }
 
-    // 表情包不是照片：真人看到表情包不会描述画面，只会直接反应。
-    // 但 QQ 标成「动画表情」(sub_type=1) 的图也可能是对方真想让你看的内容（比如一张画），
-    // 所以照样过一遍视觉，只把结果当背景知识塞进去，不逼她描述画面。
+    // 表情包不是照片：真人看到表情包绝不评价或描述画面！
+    // 如果带了文字，就只针对文字回答；如果是纯表情包斗图，要么甩表情包，要么回问号/冷淡短句。
     if (stickers > 0) {
-      let stickerHint = '';
-      if (Array.isArray(stickerImages) && stickerImages.length > 0) {
-        const urls = (await Promise.all(stickerImages.map((u) => toDataUrl(u)))).filter(Boolean);
-        const descs = (await Promise.all(urls.map((d) => this.describeImage(d)))).filter(Boolean);
-        if (descs.length > 0) {
-          stickerHint = '\n\n【对方发的表情包画面是这样的（平时别去描述它；但对方问起里面有什么，你要知道，不能编）】\n'
-            + descs.map((d, i) => `第${i + 1}张：${d}`).join('\n');
-        }
-      }
       const base = typeof userContent === 'string' ? userContent : String(text || '');
-      const tail = `（对方这次发的是 ${stickers} 个表情包，不是照片。表情包不要描述画面内容，也别来一句"这图好搞笑"式的点评——真人的反应是直接笑、接梗、骂回去、或者干脆回一个表情。）`
-        + stickerHint;
-      userContent = base ? `${base}\n\n${tail}` : tail;
+      const tail = base.trim()
+        ? `（注：对方附带发了表情包。严禁评价、点评、分析或描述任何表情包本身！100% 只针对对方说的话接茬）`
+        : `（注：对方发了纯表情包斗图。严禁对表情包说三道四进行文字点评！真人要么直接回表情包 [表情包: 情绪]，要么扣个「？」或冷笑，绝不废话评价表情包）`;
+      userContent = base ? `${base}\n${tail}` : tail;
     }
     messages.push({ role: 'user', content: userContent });
 
