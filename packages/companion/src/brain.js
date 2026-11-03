@@ -294,6 +294,47 @@ export class Brain {
     }
   }
 
+  /**
+   * 轻量直接调用底层 LLM 进行内部反思、提炼或总结（不走角色外壳和工具系统）
+   */
+  async complete({ system = '', prompt, max_tokens = 1000, temperature = 0.7, json = false } = {}) {
+    if (!prompt) return null;
+    const messages = [];
+    if (system) messages.push({ role: 'system', content: String(system) });
+    messages.push({ role: 'user', content: String(prompt) });
+
+    const payload = {
+      model: this.model,
+      messages,
+      max_tokens,
+      temperature,
+      stream: false,
+    };
+    if (json) {
+      payload.response_format = { type: 'json_object' };
+    }
+
+    try {
+      const res = await fetch(this.baseUrl + '/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(Math.min(this.timeoutMs, 60000)),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`[Brain.complete] HTTP ${res.status}: ${errText.slice(0, 150)}`);
+        return null;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      return typeof content === 'string' ? content.trim() : null;
+    } catch (e) {
+      console.error(`[Brain.complete] 异常: ${e?.message || e}`);
+      return null;
+    }
+  }
+
   async reply(input) {
     const { key, userId, userName, text, images = [], stickers = 0, stickerImages = [], situation = '', history = [], record = true } = input;
 
