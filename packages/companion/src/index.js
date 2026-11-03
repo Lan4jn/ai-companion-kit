@@ -358,15 +358,19 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   }
   let normalImages = images.filter((u) => !stickerUrls.includes(u));
 
-  // 连续对话视觉补偿：只有发消息的人自己在最近 90 秒内发过图，或者消息里明确带了“看图/这张图”等指代时才补偿
+  // 连续对话视觉补偿：必须严格防误触，杜绝把群友发的图强行塞给无关对话！
   if (normalImages.length === 0 && recentGroupImages.has(key)) {
-    const cutoff = Date.now() - 90000;
+    const cutoff = Date.now() - 45000; // 缩短到 45 秒内
     const validRecent = (recentGroupImages.get(key) || []).filter((item) => item.time >= cutoff && !stickerUrls.includes(item.url));
     const userImg = validRecent.slice().reverse().find((item) => item.userId === last.userId);
-    // 在群聊里绝不能把别人的图强行按到当前说话人头上，除非消息明确说了“看图/这图/图里”
-    const hasImageRef = /(图|照|看|瞅|辨|认|查|这|那|上面|发出来的)/i.test(text);
-    const candidate = userImg || (hasImageRef ? validRecent[validRecent.length - 1] : null);
-    if (candidate && (candidate.userId === last.userId || hasImageRef)) {
+
+    // 严禁单字粗暴匹配！必须是明确具体的看图词组（如“看看这张图”、“图里是啥”、“这截图”）
+    const hasExplicitImageRef = /(看(看)?(这张?|上面这?|发出来的?|那个?)?图|这(张|个)?(图|照片|截图)|图里|图片里|上面那张)/i.test(text);
+
+    // 1. 同一人在 45 秒内发了图，紧接着发文字：自然关联他自己的图
+    // 2. 只有当明确带有“看图/这图里”这种指令时，才允许跨人看上一张图；老爸说话且未指代图片时绝不跨人塞图！
+    const candidate = userImg || (hasExplicitImageRef ? validRecent[validRecent.length - 1] : null);
+    if (candidate && (candidate.userId === last.userId || hasExplicitImageRef)) {
       normalImages.push(candidate.url);
       console.log(`   [视觉补偿] 自动关联 ${candidate.name} 在 ${Math.round((Date.now() - candidate.time) / 1000)}秒前发出的图片`);
     }
