@@ -34,7 +34,7 @@ export class Humanizer {
     this.minMs = opts.minMs ?? 1200;
     this.maxMs = opts.maxMs ?? 6000;
     this.jitter = opts.jitter ?? 0.2;
-    this.burstMax = opts.burstMax ?? 4;
+    this.burstMax = opts.burstMax ?? 3;
     this.gapRange = opts.gapRange ?? [700, 2600];
     this.longGapChance = opts.longGapChance ?? 0.25;
     this.longGapRange = opts.longGapRange ?? [3000, 9000];
@@ -143,10 +143,10 @@ export class Humanizer {
   /**
    * 把一段长回复切成"像人打出来的"若干条
    * - 保护 [CQ:image,...] 码不被切散
-   * - 已经在换行的地方切开
-   * - 太长的一句按标点再切
-   * - 保护英文单词、数字和中英文之间的空格不被误切
-   * - 切完不超过 burstMax 条（多余的合并回最后一条）
+   * - 核心原则：由小鱼自己决定分条（按换行 \n 切分）
+   * - 去掉逗号/分号/顿号/破折号机械拆句机制，保全完整语义与神转折包袱
+   * - 单次发送最多 burstMax 条（超量部分自然合并回最后一条，绝不物理截断丢失）
+   * - 句尾句号自动清理，去除 AI 腔
    */
   split(text, max = this.burstMax) {
     const raw = String(text || '').trim();
@@ -166,49 +166,30 @@ export class Humanizer {
       .replace(/([\u4e00-\u9fa5])\s+([a-zA-Z0-9])/g, '$1\u200B$2')
       .replace(/([a-zA-Z0-9])\s+([\u4e00-\u9fa5])/g, '$1\u200B$2');
 
-    // 先按换行
-    const parts = protectedText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    // 1) 先按换行切 —— 由小鱼自己决定是否分条发送（每一行代表一条独立气泡）
+    const lines = protectedText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
     const out = [];
-    for (const p of parts) {
-      if (p.startsWith('__CQ_IMAGE_')) { out.push(p); continue; }
 
-      // 1) 先按句末标点切 —— 语义边界优先
-      const sentences = p
-        .split(/(?<=[。！？!?…~]+)(?![。！？!?…~])/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+    for (const p of lines) {
+      if (p.startsWith('__CQ_IMAGE_')) {
+        out.push(p);
+        continue;
+      }
 
-      for (const s of sentences) {
-        // 检查里面是否有明显的逗号、分号或中文分句空格（英文/数字间空格已提前保护）
-        const clauses = s.split(/(?<=[，,；;、])|\s+/).map((x) => x.trim().replace(/[，,；;、]+$/, '')).filter(Boolean);
-
-        // 如果没有逗号/分号/空格，直接就是单句
-        if (clauses.length <= 1) {
-          out.push(s);
-          continue;
-        }
-
-        let buf = '';
-        for (const c of clauses) {
-          if (!buf) {
-            buf = c;
-            continue;
-          }
-          // 如果前一个积累块有效字数少于 4 字（如 "哈哈"、"行吧"），或者当前块只有 1~2 个字，合并
-          const bufLen = [...buf.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
-          const cLen = [...c.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
-          if (bufLen < 4 || cLen < 3) {
-            buf += ' ' + c;
-          } else {
-            out.push(buf);
-            buf = c;
-          }
-        }
-        if (buf) out.push(buf);
+      // 仅在单行异常冗长（> 45 字）且带有句末独立终结标点（。！？!?）时做自然分句兜底，
+      // 坚决不用逗号、分号、破折号拆句，保护句子前后完整意思
+      if ([...p].length > 45 && /[。！？!?]/.test(p)) {
+        const segs = p
+          .split(/(?<=[。！？!?]+)(?![。！？!?])/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        out.push(...(segs.length ? segs : [p]));
+      } else {
+        out.push(p);
       }
     }
 
-    // 合并太短的碎片（<5个字且合并后不超过22字）
+    // 2) 合并极短无意义碎片（例如单独残留的标点或 < 3 字的碎片，与相邻句子合并）
     const merged = [];
     for (const s of out) {
       const last = merged[merged.length - 1];
@@ -217,56 +198,34 @@ export class Humanizer {
       } else {
         const lastLen = last ? [...last.replace(/\u200B/g, '').replace(/\s+/g, '')].length : 0;
         const sLen = [...s.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
-        if (last && lastLen < 5 && (lastLen + sLen <= 22)) {
-          merged[merged.length - 1] = last + (/[，,；;、]$/.test(last) ? '' : ' ') + s;
+        if (last && lastLen < 3 && (lastLen + sLen <= 32)) {
+          merged[merged.length - 1] = last + ' ' + s;
         } else {
           merged.push(s);
         }
       }
     }
-    // 超量时主动精简：真人老群友在群里从不长篇大论刷屏。
-    // 如果切出来的句子超过 max（默认 2 条），智能提炼前 max 条核心表述，多余长句废话直接丢弃
+
+    // 3) 超量处理（限制单次最多 max 条，默认 3 条）：
+    // 关键改造：把多余的分句自然合并进最后一条，绝对不物理丢弃！保全所有反转和包袱！
     let res = merged;
     if (merged.length > max) {
       const textParts = merged.filter((p) => !p.startsWith('__CQ_IMAGE_'));
       const imgParts = merged.filter((p) => p.startsWith('__CQ_IMAGE_'));
       const textLimit = Math.max(1, max - imgParts.length);
 
-      const head = [];
-      let cur = '';
-      for (const part of textParts) {
-        if (head.length >= textLimit) break;
-        if (!cur) {
-          cur = part;
-        } else {
-          const curLen = [...cur.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
-          const partLen = [...part.replace(/\u200B/g, '').replace(/\s+/g, '')].length;
-          if (curLen + partLen <= 24 && head.length + 1 < textLimit) {
-            cur += ' ' + part;
-          } else {
-            head.push(cur);
-            cur = part;
-          }
-        }
-      }
-      if (cur && head.length < textLimit) head.push(cur);
-
-      // 单条超过 32 字进行自然断句截取，坚决不发大长段
-      const trimmedHead = head.map((s) => {
-        if (s.length > 32) {
-          const cut = s.slice(0, 32).replace(/[，,；;、\s][^，,；;、\s]*$/, '');
-          return (cut.length >= 8 ? cut : s.slice(0, 32));
-        }
-        return s;
-      });
-
-      res = [...trimmedHead.filter(Boolean), ...imgParts];
+      const head = textParts.slice(0, textLimit - 1);
+      const rest = textParts.slice(textLimit - 1).join(' ');
+      if (rest) head.push(rest);
+      res = [...head.filter(Boolean), ...imgParts];
     }
 
-    // 还原 CQ:image 码与空格，并去掉句尾句号
+    // 4) 还原 CQ:image 码与空格，并去掉句尾句号与 AI Markdown 痕迹
     return res.map((part) => {
       let back = part.replace(/\u200B/g, ' ');
       back = back.replace(/__CQ_IMAGE_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
+      // 去掉 Markdown 粗体 ** 痕迹
+      back = back.replace(/\*\*([^*]+)\*\*/g, '$1');
       return this.stripTail(back);
     }).filter(Boolean);
   }
