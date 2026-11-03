@@ -1,3 +1,6 @@
+import http from 'node:http';
+import tls from 'node:tls';
+
 /**
  * 实时联网搜索工具 (web_search)
  * ─────────────────────────────────────────────────────────────
@@ -90,17 +93,48 @@ export async function executeSearchTool(name, args = {}) {
     console.warn(`[web_search] AnySearch 失败: ${err.message}，尝试备用搜索...`);
   }
 
-  // 备用搜索：DuckDuckGo HTML 提取
+  // 备用搜索：DuckDuckGo HTML 提取（经由本地 7890 局部代理）
   try {
-    const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const ddgRes = await fetch(ddgUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      signal: AbortSignal.timeout(8000)
+    const html = await new Promise((resolve, reject) => {
+      const u = new URL('https://html.duckduckgo.com/html/');
+      const req = http.request({
+        host: '127.0.0.1',
+        port: 7890,
+        method: 'CONNECT',
+        path: `${u.hostname}:443`,
+        timeout: 8000,
+      });
+      req.on('timeout', () => req.destroy(new Error('Proxy connect timeout')));
+      req.on('connect', (res, socket) => {
+        if (res.statusCode !== 200) return reject(new Error('Proxy CONNECT status ' + res.statusCode));
+        const tlsSocket = tls.connect({ socket, servername: u.hostname, timeout: 8000 }, () => {
+          const body = `q=${encodeURIComponent(query)}`;
+          const headers = [
+            `POST ${u.pathname}${u.search} HTTP/1.1`,
+            `Host: ${u.hostname}`,
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Content-Type: application/x-www-form-urlencoded',
+            `Content-Length: ${Buffer.byteLength(body)}`,
+            'Connection: close',
+            '',
+            body
+          ].join('\r\n');
+          tlsSocket.write(headers);
+        });
+        tlsSocket.on('timeout', () => tlsSocket.destroy(new Error('TLS socket timeout')));
+        let data = '';
+        tlsSocket.on('data', chunk => data += chunk);
+        tlsSocket.on('end', () => {
+          const bodyIdx = data.indexOf('\r\n\r\n');
+          resolve(bodyIdx >= 0 ? data.slice(bodyIdx + 4) : data);
+        });
+        tlsSocket.on('error', reject);
+      });
+      req.on('error', reject);
+      req.end();
     });
-    if (ddgRes.ok) {
-      const html = await ddgRes.text();
+
+    if (html) {
       // 提取结果中的标题和摘要
       const snippets = [];
       const regex = /<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/gi;
