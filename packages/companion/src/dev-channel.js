@@ -224,3 +224,42 @@ async function act(id,action){
 }
 load();setInterval(load,15000);
 </script></body></html>`;
+
+// ── 她找开发者的完整聊天记录页（挂在 18888/dev/chat）────────
+export const CHAT_PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>小鱼和开发者的对话</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:20px;background:#0f1115;color:#e6e6e6;font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:20px;margin:0 0 4px}.sub{color:#888;font-size:13px;margin:0 0 20px}
+a.nav{color:#5a8fd8;font-size:13px;text-decoration:none;margin-right:14px}
+.turn{background:#181b22;border:1px solid #262b36;border-radius:12px;padding:16px;margin-bottom:14px}
+.who{font-size:12px;color:#5c6370;margin-bottom:6px}
+.me{color:#7fb1ff;white-space:pre-wrap}.him{color:#9ee6b0;white-space:pre-wrap;margin-top:10px}
+.err{color:#d98;font-size:13px;margin-top:8px}
+.empty{color:#666;padding:30px 0;text-align:center}
+</style></head><body>
+<h1>小鱼和开发者的对话</h1>
+<p class="sub">
+  <a class="nav" href="/dev">需求箱</a><a class="nav" href="/">回房间</a><a class="nav" href="/monitor">看屏幕</a>
+  她主动找开发者说话时，两边原话都记在这儿。共 <span id="cnt">0</span> 条。
+</p>
+<div id="list"><div class="empty">加载中…</div></div>
+<script>
+function esc(s){return String(s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+async function load(){
+  var j=await (await fetch('/dev/chat/list')).json();
+  var list=document.getElementById('list');
+  document.getElementById('cnt').textContent=j.chat.length;
+  if(!j.chat.length){list.innerHTML='<div class="empty">她还没找开发者说过话。</div>';return;}
+  list.innerHTML=j.chat.map(function(x){
+    var t=new Date(x.at).toLocaleString('zh-CN');
+    var sec=(x.ms/1000).toFixed(1);
+    return '<div class="turn"><div class="who">'+t+' · 等了 '+sec+' 秒</div>'
+      + '<div class="me">小鱼：'+esc(x.me)+'</div>'
+      + (x.reply?'<div class="him">开发者：'+esc(x.reply)+'</div>':'')
+      + (x.err?'<div class="err">（没成：'+esc(x.err)+'）</div>':'')
+      + '</div>';
+  }).join('');
+}
+load();setInterval(load,20000);
+</script></body></html>`;

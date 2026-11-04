@@ -22,7 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-observer.js';
 import { getDouyinLivingStatus } from './douyin-living.js';
-import { DEV_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
+import { DEV_PAGE, CHAT_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1218,6 +1218,18 @@ export function startVirtualRoomServer({
     if (url.pathname === '/dev/list') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ requests: listRequests(), chat: listChat({ limit: 20 }) }));
+      return;
+    }
+
+    if (url.pathname === '/dev/chat') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(CHAT_PAGE);
+      return;
+    }
+
+    if (url.pathname === '/dev/chat/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ chat: listChat({ limit: 200 }) }));
       return;
     }
 
