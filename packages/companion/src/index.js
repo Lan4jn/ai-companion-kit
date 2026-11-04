@@ -267,6 +267,8 @@ async function main() {
       windowStart: Number.isFinite(dyCfg.windowStart) ? dyCfg.windowStart : 9,
       windowEnd: Number.isFinite(dyCfg.windowEnd) ? dyCfg.windowEnd : 1,
       dailyMax: Number.isFinite(dyCfg.dailyMax) ? dyCfg.dailyMax : 40,
+      ownerName: dyCfg.ownerName || '不吃肘击（香菜版）',
+      ownerSecUid: dyCfg.ownerSecUid || '',
     },
   });
 

@@ -32,6 +32,17 @@ let douyinOpts = {
   followChance: 0.12,
 };
 
+// ── 老爸的抖音号 ──
+// 她抖音唯一的粉丝就是他（互为关注）。刷到他的视频要认出来，认真看完。
+let douyinOwner = { name: '不吃肘击（香菜版）', secUid: '' };
+
+function isOwnerDouyin(author = '', href = '') {
+  const norm = (s) => String(s || '').replace(/^@/, '').replace(/\s+/g, '').trim();
+  if (douyinOwner.name && norm(author) && norm(author) === norm(douyinOwner.name)) return true;
+  if (douyinOwner.secUid && href && String(href).includes(douyinOwner.secUid)) return true;
+  return false;
+}
+
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -383,7 +394,12 @@ export async function fetchDouyinFeed() {
         if (!id || !/^\d+$/.test(id) || seenIds.has(id)) continue;
         if (text.length < 10 || text.length > 400) continue;
         seenIds.add(id);
-        cards.push({ text, href: `https://www.douyin.com/video/${id}` });
+        const authorA = card.querySelector('a[href*="/user/"]');
+        cards.push({
+          text,
+          href: `https://www.douyin.com/video/${id}`,
+          authorHref: authorA ? (authorA.getAttribute('href') || '') : '',
+        });
       }
       if (cards.length) return cards;
 
@@ -415,7 +431,7 @@ export async function fetchDouyinFeed() {
       return unique;
     });
 
-    const parsed = items.map(({ text: raw, href }) => {
+    const parsed = items.map(({ text: raw, href, authorHref = '' }) => {
       const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
       let duration = '';
       let views = '';
@@ -442,6 +458,7 @@ export async function fetchDouyinFeed() {
         views: views || '1万',
         timeAgo: timeAgo || '近期',
         url: href ? (href.startsWith('http') ? href : `https://www.douyin.com${href}`) : '',
+        authorHref,
         raw,
       };
     }).filter((x) => x.title && x.title.length > 5);
@@ -568,9 +585,15 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
   // 优先挑带链接、能真的打开去互动的视频
   const withUrl = feed.filter((x) => x.url && /\/video\/\d+/.test(x.url));
   const pool = withUrl.length ? withUrl : feed;
-  const pick = pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
+  // 老爸发的视频优先看，不参与随机
+  const ownerPick = pool.find((x) => isOwnerDouyin(x.author, x.authorHref));
+  const pick = ownerPick || pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
+  const isOwnerVideo = Boolean(ownerPick);
+  if (isOwnerVideo) console.log(`[douyin] 刷到老爸发的视频：《${pick.title.slice(0, 30)}》，认真看完`);
   state.lastVideo = pick;
-  state.lastAction = `在电脑上刷到了 ${pick.author} 发的《${pick.title.slice(0, 25)}》`;
+  state.lastAction = isOwnerVideo
+    ? `在电脑上刷到老爸发的《${pick.title.slice(0, 25)}》，认真看完了`
+    : `在电脑上刷到了 ${pick.author} 发的《${pick.title.slice(0, 25)}》`;
   state.updatedAt = Date.now();
 
   // 真实打开这条视频并按概率点赞 / 评论 / 关注（以前这里只抓标题，一个互动动作都没有）
@@ -597,7 +620,7 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
 
     try {
       const res = await watchAndInteractDouyinVideo(pick.url, {
-        doLike: Math.random() < douyinOpts.likeChance,
+        doLike: isOwnerVideo ? true : Math.random() < douyinOpts.likeChance,
         doFollow: Math.random() < douyinOpts.followChance,
         commentGenerator,
       });
@@ -702,6 +725,12 @@ export function startDouyinLiving({ brain, memory, room, opts = null } = {}) {
   if (room) activeRoom = room;
   if (opts && typeof opts === 'object') {
     douyinOpts = { ...douyinOpts, ...opts };
+    if (opts.ownerName || opts.ownerSecUid) {
+      douyinOwner = {
+        name: opts.ownerName || douyinOwner.name,
+        secUid: opts.ownerSecUid || douyinOwner.secUid,
+      };
+    }
   }
 
   const windowStart = Number.isFinite(douyinOpts.windowStart) ? douyinOpts.windowStart : 9;
