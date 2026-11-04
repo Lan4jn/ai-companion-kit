@@ -89,14 +89,14 @@ export function observeIncoming(msg, selfId = '') {
     if (raw.includes(`qq=${selfId}`) || raw.includes(`"qq":"${selfId}"`)) hit = { text: '' };
   }
   if (!hit && /(小鱼|小肥鱼|鱼形RBQ)/.test(text)) hit = { text: '' };
-  if (!hit) return;
+  if (!hit) return '';
 
   // 2. 判性
   let type = '';
   if (CRITICISM.test(text)) type = 'criticism';
   else if (PRAISE.test(text)) type = 'praise';
   else if (INCIDENT.test(text)) type = 'incident';
-  if (!type) return;
+  if (!type) return '';
 
   const ev = {
     at: Date.now(),
@@ -124,6 +124,8 @@ export function observeIncoming(msg, selfId = '') {
       setTimeout(() => { distill().catch(() => {}); }, 200);
     }
   }
+
+  return type;
 }
 
 /** 让模型把批评归纳成"以后别做X" */

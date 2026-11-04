@@ -207,8 +207,10 @@ async function main() {
       if (msg.isGroup) {
         memory.logGroupChatter({ groupKey: msg.key, userId: msg.userId, name: msg.name, text: msg.text });
         memory.touch(msg.userId, { name: msg.name });
-        chatterLearner.feed(msg);
-        observeIncoming(msg, bot.selfId);
+        // 先看这条是不是在骂她；骂她的话不能当"群风样本"学，
+        // 否则一边让她收敛，一边教她这么说话
+        const growthType = observeIncoming(msg, bot.selfId);
+        if (growthType !== 'criticism') chatterLearner.feed(msg);
         // 顺手把群友发的表情包捡进库（只认 sub_type=1 / mface，不阻塞对话）
         collectStickers(msg.raw, { source: msg.key, maxPerMsg: 2 })
           .then((r) => { if (r.collected) console.log(`[表情库] 收到 ${r.collected} 张`); })
