@@ -34,7 +34,7 @@ import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
-import { initGroupBridge, startOutboxWorker } from './group-bridge.js';
+import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -348,6 +348,7 @@ async function main() {
 export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
+  setCurrentChat(key);
   const isOwnerTurn = cfg.ownerIds.includes(last.userId);
   const relVerdict = rel ? rel.verdict(last.userId, { isOwner: isOwnerTurn }) : 'normal';
 

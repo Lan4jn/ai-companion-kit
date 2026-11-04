@@ -8,6 +8,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 let bridge = null;
+let currentChat = '';
+
+/** 当前轮次正在说话的会话（group:xxx / private:xxx），用于防止在当前群里重复发言 */
+export function setCurrentChat(key) {
+  currentChat = String(key || '');
+}
 
 export function initGroupBridge({ bot, dataDir = './data', limits = {} } = {}) {
   bridge = {
@@ -122,6 +128,9 @@ export function enqueueGroupMessage({ groupId, text, atQq } = {}) {
   const body = String(text || '').trim().slice(0, 200);
   if (!gid || !body) return { status: 'error', message: '群号或内容为空' };
   if (!allowed(gid)) return { status: 'error', message: `我不能往群 ${gid} 发消息` };
+  if (currentChat === `group:${gid}`) {
+    return { status: 'error', message: '你现在就在这个群里说话，直接说就行，不用排队' };
+  }
 
   // 按"一次命令"计数：60 秒内的连续入队算同一条命令，最多 maxPerCommand 条
   const now = Date.now();
