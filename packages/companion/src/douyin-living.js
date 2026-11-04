@@ -167,25 +167,38 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
       };
     }
 
+    // 抖音详情页是客户端渲染，必须等播放器控件出现，否则抓到的全是空
+    try {
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-e2e="detail-video-info"]')),
+        { timeout: 25000 }
+      );
+      await page.waitForTimeout(2500);
+    } catch {
+      console.log('[douyin] 详情页控件 25 秒内未出现，可能被限流');
+    }
+
     // 提取视频元数据与评论
     const info = await page.evaluate(() => {
-      const titleEl = document.querySelector('h1, [data-e2e="detail-video-info"]');
-      let title = document.title;
-      if (titleEl && titleEl.innerText) {
-        title = titleEl.innerText.split('\n')[0].trim();
-      }
-      const authorEl = document.querySelector('[data-e2e="user-info"] a, [data-e2e="user-info"] p, [data-e2e="user-info"] span, .account-name');
-      const author = (authorEl ? authorEl.innerText.trim() : '创作者').replace(/\n.*/s, '');
+      const box = document.querySelector('[data-e2e="detail-video-info"]');
+      const lines = (box ? box.innerText : '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const titleFromBox = lines.filter((l) => !l.startsWith('#')).sort((a, b) => b.length - a.length)[0] || '';
+      const title = titleFromBox || lines[0] || document.title.replace(/ - 抖音$/, '') || '抖音视频';
+
+      const userBox = document.querySelector('[data-e2e="user-info"]');
+      const rawAuthor = ((userBox ? userBox.innerText : '') || '').split('\n')[0].trim();
+      const author = rawAuthor.replace(/(粉丝|获赞|关注|作品|私信).*$/, '').trim() || '创作者';
+
       const digg = document.querySelector('[data-e2e="video-player-digg"]');
       const comments = Array.from(document.querySelectorAll('[data-e2e="comment-list"] p, [data-e2e="comment-list"] span'))
-        .map(e => e.innerText?.trim())
-        .filter(t => t && t.length > 5 && t.length < 100);
+        .map((e) => e.innerText?.trim())
+        .filter((t) => t && t.length > 5 && t.length < 100);
 
       return {
-        title: title.replace(/ - 抖音$/, '').trim(),
+        title: title.slice(0, 80),
         author,
         likes: digg ? digg.innerText.trim() : '',
-        topComments: Array.from(new Set(comments)).slice(0, 5)
+        topComments: Array.from(new Set(comments)).slice(0, 5),
       };
     });
 
