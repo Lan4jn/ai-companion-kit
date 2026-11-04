@@ -6,6 +6,8 @@
  *   - 合并转发聊天记录（多层嵌套套娃转发、content 节点数组、QQ Ark multimsg、resid 自动解析）
  *   - 引用回复消息自动追溯
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 /** 从消息段里提取所有图片 URL / 本地文件路径（支持段对象与 CQ 码字符串） */
@@ -168,13 +170,16 @@ function findReply(segs) {
 }
 
 export class OneBot {
-  constructor({ wsUrl, httpUrl, accessToken = '', onMessage }) {
+  constructor({ wsUrl, httpUrl, accessToken = '', onMessage, dataDir = './data' }) {
     this.wsUrl = wsUrl;
     this.httpUrl = (httpUrl || '').replace(/\/+$/, '');
     this.accessToken = accessToken;
     this.onMessage = onMessage;
+    this.dataDir = dataDir || './data';
     this.selfId = '';
     this.nameCache = new Map();
+    this.groupMembers = new Map();   // groupId -> Map(qq -> { name, card, role })
+    this.memberSyncedAt = new Map(); // groupId -> ms
     this.pendingFriendRequests = new Map(); // userId -> { flag, time, comment }
     this.myGroupCards = new Map(); // groupId -> card
     this.ws = null;
@@ -182,10 +187,92 @@ export class OneBot {
     this.#connect();
   }
 
+  /** 群成员表落盘路径 */
+  #membersFile() {
+    return path.join(this.dataDir, 'group-members.json');
+  }
+
+  /** 重启后把上次拉到的群成员读回内存，避免每条消息都打单查接口 */
+  loadGroupMembers() {
+    try {
+      const file = this.#membersFile();
+      if (!fs.existsSync(file)) return 0;
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      let n = 0;
+      for (const [gid, members] of Object.entries(raw.groups || {})) {
+        const map = new Map();
+        for (const m of members) {
+          if (!m || !m.qq) continue;
+          map.set(String(m.qq), { name: m.name || '', card: m.card || '', role: m.role || 'member' });
+          n++;
+        }
+        this.groupMembers.set(String(gid), map);
+      }
+      return n;
+    } catch (e) {
+      console.warn('   [OneBot] 群成员表读取失败：' + e.message);
+      return 0;
+    }
+  }
+
+  /** 拉一次整群成员并落盘；同一群默认 6 小时内不重复拉 */
+  async syncGroupMembers(groupId, { minIntervalMs = 6 * 3600 * 1000 } = {}) {
+    const gid = String(groupId || '');
+    if (!gid) return { ok: false, error: 'no groupId' };
+    const last = this.memberSyncedAt.get(gid) || 0;
+    if (Date.now() - last < minIntervalMs) {
+      return { ok: true, skipped: true, count: (this.groupMembers.get(gid) || new Map()).size };
+    }
+    const res = await this.api('get_group_member_list', { group_id: Number(gid) });
+    const list = res.ok ? (res.data?.data ?? res.data) : null;
+    if (!Array.isArray(list)) return { ok: false, error: res.error || 'bad response' };
+    const map = new Map();
+    for (const m of list) {
+      const qq = String(m?.user_id || '');
+      if (!qq) continue;
+      map.set(qq, { name: String(m.nickname || ''), card: String(m.card || ''), role: String(m.role || 'member') });
+    }
+    this.groupMembers.set(gid, map);
+    this.memberSyncedAt.set(gid, Date.now());
+    // 顺手预热 nameCache：之后 resolveName 不用再一个个打 API
+    for (const [qq, info] of map) {
+      const display = info.card || info.name;
+      if (display && !this.nameCache.has(qq)) this.nameCache.set(qq, display);
+    }
+    this.#saveGroupMembers();
+    return { ok: true, count: map.size };
+  }
+
+  #saveGroupMembers() {
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      const groups = {};
+      for (const [gid, map] of this.groupMembers) {
+        groups[gid] = [...map].map(([qq, info]) => ({ qq, ...info }));
+      }
+      fs.writeFileSync(this.#membersFile(), JSON.stringify({ updatedAt: Date.now(), groups }, null, 1));
+    } catch (e) {
+      console.warn('   [OneBot] 群成员表写入失败：' + e.message);
+    }
+  }
+
+  /** 只在本地群成员表里查名字，不发请求 */
+  groupMemberName(qq, groupId) {
+    const map = this.groupMembers.get(String(groupId || ''));
+    if (!map) return '';
+    const info = map.get(String(qq));
+    return info ? (info.card || info.name) : '';
+  }
+
   async resolveName(qq, groupId = '') {
     if (!qq || qq === 'all') return '';
     const sid = String(qq);
     if (this.nameCache.has(sid)) return this.nameCache.get(sid);
+    const local = this.groupMemberName(sid, groupId);
+    if (local) {
+      this.nameCache.set(sid, local);
+      return local;
+    }
     if (groupId) {
       try {
         const res = await this.api('get_group_member_info', { group_id: Number(groupId), user_id: Number(qq) });

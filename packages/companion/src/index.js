@@ -168,7 +168,14 @@ async function main() {
 
   const bot = new OneBot({
     ...cfg.onebot,
+    dataDir: cfg.dataDir || './data',
     onMessage: (msg) => {
+      // 群成员表：进群后第一次说话就拉一次，之后 6 小时才刷新
+      if (msg.isGroup && msg.groupId) {
+        bot.syncGroupMembers(msg.groupId)
+          .then((r) => { if (r?.ok && !r.skipped) console.log(`   [OneBot] 群 ${msg.groupId} 成员表已同步 ${r.count} 人`); })
+          .catch(() => {});
+      }
       // 第一次见到这个会话 → 给个默认策略
       if (!waker.configs.has(msg.key)) {
         const gid = String(msg.groupId || (msg.key.startsWith('group:') ? msg.key.split(':')[1] : ''));
@@ -240,6 +247,10 @@ async function main() {
       }, win));
     },
   });
+
+  // 群成员表：先用上次落盘的缓存，避免每条消息都打单查接口
+  const cachedMembers = bot.loadGroupMembers();
+  if (cachedMembers) console.log('  群成员表  ' + cachedMembers + ' 人（本地缓存）');
 
   process.on('unhandledRejection', (e) => console.error('[未处理] ' + (e?.message || e)));
   process.on('SIGINT', () => { console.log('\n再见。'); process.exit(0); });
