@@ -549,8 +549,8 @@ export const PHONE_TOOLS = [
 // ── 执行分发核心 ──
 export async function executePhoneTool(name, args = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
-  if (name === 'read_group_chat') return readGroupChat(args);
-  if (name === 'queue_group_message') return enqueueGroupMessage(args);
+  if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
+  if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
 
   lockPhoneForUserAction();
   const target = await getAdbTarget();
