@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus } from './phone-living.js';
 import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
+import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -513,10 +514,44 @@ export const PHONE_TOOLS = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'read_group_chat',
+      description: '去群里看看最近大家在聊什么。你在私聊里是看不到群消息的，想知道群里发生什么就用这个查。不传 group_id 就看你所在的所有群。',
+      parameters: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', description: '群号，留空则看所有群' },
+          limit: { type: 'number', description: '看最近多少条，默认 30，最多 50' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'queue_group_message',
+      description: '往群里发一句话（只入队，系统会隔几秒到十几秒后替你发出去，不会立刻出现）。适合答应老爸"我去群里说一声"这种。每群每天有上限，不能刷屏。',
+      parameters: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', description: '群号，必填' },
+          text: { type: 'string', description: '要发的话，口语化、短一点' },
+          at_qq: { type: 'string', description: '可选，要 @ 的人的 QQ 号' }
+        },
+        required: ['group_id', 'text']
+      }
+    }
+  },
 ];
 
 // ── 执行分发核心 ──
 export async function executePhoneTool(name, args = {}) {
+  // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
+  if (name === 'read_group_chat') return readGroupChat(args);
+  if (name === 'queue_group_message') return enqueueGroupMessage(args);
+
   lockPhoneForUserAction();
   const target = await getAdbTarget();
 

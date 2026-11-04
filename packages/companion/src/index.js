@@ -34,6 +34,7 @@ import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
+import { initGroupBridge, startOutboxWorker } from './group-bridge.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -251,6 +252,10 @@ async function main() {
   // 群成员表：先用上次落盘的缓存，避免每条消息都打单查接口
   const cachedMembers = bot.loadGroupMembers();
   if (cachedMembers) console.log('  群成员表  ' + cachedMembers + ' 人（本地缓存）');
+
+  // 跨会话群桥：读群聊 + 队列发群消息
+  initGroupBridge({ bot, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
+  startOutboxWorker();
 
   process.on('unhandledRejection', (e) => console.error('[未处理] ' + (e?.message || e)));
   process.on('SIGINT', () => { console.log('\n再见。'); process.exit(0); });
