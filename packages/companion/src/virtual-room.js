@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-observer.js';
 import { getDouyinLivingStatus } from './douyin-living.js';
+import { DEV_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
 
 const PORT = 18888;
 const ASSETS_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets';
@@ -1005,6 +1006,33 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
     if (url.pathname === '/monitor' || url.pathname === '/browser') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(MONITOR_HTML_TEMPLATE);
+      return;
+    }
+
+    // 1.12 小鱼的需求箱（开发者审批页）
+    if (url.pathname === '/dev') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(DEV_PAGE);
+      return;
+    }
+
+    if (url.pathname === '/dev/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ requests: listRequests(), chat: listChat({ limit: 20 }) }));
+      return;
+    }
+
+    if (url.pathname === '/dev/review' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 4000) req.destroy(); });
+      req.on('end', async () => {
+        let j = {};
+        try { j = JSON.parse(body); } catch {}
+        const r = reviewRequest({ id: j.id, action: j.action, note: j.note });
+        if (r.status === 'ok' && r.newStatus === 'approved') triggerDev(r.id).catch(() => {});
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(r));
+      });
       return;
     }
 

@@ -3,92 +3,12 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
-import { initDevChannel, listRequests, reviewRequest, listChat } from './dev-channel.js';
 
 const PORT = 18080;
 const SMS_FILE = '/tmp/douyin_sms_code.txt';
 const STATUS_FILE = '/tmp/douyin_qr_status.json';
 const QR_FILE = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets/douyin_qr_live.png';
 const COMP_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion';
-
-// 开发者通道：读 config.json 的 devChannel，页面上的审批走这里
-const DEV_CFG = (() => {
-  try { return JSON.parse(fs.readFileSync(COMP_DIR + '/config.json', 'utf8')).devChannel || {}; } catch { return {}; }
-})();
-initDevChannel({ dataDir: COMP_DIR + '/data', ...DEV_CFG });
-
-// 审批通过后异步叫醒开发者，不阻塞页面
-async function triggerDev(id) {
-  const req = listRequests().find((r) => r.id === id);
-  if (!req) return;
-  const text = `【小鱼的需求，老爸已批准】\n编号：${req.id}\n标题：${req.title}\n详情：${req.detail}\n理由：${req.why || '（未写）'}\n请实现，改完把状态标成 done。`;
-  try {
-    await fetch(DEV_CFG.hermesUrl || 'http://127.0.0.1:8642/message', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (DEV_CFG.apiKey || '') },
-      body: JSON.stringify({ message: text, session_id: 'xiaoyu-dev', platform: 'api_server' }),
-      signal: AbortSignal.timeout(600000),
-    });
-    console.log('[dev] 已通知开发者处理 ' + id);
-  } catch (e) {
-    console.warn('[dev] 通知开发者失败 ' + id + '：' + e.message);
-  }
-}
-
-const devPage = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>小鱼的需求箱</title>
-<style>
-*{box-sizing:border-box}body{margin:0;padding:20px;background:#0f1115;color:#e6e6e6;font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
-h1{font-size:20px;margin:0 0 4px}.sub{color:#888;font-size:13px;margin:0 0 20px}
-.card{background:#181b22;border:1px solid #262b36;border-radius:12px;padding:16px;margin-bottom:12px}
-.t{font-weight:600;margin-bottom:6px}.d{color:#c8ccd4;white-space:pre-wrap;margin-bottom:8px}
-.w{color:#7d8590;font-size:13px;margin-bottom:10px}.meta{color:#5c6370;font-size:12px}
-.btn{border:0;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;margin-right:8px}
-.ok{background:#1f6f43;color:#fff}.no{background:#3a2a2a;color:#d99}
-.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#232833;color:#9aa4b2;margin-left:8px}
-.pending{border-color:#2d4a35}.chat{background:#14171d;border:1px solid #222732;border-radius:12px;padding:14px;margin-top:20px}
-.chat .me{color:#7fb1ff}.chat .him{color:#9ee6b0}.chat div{margin-bottom:10px;white-space:pre-wrap}
-h2{font-size:15px;color:#9aa4b2;margin:24px 0 10px}
-</style></head><body>
-<h1>小鱼的需求箱</h1><p class="sub">她提的需求先到这儿，你同意之后才会动工。</p>
-<div id="list">加载中…</div>
-<div class="chat"><h2 style="margin-top:0">她最近找开发者说的话</h2><div id="chat">—</div></div>
-<script>
-const S={pending:'待审批',approved:'已批准',rejected:'已驳回',done:'已完成'};
-function esc(s){return String(s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-async function load(){
-  var j=await (await fetch('/dev/list')).json();
-  var list=document.getElementById('list');
-  if(!j.requests.length){list.innerHTML='<p class="sub">还没有需求。</p>';}
-  else{
-    list.innerHTML=j.requests.map(function(r){
-      var cls=r.status==='pending'?'card pending':'card';
-      var btns=r.status==='pending'
-        ? '<button class="btn ok" onclick="act(\''+r.id+'\',\'approve\')">批准</button><button class="btn no" onclick="act(\''+r.id+'\',\'reject\')">驳回</button>'
-        : '';
-      return '<div class="'+cls+'"><div class="t">'+esc(r.title)+'<span class="tag">'+(S[r.status]||r.status)+'</span></div>'
-        + '<div class="d">'+esc(r.detail)+'</div>'
-        + (r.why?'<div class="w">为什么：'+esc(r.why)+'</div>':'')
-        + '<div class="meta">'+new Date(r.at).toLocaleString('zh-CN')+' · '+r.id+'</div>'
-        + '<div style="margin-top:10px">'+btns+'</div></div>';
-    }).join('');
-  }
-  var c=document.getElementById('chat');
-  if(!j.chat.length){c.innerHTML='<div class="sub">还没聊过。</div>';}
-  else{
-    c.innerHTML=j.chat.map(function(x){
-      return '<div><span class="me">小鱼：</span>'+esc(x.me)+'</div>'
-        + (x.reply?'<div><span class="him">开发者：</span>'+esc(x.reply)+'</div>':'<div class="meta">（'+esc(x.err||'没回')+'）</div>');
-    }).join('');
-  }
-}
-async function act(id,action){
-  if(action==='approve'&&!confirm('批准后开发者会开始改小鱼，确定？'))return;
-  await fetch('/dev/review',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id,action:action})});
-  load();
-}
-load();setInterval(load,15000);
-</script></body></html>`;
 
 function readStatus() {
   try {
@@ -255,32 +175,6 @@ const server = http.createServer((req, res) => {
       try { fs.writeFileSync(SMS_FILE, m[1], 'utf8'); } catch { res.writeHead(500); res.end('write fail'); return; }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('ok');
-    });
-    return;
-  }
-
-  if (req.method === 'GET' && url === '/dev') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(devPage);
-    return;
-  }
-
-  if (req.method === 'GET' && url === '/dev/list') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ requests: listRequests(), chat: listChat({ limit: 20 }) }));
-    return;
-  }
-
-  if (req.method === 'POST' && url === '/dev/review') {
-    let body = '';
-    req.on('data', (c) => { body += c; if (body.length > 4000) req.destroy(); });
-    req.on('end', () => {
-      let j = {};
-      try { j = JSON.parse(body); } catch {}
-      const r = reviewRequest({ id: j.id, action: j.action, note: j.note });
-      if (r.status === 'ok' && r.newStatus === 'approved') triggerDev(r.id).catch(() => {});
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(r));
     });
     return;
   }
