@@ -19,7 +19,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLatestScreenBuffer, getObserverStatus } from './browser-observer.js';
+import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-observer.js';
 import { getDouyinLivingStatus } from './douyin-living.js';
 
 const PORT = 18888;
@@ -930,11 +930,11 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
       <span>小鱼浏览器屏幕实况</span>
       <span id="pageBadge" class="badge">检测中...</span>
     </div>
-    <div style="font-size: 13px; color: #94a3b8;" id="statusText">帧率: 1 fps (只读旁观)</div>
+    <div style="font-size: 13px; color: #94a3b8;" id="statusText">实时串流 · 连接中…</div>
   </div>
 
   <div class="screen-container">
-    <img id="screenImg" src="/api/browser/screen.jpg" alt="小鱼电脑屏幕">
+    <img id="screenImg" src="/api/browser/stream.mjpg" alt="小鱼电脑屏幕">
     <div class="watermark">🔒 只读旁观模式 · 无法干预操作</div>
   </div>
 
@@ -947,16 +947,19 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
     const img = document.getElementById('screenImg');
     const badge = document.getElementById('pageBadge');
     const timeText = document.getElementById('timeText');
+    const statusText = document.getElementById('statusText');
+
+    // 画面本身走 MJPEG 长连接，浏览器自己播，不用 JS 拉帧
+    let streamOk = true;
+    img.onerror = () => {
+      streamOk = false;
+      // 断流就重连
+      setTimeout(() => { img.src = '/api/browser/stream.mjpg?t=' + Date.now(); streamOk = true; }, 2000);
+    };
 
     function refreshFrame() {
       const now = new Date();
       timeText.innerText = '刷新时间: ' + now.toTimeString().split(' ')[0];
-      
-      const nextImg = new Image();
-      nextImg.onload = function() {
-        img.src = nextImg.src;
-      };
-      nextImg.src = '/api/browser/screen.jpg?t=' + Date.now();
 
       fetch('/api/browser/status').then(r => r.json()).then(data => {
         if (data.isLive) {
@@ -970,10 +973,17 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
           badge.style.borderColor = 'rgba(148, 163, 184, 0.3)';
           badge.style.background = 'rgba(148, 163, 184, 0.1)';
         }
+        if (data.streaming) {
+          statusText.innerText = '实时串流 · ' + (data.fps || 0) + ' fps';
+          statusText.style.color = '#34d399';
+        } else {
+          statusText.innerText = '静态截图模式（等待她打开浏览器）';
+          statusText.style.color = '#94a3b8';
+        }
       }).catch(()=>{});
     }
 
-    setInterval(refreshFrame, 1200);
+    setInterval(refreshFrame, 2000);
     refreshFrame();
   </script>
 </body>
@@ -1256,6 +1266,48 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
+      return;
+    }
+
+    // 1.25 实时屏幕 MJPEG 流（真正的连续帧，视频播放时 20~30fps）
+    if (url.pathname === '/api/browser/stream.mjpg') {
+      res.writeHead(200, {
+        'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Connection': 'close',
+      });
+
+      let lastPushAt = 0;
+      const pushFrame = (buf) => {
+        if (!buf || res.writableEnded) return;
+        try {
+          res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
+          res.write(buf);
+          res.write('\r\n');
+          lastPushAt = Date.now();
+        } catch {}
+      };
+
+      // 先来一张当前画面，避免第一帧之前空着
+      getLatestScreenBuffer().then((r) => pushFrame(r.buffer)).catch(() => {});
+
+      frameBus.on('frame', pushFrame);
+
+      // 页面基本静止时 CDP 不推帧，补一个兜底心跳，保证画面不假死
+      const heartbeat = setInterval(async () => {
+        if (Date.now() - lastPushAt > 2000 && res.writableEnded === false) {
+          try {
+            const r = await getLatestScreenBuffer();
+            if (r.buffer) pushFrame(r.buffer);
+          } catch {}
+        }
+      }, 2000);
+
+      req.on('close', () => {
+        clearInterval(heartbeat);
+        frameBus.off('frame', pushFrame);
+      });
       return;
     }
 
