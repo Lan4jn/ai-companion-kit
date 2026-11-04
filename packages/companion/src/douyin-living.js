@@ -284,13 +284,28 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
             await page.keyboard.type(commentText, { delay: 40 });
             await page.waitForTimeout(600);
             await page.keyboard.press('Enter');
-            await page.waitForTimeout(1200);
+            await page.waitForTimeout(1500);
             // 提交后输入框应被清空，据此判断是否真的发出去了
-            const sent = await page.evaluate(() => {
+            const readLeft = () => page.evaluate(() => {
               const ed = document.querySelector('.public-DraftEditor-content');
-              const left = (ed?.innerText || '').trim();
-              return left.length === 0;
+              return (ed?.innerText || '').trim();
             });
+            let left = await readLeft();
+            // Draft.js 里 Enter 往往只是换行、不提交；退一步点发送按钮
+            if (left.length > 0) {
+              const clicked = await page.evaluate(() => {
+                const sel = '[data-e2e="comment-submit"], .comment-submit, [class*="comment-submit"], [class*="submit-btn"]';
+                const btn = document.querySelector(sel);
+                if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+                btn.click();
+                return true;
+              });
+              if (clicked) {
+                await page.waitForTimeout(2000);
+                left = await readLeft();
+              }
+            }
+            const sent = left.length === 0;
             commented = sent;
             console.log(sent
               ? `[douyin] 评论发布成功: “${commentText}”`
