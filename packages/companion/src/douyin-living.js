@@ -44,7 +44,10 @@ function isOwnerDouyin(author = '', href = '') {
 }
 
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  // 必须用本地日期：toISOString() 是 UTC，北京时间 0~8 点会被判成前一天，额度重置时间错位
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function readDailyStats(dataDir) {
