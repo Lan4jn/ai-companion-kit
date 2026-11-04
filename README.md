@@ -13,6 +13,14 @@
 
 ---
 
+## 小鱼房间 · 本地角色预览
+
+在仓库根目录运行 `npm run room:demo`，打开 `http://127.0.0.1:18889/`，即可离线体验小鱼待机、去书桌、小憩和点击回应。角色旁的按钮可切换动画与静态展示。
+
+预览使用临时日记目录，不启动 QQ、手机或视频平台。运行与测试说明见 [角色层验证记录](docs/room-character-validation.md)，角色素材来源与使用条件见 [素材声明](packages/companion/public/room_assets/character/NOTICE.md)。
+
+---
+
 ## 先说个事
 
 我给一个 AI 接上了 QQ 和一台安卓手机。

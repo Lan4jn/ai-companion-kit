@@ -8,8 +8,11 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const STANDBY_IMG = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets/screen_standby.jpg';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const STANDBY_IMG = path.resolve(__dirname, '../public/room_assets/screen_standby.jpg');
 
 let activePage = null;
 let activeInfo = {

@@ -19,14 +19,20 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getLatestScreenBuffer, getObserverStatus } from './browser-observer.js';
-import { getDouyinLivingStatus } from './douyin-living.js';
 
-const PORT = 18888;
-const ASSETS_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets';
-const DATA_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/data';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DEFAULT_ASSETS_DIR = path.resolve(__dirname, '../public/room_assets');
+const DEFAULT_DATA_DIR = path.resolve(__dirname, '../data');
 
-let curState = {
+const ALLOWED_STATES = new Set(['bed_phone', 'bed_sleep', 'crawling', 'desk_laptop', 'bed_sit']);
+
+let activeRoomInstance = null;
+
+let fallbackState = {
+  version: 1,
   state: 'bed_phone', // 'bed_phone' | 'bed_sleep' | 'crawling' | 'desk_laptop' | 'bed_sit'
   action: '在床上悠闲躺平看手机',
   message: '正在继续干活呢，别打扰我~',
@@ -34,59 +40,50 @@ let curState = {
   updatedAt: Date.now(),
 };
 
-const sseClients = new Set();
-
-function broadcastState() {
-  const data = `data: ${JSON.stringify(curState)}\n\n`;
-  for (const res of sseClients) {
-    try {
-      res.write(data);
-    } catch {
-      sseClients.delete(res);
-    }
+export function setRoomState(newState, meta = {}) {
+  if (activeRoomInstance) {
+    return activeRoomInstance.setState(newState, meta);
   }
-}
-
-export function setRoomState(newState, { action = '', message = '', recentInput = '' } = {}) {
-  const prev = curState.state;
-  if (newState && newState !== prev) {
-    if ((prev === 'bed_phone' || prev === 'bed_sleep' || prev === 'bed_sit') && newState === 'desk_laptop') {
-      curState.state = 'crawling';
-      curState.action = '上椅子打开电脑';
-      curState.message = '正在费劲爬上转椅开电脑……';
-      curState.updatedAt = Date.now();
-      broadcastState();
-
-      setTimeout(() => {
-        curState.state = 'desk_laptop';
-        if (action) curState.action = action;
-        if (message) curState.message = message;
-        if (recentInput) curState.recentInput = recentInput;
-        curState.updatedAt = Date.now();
-        broadcastState();
-      }, 2000);
-      return;
-    }
+  if (newState && !ALLOWED_STATES.has(newState)) {
+    return { ...fallbackState };
   }
-
-  if (newState) curState.state = newState;
-  if (action) curState.action = action;
-  if (message) curState.message = message;
-  if (recentInput) curState.recentInput = recentInput;
-  curState.updatedAt = Date.now();
-  broadcastState();
+  let changed = false;
+  if (newState && newState !== fallbackState.state) {
+    fallbackState.state = newState;
+    changed = true;
+  }
+  if (meta.action && meta.action !== fallbackState.action) {
+    fallbackState.action = meta.action;
+    changed = true;
+  }
+  if (meta.message && meta.message !== fallbackState.message) {
+    fallbackState.message = meta.message;
+    changed = true;
+  }
+  if (meta.recentInput && meta.recentInput !== fallbackState.recentInput) {
+    fallbackState.recentInput = meta.recentInput;
+    changed = true;
+  }
+  if (changed) {
+    fallbackState.version++;
+    fallbackState.updatedAt = Date.now();
+  }
+  return { ...fallbackState };
 }
 
 export function getRoomState() {
-  return curState;
+  if (activeRoomInstance) {
+    return activeRoomInstance.getState();
+  }
+  return { ...fallbackState };
 }
 
 /**
  * 读取最近的生活日记
  */
-function getRecentDiaries(limit = 4) {
+function getRecentDiaries(dataDir, limit = 4) {
   try {
-    const diaryPath = path.join(DATA_DIR, 'diary.jsonl');
+    const diaryPath = path.join(dataDir || DEFAULT_DATA_DIR, 'diary.jsonl');
     if (!fs.existsSync(diaryPath)) return [];
     const lines = fs.readFileSync(diaryPath, 'utf8').trim().split('\n').filter(Boolean);
     const parsed = [];
@@ -111,6 +108,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>织梦行云 · 小肥鱼的居室 (Virtual Room)</title>
+  <link rel="stylesheet" href="/room_assets/character/character.css">
+  <script type="module" src="/room_assets/character/renderer.js"></script>
   <style>
     :root {
       --brightness: 1;
@@ -154,7 +153,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     }
 
     /* 滤镜过渡与光色混合 */
-    #stage image, #stage .base {
+    #stage .base {
       filter: brightness(var(--brightness)) saturate(var(--saturation, 1));
       transition: filter 3s cubic-bezier(0.4, 0, 0.2, 1);
     }
@@ -523,6 +522,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
     <div class="actions-bar">
       <button class="act-btn" onclick="triggerAction('bed')">躺平看手机</button>
+      <button class="act-btn" onclick="triggerAction('desk')">去书桌工作</button>
       <button class="act-btn" onclick="triggerAction('douyin')">去电脑前刷抖音</button>
       <button class="act-btn" onclick="triggerAction('sit')">坐在床沿发呆</button>
       <button class="act-btn" onclick="triggerAction('sleep')">闭眼入睡</button>
@@ -732,11 +732,25 @@ async function openDrawer(s, e) {
     const data = await res.json();
     document.getElementById('d-title').textContent = data.title || s.label;
     document.getElementById('d-sub').textContent = data.sub || '';
+    const dBody = document.getElementById('d-body');
+    dBody.replaceChildren();
     if (Array.isArray(data.lines) && data.lines.length > 0) {
-      document.getElementById('d-body').innerHTML = data.lines
-        .map(([k, v]) => '<div class="kv"><span>' + k + '</span><span>' + v + '</span></div>').join('');
+      for (const [k, v] of data.lines) {
+        const row = document.createElement('div');
+        row.className = 'kv';
+        const kSpan = document.createElement('span');
+        kSpan.textContent = k;
+        const vSpan = document.createElement('span');
+        vSpan.textContent = v;
+        row.appendChild(kSpan);
+        row.appendChild(vSpan);
+        dBody.appendChild(row);
+      }
     } else {
-      document.getElementById('d-body').innerHTML = '<div style="color:#94a3b8;font-size:13px;">暂无相关信息</div>';
+      const emptyDiv = document.createElement('div');
+      emptyDiv.style.cssText = 'color:#94a3b8;font-size:13px;';
+      emptyDiv.textContent = '暂无相关信息';
+      dBody.appendChild(emptyDiv);
     }
 
     if (data.extraHtml) {
@@ -746,7 +760,10 @@ async function openDrawer(s, e) {
     }
   } catch (err) {
     document.getElementById('d-sub').textContent = '连接异常';
-    document.getElementById('d-body').innerHTML = '<div style="color:#f43f5e;font-size:12px;">' + err.message + '</div>';
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'color:#f43f5e;font-size:12px;';
+    errDiv.textContent = err?.message || '加载异常';
+    document.getElementById('d-body').replaceChildren(errDiv);
   }
 }
 
@@ -810,16 +827,41 @@ function initSSE() {
 }
 
 function applyRoomState(data) {
+  if (!data) return;
   if (data.action) document.getElementById('hud-status').textContent = data.action;
   if (data.message) document.getElementById('hud-message').textContent = data.message;
+  try {
+    window.dispatchEvent(new CustomEvent('room:state', { detail: data }));
+  } catch {}
 }
 
-function triggerAction(action) {
-  fetch('/api/action', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action })
-  }).then(r => r.json()).then(applyRoomState).catch(console.error);
+async function triggerAction(action) {
+  const hudStatus = document.getElementById('hud-status');
+  const hudMsg = document.getElementById('hud-message');
+  try {
+    const res = await fetch('/api/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 503) {
+        if (hudStatus) hudStatus.textContent = '功能未启用';
+        if (hudMsg) hudMsg.textContent = err.error || '抖音服务未启用或未连接';
+      } else {
+        if (hudStatus) hudStatus.textContent = '操作失败 (' + res.status + ')';
+        if (hudMsg) hudMsg.textContent = err.error || '请求未能成功执行';
+      }
+      return;
+    }
+    const data = await res.json();
+    applyRoomState(data);
+  } catch (err) {
+    console.error(err);
+    if (hudStatus) hudStatus.textContent = '网络异常';
+    if (hudMsg) hudMsg.textContent = '无法连接到居室服务';
+  }
 }
 
 /* ───────────────────────── 6. 启动初始化 ───────────────────────── */
@@ -980,14 +1022,170 @@ const MONITOR_HTML_TEMPLATE = `<!DOCTYPE html>
 </html>
 `;
 
-export function startVirtualRoomServer({ douyinLiving = null } = {}) {
+export function startVirtualRoomServer({
+  port = 18888,
+  host = '127.0.0.1',
+  assetsDir = null,
+  dataDir = null,
+  transitionMs = 2000,
+  douyinLiving = null,
+  getDouyinStatus = null,
+} = {}) {
+  const effectiveAssetsDir = assetsDir || DEFAULT_ASSETS_DIR;
+  const effectiveDataDir = dataDir || DEFAULT_DATA_DIR;
+
+  let curState = {
+    version: 1,
+    state: 'bed_phone',
+    action: '在床上悠闲躺平看手机',
+    message: '正在继续干活呢，别打扰我~',
+    recentInput: 'phone',
+    updatedAt: Date.now(),
+  };
+
+  const sseClients = new Set();
+  const sockets = new Set();
+  let transitionTimer = null;
+  let transitionGeneration = 0;
+  let isStopped = false;
+
+  let crawlInitialAction = '';
+  let crawlInitialMessage = '';
+  let crawlTargetAction = '';
+  let crawlTargetMessage = '';
+  let crawlTargetRecentInput = '';
+
+  function broadcastState() {
+    if (isStopped) return;
+    const data = `data: ${JSON.stringify(curState)}\n\n`;
+    for (const res of sseClients) {
+      try {
+        res.write(data);
+      } catch {
+        sseClients.delete(res);
+      }
+    }
+  }
+
+  function getState() {
+    return { ...curState };
+  }
+
+  function setState(newState, { action = '', message = '', recentInput = '' } = {}) {
+    if (isStopped) return { ...curState };
+
+    if (newState && !ALLOWED_STATES.has(newState)) {
+      return { ...curState };
+    }
+
+    const prev = curState.state;
+    const isNewStateCommand = Boolean(newState && newState !== prev);
+
+    // Only a new distinct state command cancels an active transition
+    if (isNewStateCommand && transitionTimer) {
+      clearTimeout(transitionTimer);
+      transitionTimer = null;
+      transitionGeneration++;
+    }
+
+    if (isNewStateCommand) {
+      if ((prev === 'bed_phone' || prev === 'bed_sleep' || prev === 'bed_sit') && newState === 'desk_laptop') {
+        crawlInitialAction = '上椅子打开电脑';
+        crawlInitialMessage = '正在费劲爬上转椅开电脑……';
+        crawlTargetAction = action || '在电脑前认真工作';
+        crawlTargetMessage = message || '正在电脑前认真处理事情呢~';
+        crawlTargetRecentInput = recentInput || 'desk';
+
+        curState.state = 'crawling';
+        curState.action = crawlInitialAction;
+        curState.message = crawlInitialMessage;
+        if (recentInput) curState.recentInput = recentInput;
+        curState.version++;
+        curState.updatedAt = Date.now();
+        broadcastState();
+
+        const curGen = ++transitionGeneration;
+        transitionTimer = setTimeout(() => {
+          transitionTimer = null;
+          if (isStopped || curGen !== transitionGeneration) return;
+          curState.state = 'desk_laptop';
+          if (curState.action === crawlInitialAction) {
+            curState.action = crawlTargetAction;
+          }
+          if (curState.message === crawlInitialMessage) {
+            curState.message = crawlTargetMessage;
+          }
+          if (crawlTargetRecentInput && curState.recentInput === 'phone') {
+            curState.recentInput = crawlTargetRecentInput;
+          }
+          curState.version++;
+          curState.updatedAt = Date.now();
+          broadcastState();
+        }, transitionMs);
+        return { ...curState };
+      }
+
+      curState.state = newState;
+    }
+
+    let metaChanged = false;
+    if (action && action !== curState.action) {
+      curState.action = action;
+      metaChanged = true;
+    }
+    if (message && message !== curState.message) {
+      curState.message = message;
+      metaChanged = true;
+    }
+    if (recentInput && recentInput !== curState.recentInput) {
+      curState.recentInput = recentInput;
+      metaChanged = true;
+    }
+
+    if (isNewStateCommand || metaChanged) {
+      curState.version++;
+      curState.updatedAt = Date.now();
+      broadcastState();
+    }
+    return { ...curState };
+  }
+
+  function getAssetVersion(relSubPath) {
+    try {
+      const fullPath = path.join(effectiveAssetsDir, relSubPath);
+      if (fs.existsSync(fullPath)) {
+        const stat = fs.statSync(fullPath);
+        return Math.floor(stat.mtimeMs).toString(36);
+      }
+    } catch {}
+    return Date.now().toString(36);
+  }
+
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    let url;
+    try {
+      url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Bad Request: Invalid URL or Host header');
+      return;
+    }
 
     // 1. 静态主页 (2.5D 等距房间)
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(HTML_TEMPLATE);
+      const vCss = getAssetVersion('character/character.css');
+      const vJs = getAssetVersion('character/renderer.js');
+      const renderedHtml = HTML_TEMPLATE
+        .replace('/room_assets/character/character.css', `/room_assets/character/character.css?v=${vCss}`)
+        .replace('/room_assets/character/renderer.js', `/room_assets/character/renderer.js?v=${vJs}`);
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+      });
+      res.end(renderedHtml);
       return;
     }
 
@@ -1103,8 +1301,19 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
     // 1.155 接收 SMS 提交 API
     if (url.pathname === '/api/douyin/sms' && req.method === 'POST') {
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let isTooLarge = false;
+      req.on('data', chunk => {
+        if (isTooLarge) return;
+        body += chunk;
+        if (body.length > 64 * 1024) {
+          isTooLarge = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload Too Large' }));
+          req.destroy();
+        }
+      });
       req.on('end', () => {
+        if (isTooLarge) return;
         try {
           const { code } = JSON.parse(body);
           if (code) {
@@ -1132,7 +1341,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
 
     // 1.156 直接获取二维码图片接口
     if (url.pathname === '/api/douyin/qr.png') {
-      const qrPath = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets/douyin_qr_live.png';
+      const qrPath = path.join(effectiveAssetsDir, 'douyin_qr_live.png');
       if (fs.existsSync(qrPath)) {
         res.writeHead(200, {
           'Content-Type': 'image/png',
@@ -1155,7 +1364,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
         if (fs.existsSync('/tmp/douyin_qr_status.json')) {
           statusData = JSON.parse(fs.readFileSync('/tmp/douyin_qr_status.json', 'utf8'));
         }
-        const qrPath = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets/douyin_qr_live.png';
+        const qrPath = path.join(effectiveAssetsDir, 'douyin_qr_live.png');
         if (fs.existsSync(qrPath)) {
           statusData.qrBase64 = fs.readFileSync(qrPath).toString('base64');
         }
@@ -1192,15 +1401,17 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
         };
       } else if (slot === 'desk') {
         const obs = getObserverStatus();
-        const dy = getDouyinLivingStatus();
+        const dy = typeof getDouyinStatus === 'function'
+          ? getDouyinStatus()
+          : (douyinLiving && typeof douyinLiving.getStatus === 'function' ? douyinLiving.getStatus() : { lastVideo: null, summary: null });
         data = {
           title: '书桌电脑 · 摸鱼工作区',
           sub: '全景靠窗双屏 · 人体工学转椅',
           lines: [
-            ['电脑状态', obs.isActive ? '活动中: ' + obs.platform.toUpperCase() : '桌面待机中'],
+            ['电脑状态', obs.isLive ? '活动中: ' + (obs.platform || '').toUpperCase() : '桌面待机中'],
             ['当前操作', curState.state === 'desk_laptop' ? curState.action : '已离开工位'],
-            ['最近刷到', dy.lastVideo ? (dy.lastVideo.title?.slice(0, 22) + '...') : '《3.5w人看过的小鲸鱼房间已开源》'],
-            ['小鱼吐槽', dy.summary ? (dy.summary?.slice(0, 25) + '...') : '等距插画加个时钟就算房间了……'],
+            ['最近刷到', dy?.lastVideo ? (dy.lastVideo.title?.slice(0, 22) + '...') : '《3.5w人看过的小鲸鱼房间已开源》'],
+            ['小鱼吐槽', dy?.summary ? (dy.summary?.slice(0, 25) + '...') : '等距插画加个时钟就算房间了……'],
           ],
           extraHtml: `
             <div style="display:flex;flex-direction:column;gap:8px;">
@@ -1210,7 +1421,7 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
           `
         };
       } else if (slot === 'shelf') {
-        const diaries = getRecentDiaries(4);
+        const diaries = getRecentDiaries(effectiveDataDir, 4);
         const lines = diaries.map(d => {
           const timeStr = d.t ? new Date(d.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : (d.at ? d.at.slice(11, 16) : '刚才');
           const title = d.title || d.activity || d.category || '生活随笔';
@@ -1282,20 +1493,176 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
       return;
     }
 
-    // 1.5 静态图片与资源
+    // 1.5 静态资源 (支持嵌套路径与 character/* 资源，只允许安全扩展名与合法范围)
     if (url.pathname.startsWith('/room_assets/')) {
-      const filename = path.basename(url.pathname);
-      const filePath = path.join(ASSETS_DIR, filename);
-      if (fs.existsSync(filePath)) {
-        const ext = path.extname(filename).toLowerCase();
-        const contentType = ext === '.png' ? 'image/png' : 'image/jpeg';
-        const cacheControl = filename.includes('live') ? 'no-cache, no-store, must-revalidate' : 'public, max-age=86400';
-        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
-        fs.createReadStream(filePath).pipe(res);
+      let relPath;
+      try {
+        relPath = decodeURIComponent(url.pathname.slice('/room_assets/'.length));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Request: Malformed URI');
         return;
       }
-      res.writeHead(404);
-      res.end('Not Found');
+      const filePath = path.resolve(effectiveAssetsDir, relPath);
+      const relative = path.relative(effectiveAssetsDir, filePath);
+
+      // Traversal check: 禁止逃逸 assetsRoot
+      if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden');
+        return;
+      }
+
+      // 禁止隐藏文件与目录
+      const segments = relative.split(/[\\/]/);
+      if (segments.some(seg => seg.startsWith('.'))) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden');
+        return;
+      }
+
+      // 符号链接真实路径检查：防止通过 symlink 逃逸 assetsRoot
+      let realAssetsDir = effectiveAssetsDir;
+      try {
+        realAssetsDir = fs.realpathSync(effectiveAssetsDir);
+      } catch {}
+      try {
+        const realFilePath = fs.realpathSync(filePath);
+        const realRelative = path.relative(realAssetsDir, realFilePath);
+        if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('Forbidden: Symlink escape detected');
+          return;
+        }
+      } catch {
+        // 如果文件不存在，由下文 fs.statSync 触发 404
+      }
+
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+
+      // 禁止目录直接访问
+      if (!stat.isFile()) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden: Not a file');
+        return;
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const MIME_MAP = {
+        '.js': 'text/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.webm': 'video/webm',
+        '.webp': 'image/webp',
+        '.md': 'text/markdown; charset=utf-8',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.svg': 'image/svg+xml',
+      };
+
+      if (!MIME_MAP[ext]) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden: Unsupported file type');
+        return;
+      }
+
+      const contentType = MIME_MAP[ext];
+      const isVariable = filePath.includes('live') || ['.js', '.css', '.json', '.md'].includes(ext);
+      const cacheControl = isVariable ? 'no-cache, no-store, must-revalidate' : 'public, max-age=86400';
+      const baseHeaders = {
+        'Content-Type': contentType,
+        'Cache-Control': cacheControl,
+        'Accept-Ranges': 'bytes',
+      };
+      if (isVariable) {
+        baseHeaders['Pragma'] = 'no-cache';
+        baseHeaders['Expires'] = '0';
+      }
+
+      const rangeHeader = req.headers.range;
+      if (rangeHeader && req.method === 'GET') {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+        if (!match) {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          res.end();
+          return;
+        }
+        let [, startStr, endStr] = match;
+        let start, end;
+        if (startStr === '' && endStr !== '') {
+          const suffix = Number(endStr);
+          if (!Number.isSafeInteger(suffix) || suffix <= 0) {
+            res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+            res.end();
+            return;
+          }
+          start = Math.max(0, stat.size - suffix);
+          end = stat.size - 1;
+        } else if (startStr !== '' && endStr === '') {
+          start = Number(startStr);
+          if (!Number.isSafeInteger(start) || start < 0 || start >= stat.size) {
+            res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+            res.end();
+            return;
+          }
+          end = stat.size - 1;
+        } else if (startStr !== '' && endStr !== '') {
+          start = Number(startStr);
+          end = Number(endStr);
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= stat.size) {
+            res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+            res.end();
+            return;
+          }
+          // RFC 7233 / 9110: 若 end 超过文件边界，截断至 size - 1 并返回 206
+          if (end >= stat.size) {
+            end = stat.size - 1;
+          }
+        } else {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          res.end();
+          return;
+        }
+
+        const chunkSize = end - start + 1;
+        res.writeHead(206, {
+          ...baseHeaders,
+          'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+          'Content-Length': chunkSize,
+        });
+        const stream = fs.createReadStream(filePath, { start, end });
+        stream.on('error', () => {
+          if (!res.headersSent) res.writeHead(500);
+          res.end();
+        });
+        stream.pipe(res);
+        return;
+      }
+
+      res.writeHead(200, {
+        ...baseHeaders,
+        'Content-Length': stat.size,
+      });
+
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
+      const stream = fs.createReadStream(filePath);
+      stream.on('error', () => {
+        if (!res.headersSent) res.writeHead(500);
+        res.end();
+      });
+      stream.pipe(res);
       return;
     }
 
@@ -1324,45 +1691,82 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
 
     // 4. 交互动作 API
     if (url.pathname === '/api/action' && req.method === 'POST') {
+      // CSRF Origin check
+      const origin = req.headers.origin;
+      if (origin) {
+        try {
+          const originUrl = new URL(origin);
+          if (originUrl.host !== req.headers.host) {
+            res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Forbidden: cross-origin request rejected' }));
+            return;
+          }
+        } catch {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Forbidden: invalid origin' }));
+          return;
+        }
+      }
+
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let isTooLarge = false;
+      const MAX_BODY_SIZE = 64 * 1024; // 64KB
+
+      req.on('data', chunk => {
+        if (isTooLarge) return;
+        body += chunk;
+        if (body.length > MAX_BODY_SIZE) {
+          isTooLarge = true;
+          res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Payload Too Large' }));
+          req.destroy();
+        }
+      });
+
       req.on('end', async () => {
+        if (isTooLarge) return;
+
         let action = '';
         try {
           const json = JSON.parse(body);
-          action = json.action;
+          action = json?.action;
         } catch {}
 
+        const ALLOWED_ACTIONS = new Set(['douyin', 'desk', 'laptop', 'sit', 'bed', 'sleep']);
+        if (!action || !ALLOWED_ACTIONS.has(action)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Bad Request: invalid or unknown action' }));
+          return;
+        }
+
         if (action === 'douyin') {
-          if (douyinLiving) {
+          if (douyinLiving && typeof douyinLiving.browseDouyinLive === 'function') {
             douyinLiving.browseDouyinLive({ isOwner: true }).catch(console.error);
           } else {
-            setRoomState('desk_laptop', {
-              action: '在电脑前刷抖音',
-              message: '收到！正在刷抖音呢~',
-              recentInput: 'douyin',
-            });
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: '抖音平台未注入或未启用' }));
+            return;
           }
         } else if (action === 'desk' || action === 'laptop') {
-          setRoomState('desk_laptop', {
+          setState('desk_laptop', {
             action: '在电脑前认真工作',
             message: '正在电脑前认真处理事情呢~',
             recentInput: 'desk',
           });
         } else if (action === 'sit') {
-          setRoomState('bed_sit', {
+          setState('bed_sit', {
             action: '坐在床沿呆萌发呆',
             message: '坐在床上看看周围，找点好玩的~',
             recentInput: 'sit',
           });
         } else if (action === 'bed') {
-          setRoomState('bed_phone', {
+          setState('bed_phone', {
             action: '回床上悠闲躺平看手机',
             message: '瘫在床上的感觉真好，玩会儿手机~',
             recentInput: 'bed',
           });
         } else if (action === 'sleep') {
-          setRoomState('bed_sleep', {
+          setState('bed_sleep', {
             action: '夜深了，躺平入睡',
             message: '有点困了，闭上眼睛睡大觉，晚安……',
             recentInput: 'sleep',
@@ -1379,14 +1783,72 @@ export function startVirtualRoomServer({ douyinLiving = null } = {}) {
     res.end('Not Found');
   });
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[VirtualRoom] 大肥鱼 2.5D 等距居室已启动: http://0.0.0.0:${PORT}/ (局域网访问: http://192.168.31.130:${PORT}/)`);
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
   });
 
-  return {
-    setState: setRoomState,
-    getState: getRoomState,
+  const ready = new Promise((resolve, reject) => {
+    server.once('listening', () => resolve(server.address()));
+    server.once('error', reject);
+  });
+
+  server.listen(port, host, () => {
+    const addr = server.address();
+    const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+    console.log(`[VirtualRoom] 小肥鱼 2.5D 等距居室已启动: http://${host}:${actualPort}/`);
+  });
+
+  let stopPromise = null;
+  function stop() {
+    if (stopPromise) return stopPromise;
+    isStopped = true;
+
+    if (transitionTimer) {
+      clearTimeout(transitionTimer);
+      transitionTimer = null;
+    }
+
+    for (const client of sseClients) {
+      try {
+        client.end();
+      } catch {}
+    }
+    sseClients.clear();
+
+    for (const socket of sockets) {
+      try {
+        socket.destroy();
+      } catch {}
+    }
+    sockets.clear();
+
+    if (activeRoomInstance === instance) {
+      activeRoomInstance = null;
+    }
+
+    stopPromise = new Promise((resolve) => {
+      if (!server.listening) {
+        resolve();
+        return;
+      }
+      server.close(() => {
+        resolve();
+      });
+    });
+    return stopPromise;
+  }
+
+  const instance = {
+    server,
+    ready,
+    stop,
+    setState,
+    getState,
   };
+  activeRoomInstance = instance;
+
+  return instance;
 }
 
 export default {

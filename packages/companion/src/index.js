@@ -249,8 +249,15 @@ async function main() {
   setVideoBrain(brain);
   startPhoneLiving(memory);
 
-  // 启动大肥鱼虚拟居室（Virtual Room Web App，端口 18888）
-  const room = startVirtualRoomServer({ douyinLiving: { browseDouyinLive } });
+  // 启动大肥鱼虚拟居室（Virtual Room Web App，默认 127.0.0.1:18888）
+  const roomCfg = cfg.room || {};
+  const room = startVirtualRoomServer({
+    host: roomCfg.host || '127.0.0.1',
+    port: Number.isFinite(roomCfg.port) ? roomCfg.port : 18888,
+    dataDir: cfg.dataDir,
+    douyinLiving: { browseDouyinLive },
+    getDouyinStatus: getDouyinLivingStatus,
+  });
   setDouyinRoom(room);
 
   // 启动小鱼抖音自主生活系统（支持抓取真实推荐流、点赞评论关注、写日记、向老爸汇报）

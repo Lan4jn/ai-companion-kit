@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "id": "shenshen",
+  "canvas": [
+    640,
+    360
+  ],
+  "bodyBox": [
+    212,
+    60,
+    428,
+    330
+  ],
+  "anchor": [
+    320,
+    330
+  ],
+  "clips": {
+    "idle": {
+      "src": "clips/idle.webm",
+      "poster": "clips/idle.webp",
+      "loop": true
+    },
+    "move": {
+      "src": "clips/move.webm",
+      "poster": "clips/move.webp",
+      "loop": true
+    },
+    "sleep": {
+      "src": "clips/sleep.webm",
+      "poster": "clips/sleep.webp",
+      "loop": true
+    },
+    "work": {
+      "src": "clips/work.webm",
+      "poster": "clips/work.webp",
+      "loop": true
+    },
+    "think": {
+      "src": "clips/think.webm",
+      "poster": "clips/think.webp",
+      "loop": true
+    },
+    "greet": {
+      "src": "clips/greet.webm",
+      "poster": "clips/greet.webp",
+      "loop": false
+    }
+  },
+  "attribution": {
+    "character": "溟月 (深深)",
+    "artist": "上善无形",
+    "origin": "PC2005-cloud/dsh-pet",
+    "notice": "同人素材遵循 CC BY-NC-SA 类条款，仅限个人非商业使用，保留署名与来源，禁止商用（依据本地 THIRD_PARTY_NOTICES，不指定具体版本）"
+  },
+  "_provenance": {
+    "encoder": "unblend-white-floor-v1",
+    "date": "2026-11-04",
+    "parameters": {
+      "min_alpha": 21,
+      "max_alpha": 250,
+      "floor_alpha": 1,
+      "erosion_kernel": 3,
+      "erosion_px": 1,
+      "crf": 26,
+      "fps": 24
+    },
+    "tools": {
+      "python": "3.11.9",
+      "pillow": "12.2.0",
+      "ffmpeg": "ffmpeg version 2025-12-10-git-4f947880bd-full_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers"
+    },
+    "clips_meta": [
+      {
+        "clip_id": "idle",
+        "src_file": "待机呼吸休闲.webm",
+        "source_sha256": "deb965d05a85dacf5ff4a20faa757846f0d11679598c3ec578a5571487660395",
+        "derived_webm_sha256": "d1e437eedf4610d951e0e6673600f609f9ee00247e1c4e8937fabad038d3d24b",
+        "derived_poster_sha256": "7106954e04a8e8e52bf300ca483357c098d1449a2958e0297244849654a0ead5",
+        "frames": 241,
+        "size_kb": 602.5,
+        "encoded_at": "2026-11-04"
+      },
+      {
+        "clip_id": "move",
+        "src_file": "漂浮踏步.webm",
+        "source_sha256": "7dee1c14672f1f99bebe5e6f1a52d6664b851ed95f9958ac6c12b753a5e5cc81",
+        "derived_webm_sha256": "9c935b724b8b7d3ae8e4d3905b0fcd9babca946b19c2d6ad7c9413a9f5e599a7",
+        "derived_poster_sha256": "6435f6a3480ab3633d64d1fdb6d239b646dd2d50a2b5bc25295439a02b3d2eef",
+        "frames": 241,
+        "size_kb": 798.7,
+        "encoded_at": "2026-11-04"
+      },
+      {
+        "clip_id": "sleep",
+        "src_file": "原地小憩沉眠.webm",
+        "source_sha256": "31d4a6b36a29b2a4fe097384173d3bbeb3fa2f40f526b13191791456bf7507a1",
+        "derived_webm_sha256": "974c6eb33e5b05745c5ec93d7e05210cc15070fb329faa766733d0c454c3e627",
+        "derived_poster_sha256": "ad7e6535d588f842df44288645551d8d6cc94f4c2cb16131cf816815a50d83c6",
+        "frames": 241,
+        "size_kb": 669.2,
+        "encoded_at": "2026-11-04"
+      },
+      {
+        "clip_id": "work",
+        "src_file": "写代码.webm",
+        "source_sha256": "0441287737cdbb993ce90dfa74c67ea4ea3549d8c8ea98946604668464589ed7",
+        "derived_webm_sha256": "0788a60f547827ba135ed1a6b05fb69fe7bb4c673d2d36a5d8da8903240e96a3",
+        "derived_poster_sha256": "6a63d20148d5efafc8c90271f1614a4d66bb652beb50edc6fdcf3e9016d9e6b7",
+        "frames": 241,
+        "size_kb": 531.3,
+        "encoded_at": "2026-11-04"
+      },
+      {
+        "clip_id": "think",
+        "src_file": "工作状态-思考冒泡.webm",
+        "source_sha256": "b4a36cfa28ea5d7089e362a01972c6e880297c6dcd0d39f1994efd889a3c1be5",
+        "derived_webm_sha256": "5e30843b917bc724726b4bc3526ec347e1de530a9ff2679686c61260e038cf6f",
+        "derived_poster_sha256": "c8007419c1c3f1a73821b043c3e869447855e2baa91ecfd8a1cb3c7143598fbd",
+        "frames": 241,
+        "size_kb": 619.7,
+        "encoded_at": "2026-11-04"
+      },
+      {
+        "clip_id": "greet",
+        "src_file": "点击回应-元气挥手.webm",
+        "source_sha256": "48cd729ccdcf746369942ea954d242e9afdd5643e1dac3827fa5e67450eb8776",
+        "derived_webm_sha256": "522dd4c1040e4fda31916205fb6bae2d68c21340452f828da2279d18155c8c4b",
+        "derived_poster_sha256": "d5414af86cc5eb4f74e5b73baaf8b9dca2a35365b9ccbf2505dd7c8b74f7d0b2",
+        "frames": 241,
+        "size_kb": 571.8,
+        "encoded_at": "2026-11-04"
+      }
+    ],
+    "manifest_refreshed_at": "2026-11-04T12:28:43.432732+00:00"
+  }
+}

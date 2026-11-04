@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "demo": "node packages/companion/examples/demo.js",
+    "room:demo": "node packages/companion/examples/room-demo.js",
+    "room:test": "node --test packages/companion/test/*.test.mjs",
     "check": "node scripts/check.mjs",
     "phone": "node packages/phone-mcp/src/phone-mcp.js",
     "phone:test": "node packages/phone-mcp/src/phone-mcp.js --selftest",

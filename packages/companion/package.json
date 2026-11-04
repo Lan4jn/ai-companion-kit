@@ -20,6 +20,10 @@
   },
   "files": [
     "src",
+    "public/room_assets/character",
+    "public/room_assets/sample-room.png",
+    "public/room_assets/screen_standby.jpg",
+    "examples/room-demo.js",
     "role.example.md",
     "config.example.json",
     "README.md"

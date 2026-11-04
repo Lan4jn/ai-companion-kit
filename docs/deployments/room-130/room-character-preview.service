@@ -1,0 +1,31 @@
+[Unit]
+Description=Virtual Room Character Preview Service (130)
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=room-character-preview
+WorkingDirectory=/opt/room-character-preview/current
+ExecStart=/usr/bin/node /opt/room-character-preview/current/launch.mjs
+Restart=on-failure
+RestartSec=3s
+KillMode=mixed
+TimeoutStopSec=10s
+
+# 环境配置（绑定 18889 端口，绝不与 18888 冲突）
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=18889
+
+# 安全沙箱加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
