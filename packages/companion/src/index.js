@@ -28,12 +28,14 @@ import { OneBot } from './transport-onebot.js';
 import { startPhoneLiving, getPhoneLivingStatus, setVideoBrain } from './phone-living.js';
 import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living.js';
 import { startDouyinLiving, browseDouyinLive, getDouyinLivingStatus, setDouyinRoom } from './douyin-living.js';
-import { startWebLiving, browseWebTopic, getWebLivingStatus } from './web-living.js';
+import { startWebLiving, browseWebTopic, getWebLivingStatus, renderWebKnowledge } from './web-living.js';
 import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
+import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
+import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -168,7 +170,14 @@ async function main() {
 
   const bot = new OneBot({
     ...cfg.onebot,
+    dataDir: cfg.dataDir || './data',
     onMessage: (msg) => {
+      // 群成员表：进群后第一次说话就拉一次，之后 6 小时才刷新
+      if (msg.isGroup && msg.groupId) {
+        bot.syncGroupMembers(msg.groupId)
+          .then((r) => { if (r?.ok && !r.skipped) console.log(`   [OneBot] 群 ${msg.groupId} 成员表已同步 ${r.count} 人`); })
+          .catch(() => {});
+      }
       // 第一次见到这个会话 → 给个默认策略
       if (!waker.configs.has(msg.key)) {
         const gid = String(msg.groupId || (msg.key.startsWith('group:') ? msg.key.split(':')[1] : ''));
@@ -241,6 +250,15 @@ async function main() {
     },
   });
 
+  // 群成员表：先用上次落盘的缓存，避免每条消息都打单查接口
+  const cachedMembers = bot.loadGroupMembers();
+  if (cachedMembers) console.log('  群成员表  ' + cachedMembers + ' 人（本地缓存）');
+
+  // 跨会话群桥：读群聊 + 队列发群消息
+  initDevChannel({ dataDir: cfg.dataDir || './data', ...(cfg.devChannel || {}) });
+  initGroupBridge({ bot, human, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
+  startOutboxWorker();
+
   process.on('unhandledRejection', (e) => console.error('[未处理] ' + (e?.message || e)));
   process.on('SIGINT', () => { console.log('\n再见。'); process.exit(0); });
 
@@ -269,8 +287,13 @@ async function main() {
     opts: {
       likeChance: Number.isFinite(dyCfg.likeChance) ? dyCfg.likeChance : 0.7,
       commentChance: Number.isFinite(dyCfg.commentChance) ? dyCfg.commentChance : 0.2,
-      commentDailyMax: Number.isFinite(dyCfg.commentDailyMax) ? dyCfg.commentDailyMax : 3,
+      commentDailyMax: Number.isFinite(dyCfg.commentDailyMax) ? dyCfg.commentDailyMax : 8,
       followChance: Number.isFinite(dyCfg.followChance) ? dyCfg.followChance : 0.12,
+      windowStart: Number.isFinite(dyCfg.windowStart) ? dyCfg.windowStart : 9,
+      windowEnd: Number.isFinite(dyCfg.windowEnd) ? dyCfg.windowEnd : 1,
+      dailyMax: Number.isFinite(dyCfg.dailyMax) ? dyCfg.dailyMax : 40,
+      ownerName: dyCfg.ownerName || '不吃肘击（香菜版）',
+      ownerSecUid: dyCfg.ownerSecUid || '',
     },
   });
 
@@ -334,6 +357,7 @@ async function main() {
 export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
+  setCurrentChat(key);
   const isOwnerTurn = cfg.ownerIds.includes(last.userId);
   const relVerdict = rel ? rel.verdict(last.userId, { isOwner: isOwnerTurn }) : 'normal';
 
@@ -403,6 +427,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     ? (memory.renderGroupChatter ? memory.renderGroupChatter(key, 25) : '')
     : (memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : '');
   const learnedInsights = chatterLearner ? chatterLearner.renderInsights() : '';
+  // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
+  const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
   const targetPrompt = last.isGroup
     ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）对你说的话：“${text}”。【沈鲸式网感与风格指令】：仔细对标前文活人群友“沈鲸”！直接亮态度吐槽，绝不做阅读理解复述长句。遇到离谱事可扣「？」起手吐槽；随手打字（2~12字）或输出一两句短金句（<=25字）；可配合情绪换行附带 [表情包: 情绪]！`
     : `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`;
@@ -433,6 +459,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (last.isPoke ? `\n【重要提醒】：对方刚刚在 QQ 里“戳了戳”你（或者拍了拍你的头像）！请结合上下文做出自然灵动的少女傲娇反应（如：“戳我干嘛”、“别戳了，再戳鱼肉要散了”、“有事说事”等，如果是老爸戳你可以撒娇抱怨），绝不要机械死板复述！` : '')
     + (living ? `\n【你此刻真实的手机动态】：${living}。如果老爸或群友问你在干嘛或发截图，你可以顺着这个状态自然回应或截图。` : '')
     + (learnedInsights ? `\n${learnedInsights}` : '')
+    + (webKnowledge ? `\n${webKnowledge}` : '')
     + (groupChatter ? `\n${groupChatter}` : '')
     + (() => {
         const line = rel ? rel.render(last.userId) : '';

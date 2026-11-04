@@ -39,6 +39,13 @@ async function startDaemon() {
   const page = await context.newPage();
 
   async function openLoginModal() {
+    // 弹窗已经开着就别再点，点一下反而会把二维码关掉
+    const alreadyOpen = await page.evaluate(() =>
+      Boolean(document.querySelector('#login-full-panel')) ||
+      (document.body ? document.body.innerText.includes('扫码登录') : false)
+    ).catch(() => false);
+    if (alreadyOpen) return;
+
     await page.evaluate(() => {
       const all = Array.from(document.querySelectorAll('*'));
       const btn = all.find(x => x.innerText?.trim() === '登录' && x.offsetHeight > 15 && x.offsetWidth > 30);
@@ -52,19 +59,58 @@ async function startDaemon() {
 
   async function saveQRShot() {
     try {
-      const isExpired = await page.evaluate(() => {
+      const state = await page.evaluate(() => {
         const text = document.body ? document.body.innerText : '';
-        return text.includes('二维码失效') || text.includes('二维码已失效');
+        const expired = text.includes('二维码失效') || text.includes('二维码已失效');
+        const qrImg = Array.from(document.querySelectorAll('img')).find((img) => {
+          const r = img.getBoundingClientRect();
+          return r.width >= 140 && r.width <= 280 && Math.abs(r.width - r.height) <= 25
+            && (img.getAttribute('src') || '').startsWith('data:image');
+        });
+        const canvases = Array.from(document.querySelectorAll('canvas')).filter((c) => {
+          const r = c.getBoundingClientRect();
+          return r.width >= 140 && r.width <= 280 && Math.abs(r.width - r.height) <= 25;
+        });
+        return {
+          expired,
+          qrDataUrl: qrImg ? qrImg.getAttribute('src') : '',
+          canvasCount: canvases.length,
+        };
       });
-      if (isExpired) {
-        console.log('[DouyinDaemon] 警告：页面当前为失效蒙层，拒绝截取保存废码！');
+
+      if (state.expired) {
+        console.log('[DouyinDaemon] 警告：页面当前为失效蒙层，拒绝保存废码！');
         return false;
       }
-      const clip = { x: 365, y: 312, width: 186, height: 196 };
-      await page.screenshot({ path: QR_SCRATCH, clip });
-      fs.copyFileSync(QR_SCRATCH, QR_PUBLIC);
-      console.log('[DouyinDaemon] ✅ 已保存清晰有效的新二维码！');
-      return true;
+
+      // 二维码本身就是 base64 图片，直接落盘，比按坐标截图更清晰也不会截错区域
+      if (state.qrDataUrl && state.qrDataUrl.includes(',')) {
+        const b64 = state.qrDataUrl.split(',')[1];
+        fs.writeFileSync(QR_SCRATCH, Buffer.from(b64, 'base64'));
+        fs.copyFileSync(QR_SCRATCH, QR_PUBLIC);
+        console.log('[DouyinDaemon] ✅ 已从页面直接提取二维码原图');
+        return true;
+      }
+
+      if (state.canvasCount > 0) {
+        const handle = await page.evaluateHandle(() => {
+          const list = Array.from(document.querySelectorAll('canvas')).filter((c) => {
+            const r = c.getBoundingClientRect();
+            return r.width >= 140 && r.width <= 280 && Math.abs(r.width - r.height) <= 25;
+          });
+          return list[0] || null;
+        });
+        const el = handle.asElement();
+        if (el) {
+          await el.screenshot({ path: QR_SCRATCH });
+          fs.copyFileSync(QR_SCRATCH, QR_PUBLIC);
+          console.log('[DouyinDaemon] ✅ 已截取二维码画布');
+          return true;
+        }
+      }
+
+      console.log('[DouyinDaemon] 未找到二维码元素（弹窗可能没打开）');
+      return false;
     } catch (e) {
       console.error('[DouyinDaemon] 截取异常:', e.message);
       return false;
@@ -104,11 +150,22 @@ async function startDaemon() {
   console.log('[DouyinDaemon] 等待二维码生成...');
   await page.waitForTimeout(9000);
 
-  await saveQRShot();
-  writeStatus({ status: 'ready', msg: '二维码已就绪，请使用抖音 App 扫一扫！' });
+  let ok = await saveQRShot();
+  if (!ok) {
+    console.log('[DouyinDaemon] 首次截图失败，重开登录弹窗再试...');
+    await openLoginModal();
+    await page.waitForTimeout(4000);
+    ok = await saveQRShot();
+  }
+  writeStatus(
+    ok
+      ? { status: 'ready', msg: '二维码已就绪，请使用抖音 App 扫一扫！' }
+      : { status: 'waiting_modal', msg: '正在等待登录弹窗出现…' }
+  );
 
   const startTime = Date.now();
   let lastRefresh = Date.now();
+  let lastResend = 0;
 
   while (Date.now() - startTime < 1800000) {
     await page.waitForTimeout(1500);
@@ -171,12 +228,33 @@ async function startDaemon() {
 
     // 阶段 B: 输入验证码页 -> 检测是否有待提交的验证码
     if (pageState.hasInputSms) {
+      // 上一轮输错了就自动点“重新发送”，否则用户拿着废码怎么输都失败
+      const smsError = await page.evaluate(() => {
+        const t = document.body ? document.body.innerText : '';
+        return t.includes('验证码错误') || t.includes('验证失败');
+      }).catch(() => false);
+
+      if (smsError && Date.now() - lastResend > 60000) {
+        console.log('[DouyinDaemon] 页面提示验证码错误，自动重新发送...');
+        await page.evaluate(() => {
+          const el = Array.from(document.querySelectorAll('*')).find(
+            (e) => e.innerText?.trim() === '重新发送' && e.offsetHeight > 8
+          );
+          if (el) el.click();
+        });
+        lastResend = Date.now();
+        await page.waitForTimeout(2500);
+        await saveModalShot();
+        writeStatus({ status: 'need_sms_retry', msg: '📱 验证码错误，已重新发送，请重新输入！' });
+        continue;
+      }
+
       writeStatus({ status: 'need_sms', msg: '📱 短信验证码已下发，请在网页或 QQ 发送 6 位验证码！' });
 
       if (fs.existsSync(SMS_FILE)) {
         const code = fs.readFileSync(SMS_FILE, 'utf8').trim();
         if (code && /^\d{4,8}$/.test(code)) {
-          console.log(`[DouyinDaemon] 检测到待提交验证码: ${code}，正在填入...`);
+          console.log(`[DouyinDaemon] 收到待提交验证码（${code.length} 位），正在填入...`);
           try { fs.unlinkSync(SMS_FILE); } catch {}
 
           try {
@@ -223,13 +301,29 @@ async function startDaemon() {
       continue;
     }
 
-    // 阶段 C: 二维码页面 -> 过期或超过 80 秒自动重新获取新鲜码
+    // 阶段 C: 二维码页面 -> 过期或超过 60 秒自动重新获取新鲜码
     if (pageState.isQrScreen) {
-      if (pageState.isExpired || (Date.now() - lastRefresh > 80000)) {
+      if (pageState.isExpired || (Date.now() - lastRefresh > 60000)) {
         console.log('[DouyinDaemon] 二维码已超时或失效，开始重新获取...');
         await reloadFreshQR();
         lastRefresh = Date.now();
       }
+    } else if (Date.now() - lastRefresh > 20000) {
+      // 弹窗被关掉/没弹出来：主动重开并重新截图，别让页面上挂着废图
+      console.log('[DouyinDaemon] 未检测到二维码界面，尝试重开登录弹窗...');
+      await page.evaluate(() => {
+        const close = document.querySelector('#login-full-panel [aria-label="关闭"], .semi-modal-close');
+        if (close) close.click();
+      }).catch(() => {});
+      await openLoginModal();
+      await page.waitForTimeout(2500);
+      const ok = await saveQRShot();
+      writeStatus(
+        ok
+          ? { status: 'ready', msg: '二维码已就绪，请使用抖音 App 扫一扫！' }
+          : { status: 'waiting_modal', msg: '正在等待登录弹窗出现…' }
+      );
+      lastRefresh = Date.now();
     }
   }
 

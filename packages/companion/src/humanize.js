@@ -155,12 +155,13 @@ export class Humanizer {
     // 兼容模型输出的字面量反斜杠换行 \n 与真实换行
     const normalized = raw.replace(/\\n/g, '\n');
 
-    // 抽取出 CQ:image 码，防止被分句切割
+    // 抽取出 CQ 码，防止被分句切割。
+    // at 必须留在原句里（@ 和前后文字同一条气泡），image 单独成条更自然。
     const cqImages = [];
-    const sanitized = normalized.replace(/\[CQ:image,[^\]]+\]/g, (match) => {
-      const token = `__CQ_IMAGE_${cqImages.length}__`;
+    const sanitized = normalized.replace(/\[CQ:(at|image),[^\]]+\]/g, (match, kind) => {
+      const token = `__CQ_${kind.toUpperCase()}_${cqImages.length}__`;
       cqImages.push(match);
-      return `\n${token}\n`;
+      return kind === 'image' ? `\n${token}\n` : token;
     });
 
     // 保护英文单词、数字、中英文混排之间的普通空格，避免把 Hello World / RTX 4070 拆碎！
@@ -223,15 +224,17 @@ export class Humanizer {
       res = [...head.filter(Boolean), ...imgParts];
     }
 
-    // 4) 还原 CQ:image 码与空格，去掉句尾句号与 AI Markdown 痕迹
+    // 4) 还原 CQ 码与空格，去掉句尾句号与 AI Markdown 痕迹
     return res.map((part) => {
       let back = part.replace(/\u200B/g, ' ');
-      back = back.replace(/__CQ_IMAGE_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
+      back = back.replace(/__CQ_(?:IMAGE|AT)_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
       // 去掉 Markdown 粗体 ** 痕迹
       back = back.replace(/\*\*([^*]+)\*\*/g, '$1');
       back = this.stripTail(back);
       if (back.startsWith('[CQ:')) return back;
       const chars = [...back.trim()];
+      // 带 @ 或图片的句子不参与超长截断，否则会把 CQ 码切碎
+      if (back.includes('[CQ:')) return back.trim();
       if (chars.length <= 36) return back.trim();
       // 超长单句温和保护（>=36字），优先在后半段标点停顿处自然截断，绝不倒退过深腰斩
       const head36 = chars.slice(0, 36).join('');

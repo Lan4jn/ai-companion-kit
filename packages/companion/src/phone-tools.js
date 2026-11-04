@@ -6,6 +6,8 @@ import { promisify } from 'node:util';
 import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus } from './phone-living.js';
 import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
+import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
+import { talkToHermes, requestFeature } from './dev-channel.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -513,10 +515,76 @@ export const PHONE_TOOLS = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'read_group_chat',
+      description: '去群里看看最近大家在聊什么。你在私聊里是看不到群消息的，想知道群里发生什么就用这个查。不传 group_id 就看你所在的所有群。',
+      parameters: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', description: '群号，留空则看所有群' },
+          limit: { type: 'number', description: '看最近多少条，默认 30，最多 50' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'queue_group_message',
+      description: '往群里发一句话（只入队，系统会隔几秒到十几秒后替你发出去，不会立刻出现）。适合答应老爸"我去群里说一声"这种。每群每天有上限，不能刷屏。',
+      parameters: {
+        type: 'object',
+        properties: {
+          group_id: { type: 'string', description: '群号，必填' },
+          text: { type: 'string', description: '要发的话，口语化、短一点' },
+          at_qq: { type: 'string', description: '可选，要 @ 的人的 QQ 号' }
+        },
+        required: ['group_id', 'text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'talk_to_hermes',
+      description: '找带你的人聊两句——不是老爸，是那个能给你改功能、懂技术的人。无聊、想不通、想吐槽、想问点编程或网络上的事都可以找他。他回得慢，可能要等一两分钟，这很正常。',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '你想跟他说的话，自然点，像发微信' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_feature',
+      description: '想要一个新功能、或者觉得现在哪里用着别扭，用它提需求。提了不会立刻生效，要等老爸在审批页面点了同意才会动工。说清楚你想要什么、为什么想要。',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '一句话说清想要什么' },
+          detail: { type: 'string', description: '具体想让它怎么工作，越具体越好' },
+          why: { type: 'string', description: '为什么想要，可选' }
+        },
+        required: ['title', 'detail']
+      }
+    }
+  },
 ];
 
 // ── 执行分发核心 ──
 export async function executePhoneTool(name, args = {}) {
+  // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
+  if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
+  if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
+  if (name === 'talk_to_hermes') return talkToHermes({ text: args.text });
+  if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
+
   lockPhoneForUserAction();
   const target = await getAdbTarget();
 

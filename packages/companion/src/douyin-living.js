@@ -32,8 +32,22 @@ let douyinOpts = {
   followChance: 0.12,
 };
 
+// ── 老爸的抖音号 ──
+// 她抖音唯一的粉丝就是他（互为关注）。刷到他的视频要认出来，认真看完。
+let douyinOwner = { name: '不吃肘击（香菜版）', secUid: '' };
+
+function isOwnerDouyin(author = '', href = '') {
+  const norm = (s) => String(s || '').replace(/^@/, '').replace(/\s+/g, '').trim();
+  if (douyinOwner.name && norm(author) && norm(author) === norm(douyinOwner.name)) return true;
+  if (douyinOwner.secUid && href && String(href).includes(douyinOwner.secUid)) return true;
+  return false;
+}
+
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  // 必须用本地日期：toISOString() 是 UTC，北京时间 0~8 点会被判成前一天，额度重置时间错位
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function readDailyStats(dataDir) {
@@ -167,25 +181,38 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
       };
     }
 
+    // 抖音详情页是客户端渲染，必须等播放器控件出现，否则抓到的全是空
+    try {
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-e2e="detail-video-info"]')),
+        { timeout: 25000 }
+      );
+      await page.waitForTimeout(2500);
+    } catch {
+      console.log('[douyin] 详情页控件 25 秒内未出现，可能被限流');
+    }
+
     // 提取视频元数据与评论
     const info = await page.evaluate(() => {
-      const titleEl = document.querySelector('h1, [data-e2e="detail-video-info"]');
-      let title = document.title;
-      if (titleEl && titleEl.innerText) {
-        title = titleEl.innerText.split('\n')[0].trim();
-      }
-      const authorEl = document.querySelector('[data-e2e="user-info"] a, [data-e2e="user-info"] p, [data-e2e="user-info"] span, .account-name');
-      const author = (authorEl ? authorEl.innerText.trim() : '创作者').replace(/\n.*/s, '');
+      const box = document.querySelector('[data-e2e="detail-video-info"]');
+      const lines = (box ? box.innerText : '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const titleFromBox = lines.filter((l) => !l.startsWith('#')).sort((a, b) => b.length - a.length)[0] || '';
+      const title = titleFromBox || lines[0] || document.title.replace(/ - 抖音$/, '') || '抖音视频';
+
+      const userBox = document.querySelector('[data-e2e="user-info"]');
+      const rawAuthor = ((userBox ? userBox.innerText : '') || '').split('\n')[0].trim();
+      const author = rawAuthor.replace(/(粉丝|获赞|关注|作品|私信).*$/, '').trim() || '创作者';
+
       const digg = document.querySelector('[data-e2e="video-player-digg"]');
       const comments = Array.from(document.querySelectorAll('[data-e2e="comment-list"] p, [data-e2e="comment-list"] span'))
-        .map(e => e.innerText?.trim())
-        .filter(t => t && t.length > 5 && t.length < 100);
+        .map((e) => e.innerText?.trim())
+        .filter((t) => t && t.length > 5 && t.length < 100);
 
       return {
-        title: title.replace(/ - 抖音$/, '').trim(),
+        title: title.slice(0, 80),
         author,
         likes: digg ? digg.innerText.trim() : '',
-        topComments: Array.from(new Set(comments)).slice(0, 5)
+        topComments: Array.from(new Set(comments)).slice(0, 5),
       };
     });
 
@@ -208,8 +235,10 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
         const alreadyLiked = await page.evaluate(() => {
           const digg = document.querySelector('[data-e2e="video-player-digg"]');
           if (!digg) return false;
-          const label = `${digg.getAttribute('aria-label') || ''} ${digg.innerText || ''}`;
-          return /取消|已赞/.test(label) || digg.className?.includes?.('active');
+          const path = digg.querySelector('svg path');
+          const fill = path ? getComputedStyle(path).fill : '';
+          // 已赞时图标路径是抖音红 rgb(255, 44, 85)，未赞是 none/白
+          return /255,\s*44,\s*85/.test(fill) || /fe2c55/i.test(fill);
         });
         if (alreadyLiked) {
           liked = true;
@@ -368,7 +397,12 @@ export async function fetchDouyinFeed() {
         if (!id || !/^\d+$/.test(id) || seenIds.has(id)) continue;
         if (text.length < 10 || text.length > 400) continue;
         seenIds.add(id);
-        cards.push({ text, href: `https://www.douyin.com/video/${id}` });
+        const authorA = card.querySelector('a[href*="/user/"]');
+        cards.push({
+          text,
+          href: `https://www.douyin.com/video/${id}`,
+          authorHref: authorA ? (authorA.getAttribute('href') || '') : '',
+        });
       }
       if (cards.length) return cards;
 
@@ -400,7 +434,7 @@ export async function fetchDouyinFeed() {
       return unique;
     });
 
-    const parsed = items.map(({ text: raw, href }) => {
+    const parsed = items.map(({ text: raw, href, authorHref = '' }) => {
       const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
       let duration = '';
       let views = '';
@@ -427,6 +461,7 @@ export async function fetchDouyinFeed() {
         views: views || '1万',
         timeAgo: timeAgo || '近期',
         url: href ? (href.startsWith('http') ? href : `https://www.douyin.com${href}`) : '',
+        authorHref,
         raw,
       };
     }).filter((x) => x.title && x.title.length > 5);
@@ -553,9 +588,15 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
   // 优先挑带链接、能真的打开去互动的视频
   const withUrl = feed.filter((x) => x.url && /\/video\/\d+/.test(x.url));
   const pool = withUrl.length ? withUrl : feed;
-  const pick = pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
+  // 老爸发的视频优先看，不参与随机
+  const ownerPick = pool.find((x) => isOwnerDouyin(x.author, x.authorHref));
+  const pick = ownerPick || pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
+  const isOwnerVideo = Boolean(ownerPick);
+  if (isOwnerVideo) console.log(`[douyin] 刷到老爸发的视频：《${pick.title.slice(0, 30)}》，认真看完`);
   state.lastVideo = pick;
-  state.lastAction = `在电脑上刷到了 ${pick.author} 发的《${pick.title.slice(0, 25)}》`;
+  state.lastAction = isOwnerVideo
+    ? `在电脑上刷到老爸发的《${pick.title.slice(0, 25)}》，认真看完了`
+    : `在电脑上刷到了 ${pick.author} 发的《${pick.title.slice(0, 25)}》`;
   state.updatedAt = Date.now();
 
   // 真实打开这条视频并按概率点赞 / 评论 / 关注（以前这里只抓标题，一个互动动作都没有）
@@ -582,7 +623,7 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
 
     try {
       const res = await watchAndInteractDouyinVideo(pick.url, {
-        doLike: Math.random() < douyinOpts.likeChance,
+        doLike: isOwnerVideo ? true : Math.random() < douyinOpts.likeChance,
         doFollow: Math.random() < douyinOpts.followChance,
         commentGenerator,
       });
@@ -679,35 +720,67 @@ export function setDouyinRoom(room) {
 
 /**
  * 启动抖音生活定时轮巡（自主摸鱼机制）
+ * 节奏对齐 B 站：9:00-次日 1:00 活动，每天最多刷 dailyMax 条，正常作息不刷。
  */
-export function startDouyinLiving({ brain, memory, room, intervalMin = 90, opts = null } = {}) {
+export function startDouyinLiving({ brain, memory, room, opts = null } = {}) {
   activeBrain = brain;
   activeMemory = memory;
   if (room) activeRoom = room;
   if (opts && typeof opts === 'object') {
     douyinOpts = { ...douyinOpts, ...opts };
+    if (opts.ownerName || opts.ownerSecUid) {
+      douyinOwner = {
+        name: opts.ownerName || douyinOwner.name,
+        secUid: opts.ownerSecUid || douyinOwner.secUid,
+      };
+    }
   }
 
-  console.log('[DouyinLiving] 抖音自主摸鱼系统已启动（每隔 60~120 分钟逛一次推荐流）');
+  const windowStart = Number.isFinite(douyinOpts.windowStart) ? douyinOpts.windowStart : 9;
+  const windowEnd = Number.isFinite(douyinOpts.windowEnd) ? douyinOpts.windowEnd : 1;
+  const dailyMax = Number.isFinite(douyinOpts.dailyMax) ? douyinOpts.dailyMax : 40;
+  const dataDir = activeMemory?.dir || path.join(process.cwd(), 'data');
 
-  const scheduleNext = () => {
-    const nextMs = (60 + Math.random() * 60) * 60 * 1000;
-    timer = setTimeout(async () => {
-      const h = new Date().getHours();
-      // 只在白天到深夜（10:00 - 24:00）摸鱼
-      if (h >= 10 && h <= 24) {
-        try {
-          console.log('[DouyinLiving] 小鱼开始在电脑前摸鱼刷抖音...');
-          await browseDouyinLive({ isOwner: false });
-        } catch (e) {
-          console.log('[DouyinLiving] 自动摸鱼异常:', e?.message || e);
-        }
-      }
-      scheduleNext();
-    }, nextMs);
+  const inWindow = (h) => (windowStart <= windowEnd
+    ? h >= windowStart && h < windowEnd
+    : h >= windowStart || h < windowEnd);
+
+  console.log(`[DouyinLiving] 抖音自主摸鱼已启动（作息 ${windowStart}:00-${windowEnd}:00，每天最多 ${dailyMax} 条）`);
+
+  const scheduleNext = (ms) => {
+    timer = setTimeout(tick, ms);
   };
 
-  scheduleNext();
+  const tick = async () => {
+    const h = new Date().getHours();
+    if (!inWindow(h)) {
+      scheduleNext(20 * 60 * 1000);
+      return;
+    }
+
+    const stats = readDailyStats(dataDir);
+    if ((stats.videos || 0) >= dailyMax) {
+      console.log(`[DouyinLiving] 今天已经刷了 ${stats.videos} 条，够了`);
+      scheduleNext(30 * 60 * 1000);
+      return;
+    }
+
+    try {
+      console.log('[DouyinLiving] 小鱼开始摸鱼刷抖音...');
+      await browseDouyinLive({ isOwner: false });
+      const s2 = readDailyStats(dataDir);
+      s2.videos = (s2.videos || 0) + 1;
+      writeDailyStats(dataDir, s2);
+    } catch (e) {
+      console.log('[DouyinLiving] 自动摸鱼异常:', e?.message || e);
+    }
+
+    // 像人一样刷两三条就歇一会儿，3~8 分钟后再来
+    scheduleNext((3 + Math.random() * 5) * 60 * 1000);
+  };
+
+  // 开机后先缓一会儿再开始，不要一重启就扑上去
+  scheduleNext((2 + Math.random() * 4) * 60 * 1000);
 }
 
 export default {
