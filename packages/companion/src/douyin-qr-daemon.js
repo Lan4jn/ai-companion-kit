@@ -109,6 +109,7 @@ async function startDaemon() {
 
   const startTime = Date.now();
   let lastRefresh = Date.now();
+  let lastResend = 0;
 
   while (Date.now() - startTime < 1800000) {
     await page.waitForTimeout(1500);
@@ -171,12 +172,33 @@ async function startDaemon() {
 
     // 阶段 B: 输入验证码页 -> 检测是否有待提交的验证码
     if (pageState.hasInputSms) {
+      // 上一轮输错了就自动点“重新发送”，否则用户拿着废码怎么输都失败
+      const smsError = await page.evaluate(() => {
+        const t = document.body ? document.body.innerText : '';
+        return t.includes('验证码错误') || t.includes('验证失败');
+      }).catch(() => false);
+
+      if (smsError && Date.now() - lastResend > 60000) {
+        console.log('[DouyinDaemon] 页面提示验证码错误，自动重新发送...');
+        await page.evaluate(() => {
+          const el = Array.from(document.querySelectorAll('*')).find(
+            (e) => e.innerText?.trim() === '重新发送' && e.offsetHeight > 8
+          );
+          if (el) el.click();
+        });
+        lastResend = Date.now();
+        await page.waitForTimeout(2500);
+        await saveModalShot();
+        writeStatus({ status: 'need_sms_retry', msg: '📱 验证码错误，已重新发送，请重新输入！' });
+        continue;
+      }
+
       writeStatus({ status: 'need_sms', msg: '📱 短信验证码已下发，请在网页或 QQ 发送 6 位验证码！' });
 
       if (fs.existsSync(SMS_FILE)) {
         const code = fs.readFileSync(SMS_FILE, 'utf8').trim();
         if (code && /^\d{4,8}$/.test(code)) {
-          console.log(`[DouyinDaemon] 检测到待提交验证码: ${code}，正在填入...`);
+          console.log(`[DouyinDaemon] 收到待提交验证码（${code.length} 位），正在填入...`);
           try { fs.unlinkSync(SMS_FILE); } catch {}
 
           try {

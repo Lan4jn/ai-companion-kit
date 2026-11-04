@@ -64,11 +64,11 @@ async function main() {
   fs.copyFileSync(QR_PATH, PUBLIC_QR_PATH);
   console.log('QR_READY:' + QR_PATH);
 
-  // 轮询等待扫码登录成功（最多等 180 秒）
+  // 轮询等待扫码登录成功（最多等 600 秒，二维码本身约 3 分钟刷新一次）
   const startTime = Date.now();
   let loggedIn = false;
 
-  while (Date.now() - startTime < 180000) {
+  while (Date.now() - startTime < 600000) {
     await page.waitForTimeout(2500);
     const cookies = await context.cookies();
     const hasSession = cookies.some(c => c.name === 'sessionid' || c.name === 'passport_csrf_token' || c.name === 'LOGIN_STATUS');
