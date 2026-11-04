@@ -7,6 +7,7 @@ import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus 
 import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
 import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
+import { talkToHermes, requestFeature } from './dev-channel.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -544,6 +545,36 @@ export const PHONE_TOOLS = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'talk_to_hermes',
+      description: '找带你的人聊两句——不是老爸，是那个能给你改功能、懂技术的人。无聊、想不通、想吐槽、想问点编程或网络上的事都可以找他。他回得慢，可能要等一两分钟，这很正常。',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '你想跟他说的话，自然点，像发微信' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_feature',
+      description: '想要一个新功能、或者觉得现在哪里用着别扭，用它提需求。提了不会立刻生效，要等老爸在审批页面点了同意才会动工。说清楚你想要什么、为什么想要。',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '一句话说清想要什么' },
+          detail: { type: 'string', description: '具体想让它怎么工作，越具体越好' },
+          why: { type: 'string', description: '为什么想要，可选' }
+        },
+        required: ['title', 'detail']
+      }
+    }
+  },
 ];
 
 // ── 执行分发核心 ──
@@ -551,6 +582,8 @@ export async function executePhoneTool(name, args = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
   if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
   if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
+  if (name === 'talk_to_hermes') return talkToHermes({ text: args.text });
+  if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
 
   lockPhoneForUserAction();
   const target = await getAdbTarget();

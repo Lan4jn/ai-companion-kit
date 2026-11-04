@@ -35,6 +35,7 @@ import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } fr
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
+import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -254,6 +255,7 @@ async function main() {
   if (cachedMembers) console.log('  群成员表  ' + cachedMembers + ' 人（本地缓存）');
 
   // 跨会话群桥：读群聊 + 队列发群消息
+  initDevChannel({ dataDir: cfg.dataDir || './data', ...(cfg.devChannel || {}) });
   initGroupBridge({ bot, human, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
   startOutboxWorker();
 
