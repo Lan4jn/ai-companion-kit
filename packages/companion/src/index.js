@@ -254,7 +254,7 @@ async function main() {
   if (cachedMembers) console.log('  群成员表  ' + cachedMembers + ' 人（本地缓存）');
 
   // 跨会话群桥：读群聊 + 队列发群消息
-  initGroupBridge({ bot, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
+  initGroupBridge({ bot, human, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
   startOutboxWorker();
 
   process.on('unhandledRejection', (e) => console.error('[未处理] ' + (e?.message || e)));

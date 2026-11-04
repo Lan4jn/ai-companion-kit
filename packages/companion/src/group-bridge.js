@@ -15,9 +15,10 @@ export function setCurrentChat(key) {
   currentChat = String(key || '');
 }
 
-export function initGroupBridge({ bot, dataDir = './data', limits = {} } = {}) {
+export function initGroupBridge({ bot, human = null, dataDir = './data', limits = {} } = {}) {
   bridge = {
     bot,
+    human,
     dataDir,
     limits: {
       maxPerCommand: limits.maxPerCommand ?? 2,
@@ -183,11 +184,21 @@ async function tick() {
   }
 
   bridge.queue.shift();
+  const key = `group:${item.gid}`;
   try {
-    const r = await bridge.bot.send(`group:${item.gid}`, item.text);
+    if (bridge.human) {
+      // 复用项目自带发送器：拆气泡、打字停顿、拟人节奏
+      const r = await bridge.human.say(item.text, {
+        setTyping: (on) => bridge.bot.setTyping(key, on),
+        send: (m) => bridge.bot.send(key, m),
+      });
+      console.log(`[群桥] 已发到群 ${item.gid}（${r.sent} 条）：${item.text.slice(0, 40)}`);
+    } else {
+      const r = await bridge.bot.send(key, item.text);
+      console.log(`[群桥] 已发到群 ${item.gid}：${item.text.slice(0, 40)}`);
+      if (r && r.ok === false) console.warn('[群桥] 发送返回失败：' + (r.error || 'unknown'));
+    }
     bridge.sentToday[item.gid] = sent + 1;
-    console.log(`[群桥] 已发到群 ${item.gid}：${item.text.slice(0, 40)}`);
-    if (r && r.ok === false) console.warn('[群桥] 发送返回失败：' + (r.error || 'unknown'));
   } catch (e) {
     console.warn('[群桥] 发送异常：' + e.message);
   }
