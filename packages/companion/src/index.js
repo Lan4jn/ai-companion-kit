@@ -34,6 +34,7 @@ import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
+import { initGrowth, observeIncoming, observeOwn, renderGrowth } from './growth.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
@@ -165,6 +166,9 @@ async function main() {
   });
   chatterLearner.start();
 
+  // 成长记忆：群友对她的批评、表扬、特殊事件 → 自我认知
+  initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth });
+
   /** @type {Map<string, NodeJS.Timeout>} 每个会话的合并定时器 */
   const pending = new Map();
 
@@ -204,6 +208,7 @@ async function main() {
         memory.logGroupChatter({ groupKey: msg.key, userId: msg.userId, name: msg.name, text: msg.text });
         memory.touch(msg.userId, { name: msg.name });
         chatterLearner.feed(msg);
+        observeIncoming(msg, bot.selfId);
         // 顺手把群友发的表情包捡进库（只认 sub_type=1 / mface，不阻塞对话）
         collectStickers(msg.raw, { source: msg.key, maxPerMsg: 2 })
           .then((r) => { if (r.collected) console.log(`[表情库] 收到 ${r.collected} 张`); })
@@ -427,6 +432,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     ? (memory.renderGroupChatter ? memory.renderGroupChatter(key, 25) : '')
     : (memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : '');
   const learnedInsights = chatterLearner ? chatterLearner.renderInsights() : '';
+  const growthInsight = renderGrowth();
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
   const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
   const targetPrompt = last.isGroup
@@ -459,6 +465,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (last.isPoke ? `\n【重要提醒】：对方刚刚在 QQ 里“戳了戳”你（或者拍了拍你的头像）！请结合上下文做出自然灵动的少女傲娇反应（如：“戳我干嘛”、“别戳了，再戳鱼肉要散了”、“有事说事”等，如果是老爸戳你可以撒娇抱怨），绝不要机械死板复述！` : '')
     + (living ? `\n【你此刻真实的手机动态】：${living}。如果老爸或群友问你在干嘛或发截图，你可以顺着这个状态自然回应或截图。` : '')
     + (learnedInsights ? `\n${learnedInsights}` : '')
+    + (growthInsight || '')
     + (webKnowledge ? `\n${webKnowledge}` : '')
     + (groupChatter ? `\n${groupChatter}` : '')
     + (() => {
@@ -610,7 +617,11 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     if (cleanOut) {
       const r = await human.say(cleanOut, {
         setTyping: (on) => bot.setTyping(key, on),
-        send: (m) => bot.send(key, m),
+        send: async (m) => {
+          const r = await bot.send(key, m);
+          try { observeOwn({ chatKey: key, messageId: r?.data?.message_id, text: m, at: Date.now(), replyToUid: last.userId }); } catch {}
+          return r;
+        },
       });
       console.log('   发出 ' + r.sent + ' 条：' + r.parts.map((p) => p.slice(0, 50)).join(' | '));
       try {
