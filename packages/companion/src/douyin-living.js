@@ -221,8 +221,10 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
         const alreadyLiked = await page.evaluate(() => {
           const digg = document.querySelector('[data-e2e="video-player-digg"]');
           if (!digg) return false;
-          const label = `${digg.getAttribute('aria-label') || ''} ${digg.innerText || ''}`;
-          return /取消|已赞/.test(label) || digg.className?.includes?.('active');
+          const path = digg.querySelector('svg path');
+          const fill = path ? getComputedStyle(path).fill : '';
+          // 已赞时图标路径是抖音红 rgb(255, 44, 85)，未赞是 none/白
+          return /255,\s*44,\s*85/.test(fill) || /fe2c55/i.test(fill);
         });
         if (alreadyLiked) {
           liked = true;
