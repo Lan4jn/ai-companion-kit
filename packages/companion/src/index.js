@@ -167,7 +167,7 @@ async function main() {
   chatterLearner.start();
 
   // 成长记忆：群友对她的批评、表扬、特殊事件 → 自我认知
-  initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth });
+  initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth, brain });
 
   /** @type {Map<string, NodeJS.Timeout>} 每个会话的合并定时器 */
   const pending = new Map();
