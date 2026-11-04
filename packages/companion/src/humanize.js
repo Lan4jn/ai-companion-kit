@@ -153,7 +153,7 @@ export class Humanizer {
     if (!raw) return [];
 
     // 兼容模型输出的字面量反斜杠换行 \n 与真实换行
-    const normalized = raw.replace(/\\n/g, '\n');
+    const normalized = raw.replace(/\\{1,3}n/g, '\n').replace(/\r\n?/g, '\n').replace(/\u2028/g, '\n');
 
     // 抽取出 CQ 码，防止被分句切割。
     // at 必须留在原句里（@ 和前后文字同一条气泡），image 单独成条更自然。
@@ -166,9 +166,9 @@ export class Humanizer {
 
     // 保护英文单词、数字、中英文混排之间的普通空格，避免把 Hello World / RTX 4070 拆碎！
     const protectedText = sanitized
-      .replace(/([a-zA-Z0-9_.-])\s+([a-zA-Z0-9_.-])/g, '$1\u200B$2')
-      .replace(/([\u4e00-\u9fa5])\s+([a-zA-Z0-9])/g, '$1\u200B$2')
-      .replace(/([a-zA-Z0-9])\s+([\u4e00-\u9fa5])/g, '$1\u200B$2');
+      .replace(/([a-zA-Z0-9_.-])[ \t]+([a-zA-Z0-9_.-])/g, '$1\u200B$2')
+      .replace(/([\u4e00-\u9fa5])[ \t]+([a-zA-Z0-9])/g, '$1\u200B$2')
+      .replace(/([a-zA-Z0-9])[ \t]+([\u4e00-\u9fa5])/g, '$1\u200B$2');
 
     // 1) 先按换行切 —— 由小鱼自己决定是否分条发送（每一行代表一条独立气泡）
     const lines = protectedText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
