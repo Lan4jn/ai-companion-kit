@@ -23,6 +23,36 @@ let activeMemory = null;
 let activeRoom = null;
 let timer = null;
 
+// ── 自主刷抖音时的互动预算 ──
+// 抖音风控比 B 站严得多，评论必须低频，点赞可以常点，关注极少。
+let douyinOpts = {
+  likeChance: 0.7,
+  commentChance: 0.2,
+  commentDailyMax: 3,
+  followChance: 0.12,
+};
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function readDailyStats(dataDir) {
+  try {
+    const f = path.join(dataDir, 'douyin-daily.json');
+    if (fs.existsSync(f)) {
+      const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (d && d.date === todayKey()) return d;
+    }
+  } catch {}
+  return { date: todayKey(), comments: 0, likes: 0 };
+}
+
+function writeDailyStats(dataDir, s) {
+  try {
+    fs.writeFileSync(path.join(dataDir, 'douyin-daily.json'), JSON.stringify(s), 'utf8');
+  } catch {}
+}
+
 let state = {
   isRunning: false,
   lastAction: '刚躺回床上歇着',
@@ -72,7 +102,7 @@ async function dismissPopups(page) {
 /**
  * 观看并互动指定抖音视频
  */
-export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, commentText = '', doFollow = false } = {}) {
+export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, commentText = '', doFollow = false, commentGenerator = null } = {}) {
   let browser = null;
   let page = null;
   const dataDir = activeMemory?.dataDir || '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/data';
@@ -113,6 +143,30 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
       saveSnapshot(snap, { platform: 'douyin', title: '小鱼正在看抖音视频' });
     } catch {}
 
+    // 登录墙/验证码检测：未登录时任何点赞评论都只会弹登录框，绝不能当成成功
+    const gate = await page.evaluate(() => {
+      const txt = document.body.innerText || '';
+      return {
+        loginPanel: !!document.querySelector('[id^="login-full-panel"]'),
+        loginWallText: txt.includes('登录后免费畅享') || txt.includes('登录后可查看'),
+        slider: txt.includes('按住左边按钮拖动') || txt.includes('请完成下列验证'),
+        digg: !!document.querySelector('[data-e2e="video-player-digg"]'),
+      };
+    });
+    if (gate.loginPanel || gate.loginWallText || gate.slider) {
+      const why = gate.slider ? '滑块验证' : '未登录';
+      console.log(`[douyin] 视频页被${why}拦住（cookie 已失效），本次不做互动`);
+      return {
+        success: false,
+        needLogin: true,
+        reason: why,
+        info: { title: '', author: '', likes: '', topComments: [] },
+        liked: false,
+        commented: false,
+        followed: false,
+      };
+    }
+
     // 提取视频元数据与评论
     const info = await page.evaluate(() => {
       const titleEl = document.querySelector('h1, [data-e2e="detail-video-info"]');
@@ -139,15 +193,41 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
     let commented = false;
     let followed = false;
 
+    // 先看过视频再决定评什么：评论内容由外部生成器基于真实标题/作者/热评产出
+    if (!commentText && typeof commentGenerator === 'function') {
+      try {
+        commentText = String((await commentGenerator(info)) || '').trim();
+      } catch (e) {
+        console.log('[douyin] 生成评论失败:', e.message);
+      }
+    }
+
     // 1. 点赞互动
     if (doLike) {
       try {
-        await page.evaluate(() => {
+        const alreadyLiked = await page.evaluate(() => {
           const digg = document.querySelector('[data-e2e="video-player-digg"]');
-          if (digg) digg.click();
+          if (!digg) return false;
+          const label = `${digg.getAttribute('aria-label') || ''} ${digg.innerText || ''}`;
+          return /取消|已赞/.test(label) || digg.className?.includes?.('active');
         });
-        liked = true;
-        console.log(`[douyin] 已为视频《${info.title.slice(0, 20)}》点赞`);
+        if (alreadyLiked) {
+          liked = true;
+          console.log('[douyin] 这条已经赞过了，跳过避免点成取消');
+        } else {
+          const clicked = await page.evaluate(() => {
+            const digg = document.querySelector('[data-e2e="video-player-digg"]');
+            if (!digg) return false;
+            digg.click();
+            return true;
+          });
+          if (clicked) {
+            liked = true;
+            console.log(`[douyin] 已为视频《${info.title.slice(0, 20)}》点赞`);
+          } else {
+            console.log('[douyin] 没找到点赞按钮，未点赞');
+          }
+        }
       } catch (e) {
         console.log('[douyin] 点赞失败:', e.message);
       }
@@ -163,15 +243,30 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
             if (c) c.click();
           });
           await page.waitForTimeout(800);
-          await page.evaluate(() => {
+          const ready = await page.evaluate(() => {
             const ed = document.querySelector('.public-DraftEditor-content');
-            if (ed) ed.focus();
+            if (!ed) return false;
+            ed.focus();
+            return true;
           });
-          await page.keyboard.type(commentText);
-          await page.waitForTimeout(500);
-          await page.keyboard.press('Enter');
-          commented = true;
-          console.log(`[douyin] 评论发布成功: “${commentText}”`);
+          if (!ready) {
+            console.log('[douyin] 未找到评论输入框（可能未登录或无评论权限），本次不评论');
+          } else {
+            await page.keyboard.type(commentText, { delay: 40 });
+            await page.waitForTimeout(600);
+            await page.keyboard.press('Enter');
+            await page.waitForTimeout(1200);
+            // 提交后输入框应被清空，据此判断是否真的发出去了
+            const sent = await page.evaluate(() => {
+              const ed = document.querySelector('.public-DraftEditor-content');
+              const left = (ed?.innerText || '').trim();
+              return left.length === 0;
+            });
+            commented = sent;
+            console.log(sent
+              ? `[douyin] 评论发布成功: “${commentText}”`
+              : `[douyin] 评论似乎没提交成功（输入框仍有内容），按未评论处理`);
+          }
         } catch (e) {
           console.log('[douyin] 发评论失败:', e.message);
         }
@@ -183,12 +278,18 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
     // 3. 关注作者
     if (doFollow) {
       try {
-        await page.evaluate(() => {
+        const done = await page.evaluate(() => {
           const btn = Array.from(document.querySelectorAll('button.semi-button')).find(b => b.innerText?.trim() === '关注');
-          if (btn) btn.click();
+          if (!btn) return false;
+          btn.click();
+          return true;
         });
-        followed = true;
-        console.log(`[douyin] 已关注作者: ${info.author}`);
+        if (done) {
+          followed = true;
+          console.log(`[douyin] 已关注作者: ${info.author}`);
+        } else {
+          console.log('[douyin] 没找到关注按钮（可能已关注或未登录），未关注');
+        }
       } catch (e) {
         console.log('[douyin] 关注失败:', e.message);
       }
@@ -258,26 +359,48 @@ export async function fetchDouyinFeed() {
     await page.waitForTimeout(3000);
 
     const items = await page.evaluate(() => {
+      // 抖音推荐流的卡片容器带 data-aweme-id，没有 <a href>，只能从这里拿视频 ID
+      const cards = [];
+      const seenIds = new Set();
+      for (const card of Array.from(document.querySelectorAll('[data-aweme-id]'))) {
+        const id = card.getAttribute('data-aweme-id');
+        const text = card.innerText || '';
+        if (!id || !/^\d+$/.test(id) || seenIds.has(id)) continue;
+        if (text.length < 10 || text.length > 400) continue;
+        seenIds.add(id);
+        cards.push({ text, href: `https://www.douyin.com/video/${id}` });
+      }
+      if (cards.length) return cards;
+
+      // 兜底：老版本页面结构，按文本反推
       const all = Array.from(document.querySelectorAll('*'));
       const rawList = [];
       for (const el of all) {
         if (el.children.length > 1 && el.children.length < 10) {
           const text = el.innerText || '';
           if (text.includes('@') && text.length > 15 && text.length < 350) {
-            rawList.push(text);
+            let href = '';
+            const a = el.querySelector('a[href*="/video/"]') || el.closest('a[href*="/video/"]');
+            if (a) href = a.getAttribute('href') || '';
+            if (!href) {
+              const anyA = Array.from(el.querySelectorAll('a')).find((x) => (x.getAttribute('href') || '').includes('/video/'));
+              if (anyA) href = anyA.getAttribute('href') || '';
+            }
+            rawList.push({ text, href });
           }
         }
       }
       const unique = [];
-      for (const t of rawList) {
-        if (!unique.some((u) => u.includes(t) || t.includes(u))) {
-          unique.push(t);
+      for (const item of rawList) {
+        const t = item.text;
+        if (!unique.some((u) => u.text.includes(t) || t.includes(u.text))) {
+          unique.push(item);
         }
       }
       return unique;
     });
 
-    const parsed = items.map((raw) => {
+    const parsed = items.map(({ text: raw, href }) => {
       const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
       let duration = '';
       let views = '';
@@ -303,6 +426,7 @@ export async function fetchDouyinFeed() {
         duration: duration || '00:30',
         views: views || '1万',
         timeAgo: timeAgo || '近期',
+        url: href ? (href.startsWith('http') ? href : `https://www.douyin.com${href}`) : '',
         raw,
       };
     }).filter((x) => x.title && x.title.length > 5);
@@ -426,10 +550,58 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
     ];
   }
 
-  const pick = feed[Math.floor(Math.random() * Math.min(feed.length, 5))];
+  // 优先挑带链接、能真的打开去互动的视频
+  const withUrl = feed.filter((x) => x.url && /\/video\/\d+/.test(x.url));
+  const pool = withUrl.length ? withUrl : feed;
+  const pick = pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
   state.lastVideo = pick;
   state.lastAction = `在电脑上刷到了 ${pick.author} 发的《${pick.title.slice(0, 25)}》`;
   state.updatedAt = Date.now();
+
+  // 真实打开这条视频并按概率点赞 / 评论 / 关注（以前这里只抓标题，一个互动动作都没有）
+  let interaction = { liked: false, commented: false, followed: false };
+  let loginBlocked = '';
+  if (pick.url && /\/video\/\d+/.test(pick.url)) {
+    const stats = readDailyStats(dataDir);
+    const canComment = stats.comments < douyinOpts.commentDailyMax;
+    const wantComment = canComment && Math.random() < douyinOpts.commentChance;
+
+    let commentGenerator = null;
+    if (wantComment && activeBrain) {
+      commentGenerator = async (info) => {
+        const r = await activeBrain.reply({
+          key: 'internal:douyin-comment',
+          userId: 'system',
+          userName: '系统',
+          text: `【你在抖音刷到一条视频，想留一句评论】\n标题：《${info.title}》\n作者：${info.author}\n热评：${(info.topComments || []).slice(0, 3).join('；') || '暂无'}\n\n请写一句符合你性格的真实网友短评（8~20字，口语化、像老群友随口一句，可有梗）。严禁脏话、引战、阴阳性别/地域/职业，严禁谈政治。只输出这句话本身，不要引号和解释。`,
+          situation: '你在刷抖音，看到一个想评论的视频。',
+        });
+        return String(r?.text || '').replace(/^["“”']|["“”']$/g, '').trim();
+      };
+    }
+
+    try {
+      const res = await watchAndInteractDouyinVideo(pick.url, {
+        doLike: Math.random() < douyinOpts.likeChance,
+        doFollow: Math.random() < douyinOpts.followChance,
+        commentGenerator,
+      });
+      if (res && res.success) {
+        interaction = { liked: !!res.liked, commented: !!res.commented, followed: !!res.followed };
+        if (res.info && res.info.title) pick.title = res.info.title;
+      } else if (res && res.needLogin) {
+        loginBlocked = res.reason || '未登录';
+        console.log(`[douyin] 抖音登录态失效（${loginBlocked}），这条只做文字感想，不伪装互动`);
+      }
+      if (interaction.liked) stats.likes = (stats.likes || 0) + 1;
+      if (interaction.commented) stats.comments = (stats.comments || 0) + 1;
+      writeDailyStats(dataDir, stats);
+    } catch (e) {
+      console.log('[douyin] 打开视频互动失败:', e?.message || e);
+    }
+  } else {
+    console.log('[douyin] 这条没抓到视频链接，只做文字感想，不假装互动');
+  }
 
   let thought = `刚在抖音刷到了 ${pick.author} 的《${pick.title}》，点赞都 ${pick.views} 了，看完了挺有意思的。`;
   if (activeBrain) {
@@ -459,6 +631,10 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
       title: pick.title,
       author: pick.author,
       thought,
+      liked: interaction.liked,
+      commented: interaction.commented,
+      followed: interaction.followed,
+      loginBlocked: loginBlocked || undefined,
       at: new Date().toISOString(),
     };
     fs.appendFileSync(diaryFile, JSON.stringify(entry) + '\n', 'utf8');
@@ -480,7 +656,13 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
   return {
     video: pick,
     thought,
-    report: `开了，电脑上正刷着呢。\n第一条刷到了 ${pick.author} 的《${pick.title.slice(0, 28)}》：${thought}`,
+    liked: interaction.liked,
+    commented: interaction.commented,
+    followed: interaction.followed,
+    report: `开了，电脑上正刷着呢。\n第一条刷到了 ${pick.author} 的《${pick.title.slice(0, 28)}》：${thought}`
+      + (interaction.liked ? '（顺手点了赞）' : '')
+      + (interaction.commented ? '（还留了条评论）' : '')
+      + (loginBlocked ? '（不过抖音登录掉了，只能看不能赞）' : ''),
   };
 }
 
@@ -498,10 +680,13 @@ export function setDouyinRoom(room) {
 /**
  * 启动抖音生活定时轮巡（自主摸鱼机制）
  */
-export function startDouyinLiving({ brain, memory, room, intervalMin = 90 } = {}) {
+export function startDouyinLiving({ brain, memory, room, intervalMin = 90, opts = null } = {}) {
   activeBrain = brain;
   activeMemory = memory;
   if (room) activeRoom = room;
+  if (opts && typeof opts === 'object') {
+    douyinOpts = { ...douyinOpts, ...opts };
+  }
 
   console.log('[DouyinLiving] 抖音自主摸鱼系统已启动（每隔 60~120 分钟逛一次推荐流）');
 

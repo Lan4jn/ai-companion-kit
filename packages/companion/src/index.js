@@ -253,8 +253,19 @@ async function main() {
   const room = startVirtualRoomServer({ douyinLiving: { browseDouyinLive } });
   setDouyinRoom(room);
 
-  // 启动小鱼抖音自主生活系统（支持抓取真实推荐流、写日记、向老爸汇报）
-  startDouyinLiving({ brain, memory, room });
+  // 启动小鱼抖音自主生活系统（支持抓取真实推荐流、点赞评论关注、写日记、向老爸汇报）
+  const dyCfg = cfg.douyin || {};
+  startDouyinLiving({
+    brain,
+    memory,
+    room,
+    opts: {
+      likeChance: Number.isFinite(dyCfg.likeChance) ? dyCfg.likeChance : 0.7,
+      commentChance: Number.isFinite(dyCfg.commentChance) ? dyCfg.commentChance : 0.2,
+      commentDailyMax: Number.isFinite(dyCfg.commentDailyMax) ? dyCfg.commentDailyMax : 3,
+      followChance: Number.isFinite(dyCfg.followChance) ? dyCfg.followChance : 0.12,
+    },
+  });
 
   // 启动小鱼全网冲浪与吃瓜系统（自主看微博/B站/百度热搜、查背景、写日记、聊天分享）
   startWebLiving({ brain, memory });
