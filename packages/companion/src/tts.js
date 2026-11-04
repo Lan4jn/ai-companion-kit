@@ -10,6 +10,61 @@ import https from 'node:https';
 
 const run = promisify(execFile);
 
+/**
+ * 用 curl 走可选代理取回二进制（fish.audio 在墙外，直连 100% 超时）。
+ * 代理地址来自配置，不写死在代码里。
+ */
+function curlToBuffer(args, input, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('curl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const out = [];
+    const err = [];
+    const timer = setTimeout(() => {
+      p.kill('SIGKILL');
+      reject(new Error('fish.audio timeout'));
+    }, timeoutMs);
+    p.stdout.on('data', (c) => out.push(c));
+    p.stderr.on('data', (c) => err.push(c));
+    p.on('error', (e) => { clearTimeout(timer); reject(e); });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      const buf = Buffer.concat(out);
+      if (code !== 0) return reject(new Error(`curl exit ${code}: ${Buffer.concat(err).toString().slice(0, 120)}`));
+      if (buf.length < 512) return reject(new Error(`fish 返回内容过短(${buf.length}B): ${Buffer.concat(err).toString().slice(0, 120)}`));
+      resolve(buf);
+    });
+    p.stdin.end(input);
+  });
+}
+
+/**
+ * fish.audio 兜底音色（zero-shot voice clone）。
+ * 跨境 + 免费档排队，正常 3~5 秒，超时给到 30 秒。
+ */
+async function synthesizeFish(text, fishCfg, timeoutMs = 30000) {
+  if (!fishCfg?.apiKey || !fishCfg?.referenceId) throw new Error('fish not configured');
+  const model = fishCfg.model || 's2.1-pro-free';
+  const base = (fishCfg.apiBase || 'https://api.fish.audio/v1').replace(/\/+$/, '');
+  const payload = JSON.stringify({
+    text,
+    reference_id: fishCfg.referenceId,
+    format: 'mp3',
+    mp3_bitrate: 128,
+    model,
+  });
+  const args = [
+    '-sS', '--max-time', String(Math.ceil(timeoutMs / 1000)),
+    '-X', 'POST', `${base}/tts`,
+    '-H', `Authorization: Bearer ${fishCfg.apiKey}`,
+    '-H', 'Content-Type: application/json',
+    '-H', `model: ${model}`,
+    '--data-binary', '@-',
+  ];
+  if (fishCfg.proxy) args.unshift('-x', fishCfg.proxy);
+  const buf = await curlToBuffer(args, payload, timeoutMs);
+  return { ok: true, base64: buf.toString('base64'), bytes: buf.length, voice: `fish:${fishCfg.referenceId.slice(0, 8)}` };
+}
+
 // 豆包语音合成 2.0 (seed-tts-2.0) 音色映射
 const DOUBAO_VOICES = {
   cute: 'zh_female_vv_uranus_bigtts',             // Vivi 2.0 活泼元气少女音
@@ -257,11 +312,24 @@ export async function synthesize(text, opts = {}) {
         rawRes = res;
       }
     } catch (e) {
-      console.warn(`[TTS] 豆包语音合成异常，自动回退到 edge-tts: ${e?.message || e}`);
+      console.warn(`[TTS] 豆包语音合成异常，尝试次级兜底: ${e?.message || e}`);
     }
   }
 
-  // 2. 兜底 edge-tts
+  // 2. 兜底 fish.audio（跨境的克隆音色，只在豆包失败时用）
+  if (!rawRes && cfg?.tts?.fish?.apiKey) {
+    try {
+      const res = await synthesizeFish(clean, cfg.tts.fish, Math.min(timeoutMs, 30000));
+      if (res && res.ok && res.bytes > 0) {
+        rawRes = res;
+        console.warn(`[TTS] 豆包不可用，已回退 fish.audio (${res.voice})`);
+      }
+    } catch (e) {
+      console.warn(`[TTS] fish.audio 兜底失败，继续回退 edge-tts: ${e?.message || e}`);
+    }
+  }
+
+  // 3. 最后兜底 edge-tts
   if (!rawRes) {
     rawRes = await synthesizeEdge(clean, style, dir, timeoutMs);
   }
@@ -283,4 +351,5 @@ export async function synthesize(text, opts = {}) {
   return rawRes;
 }
 
-export default { synthesize, TTS_STYLES };
+export { synthesizeFish };
+export default { synthesize, synthesizeFish, TTS_STYLES };
