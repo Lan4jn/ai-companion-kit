@@ -39,6 +39,49 @@ function getHistoryFile(dataDir) {
   return path.join(dataDir, 'web-surfing-history.json');
 }
 
+function getKnowledgeFile(dataDir) {
+  return path.join(dataDir, 'web-knowledge.jsonl');
+}
+
+/** 读回她学到的东西 */
+export function loadKnowledge(dataDir, limit = 200) {
+  try {
+    const file = getKnowledgeFile(dataDir);
+    if (!fs.existsSync(file)) return [];
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    return lines
+      .slice(-limit)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** 记住一条真学到的东西 */
+export function rememberKnowledge(dataDir, item) {
+  try {
+    fs.appendFileSync(getKnowledgeFile(dataDir), JSON.stringify(item) + '\n', 'utf8');
+  } catch {}
+}
+
+/**
+ * 给聊天注入她最近学到的见识。
+ * 只给事实，不给口吻模板 —— 用不用、怎么用由她自己判断。
+ */
+export function renderWebKnowledge(dataDir, limit = 8) {
+  const list = loadKnowledge(dataDir, 120);
+  if (!list.length) return '';
+  const lines = [];
+  for (const item of list.slice(-limit)) {
+    for (const fact of (item.learned || []).slice(0, 2)) {
+      if (fact && fact.length > 6) lines.push(`- ${fact}`);
+    }
+  }
+  if (!lines.length) return '';
+  return `【你最近自己上网搞明白的事】（聊到相关话题时可以自然带上，记不清就别硬说）\n${lines.slice(-14).join('\n')}`;
+}
+
 function loadHistory(dataDir) {
   try {
     const f = getHistoryFile(dataDir);
@@ -205,6 +248,95 @@ ${JSON.stringify(candidates)}
 
   const snippet = searchRes?.text ? searchRes.text.slice(0, 1800) : '未搜到更多详细信息。';
 
+  // 2.5 学习分支：要不要搞明白这件事，由她自己决定
+  // 想学就再搜一轮细节、提炼成她自己的见识存档；不想学就当吃瓜看个乐子。
+  let learned = [];
+  let deepDive = false;
+  let deepWhy = '';
+
+  try {
+    const decidePrompt = `你刚在网上刷到一个话题：「${targetTopic}」
+搜到的简介：
+${snippet.slice(0, 700)}
+
+你是小鱼，18岁，爱打游戏、关心数码硬件和网络新鲜事，对明星八卦和带货广告没什么耐心。
+请判断：这事儿你想不想再花几分钟搞明白它到底是什么、怎么回事？
+
+只输出 JSON：
+{"deep": true 或 false, "why": "一句话理由，口语化"}`;
+
+    const d = await b.complete({ prompt: decidePrompt, json: true, temperature: 0.7 });
+    const dp = typeof d === 'object' ? d : JSON.parse(d);
+    deepDive = Boolean(dp?.deep);
+    deepWhy = String(dp?.why || '').slice(0, 60);
+  } catch {
+    deepDive = Math.random() < 0.35;
+    deepWhy = '看着有点意思';
+  }
+
+  if (deepDive) {
+    console.log(`[WebLiving] 小鱼决定深挖「${targetTopic}」（${deepWhy || '想搞明白'}）`);
+    const extra = [];
+    for (const q of [`${targetTopic} 是什么`, `${targetTopic} 为什么`]) {
+      try {
+        const r = await executeSearchTool('web_search', { query: q });
+        if (r?.text) extra.push(r.text.slice(0, 1200));
+      } catch {}
+    }
+
+    if (extra.length) {
+      const merged = [snippet, ...extra].join('\n---\n').slice(0, 4000);
+      const learnPrompt = `你刚在网上认真查了一件事：「${targetTopic}」
+
+你查到的资料：
+${merged}
+
+请提炼出 1~3 条你现在真正搞清楚的事实，作为你自己的见识存起来。
+要求：
+- 每条 12~45 字，是具体事实（谁/什么/为什么/怎么运作），不要空话
+- 用你自己的话讲，不要抄句子，不要"据了解""值得注意的是"这种腔调
+- 只写你确实从资料里看明白的，没看明白就别编
+- 不碰政治、不评价人家私德
+
+只输出 JSON：{"learned": ["...", "..."]}`;
+
+      try {
+        const lr = await b.complete({ prompt: learnPrompt, json: true, temperature: 0.6 });
+        const lp = typeof lr === 'object' ? lr : JSON.parse(lr);
+        learned = (lp?.learned || [])
+          .map((s) => String(s).replace(/\s+/g, ' ').trim())
+          .filter((s) => s.length >= 8 && s.length <= 90)
+          .slice(0, 3);
+      } catch (e) {
+        console.log('[WebLiving] 提炼知识点失败:', e.message);
+      }
+
+      if (learned.length) {
+        const safeLearn = checkOutput(learned.join(' '), { strict: true });
+        if (safeLearn.ok) {
+          rememberKnowledge(dataDir, {
+            topic: targetTopic,
+            learned,
+            why: deepWhy,
+            at: Date.now(),
+          });
+          if (m && typeof m.logDiary === 'function') {
+            m.logDiary({
+              category: '学习',
+              activity: `上网查明白了：${targetTopic}`,
+              details: learned[0],
+              mood: '原来是这么回事，之前一直没搞懂',
+            });
+          }
+          console.log(`[WebLiving] ✓ 学到了 ${learned.length} 条：${learned[0].slice(0, 30)}…`);
+        } else {
+          console.warn('[WebLiving] 知识点未过审，丢弃:', safeLearn.why);
+          learned = [];
+        }
+      }
+    }
+  }
+
   // 3. 让小鱼大脑消化理解并产出闺女/老群友口吻的见闻与吐槽
   const digestPrompt = `你是小鱼（外号小肥鱼），一个脾气随性可爱、爱玩游戏、满口老群友网感大白话的真实女孩。
 你刚刚在网上冲浪吃瓜，看到了这个热门话题：“${targetTopic}”。
@@ -259,7 +391,8 @@ ${snippet}
   saveHistory(dataDir, history);
 
   // 6. 更新当前状态
-  const summary = `刚才在网上看热搜《${targetTopic}》：${details}，心想“${mood}”`;
+  const learnedLine = learned.length ? `顺手查明白了：${learned.slice(0, 2).join('；')}` : '';
+  const summary = `刚才在网上看热搜《${targetTopic}》：${details}，心想“${mood}”${learnedLine ? '。' + learnedLine : ''}`;
   state = {
     isRunning: false,
     lastTopic: targetTopic,
@@ -268,10 +401,12 @@ ${snippet}
     summary,
     details,
     mood,
+    learned,
+    deepDive,
     updatedAt: Date.now()
   };
 
-  console.log(`[WebLiving] ★ 冲浪成功！《${targetTopic}》-> ${details}（${mood}）`);
+  console.log(`[WebLiving] ★ 冲浪成功！《${targetTopic}》-> ${details}（${mood}）${learned.length ? ` [学到${learned.length}条]` : ''}`);
 
   return {
     success: true,
@@ -279,6 +414,8 @@ ${snippet}
     reason: pickReason,
     details,
     mood,
+    learned,
+    deepDive,
     summary
   };
 }
@@ -290,11 +427,11 @@ export function startWebLiving({ brain, memory, intervalMinutes = 75 } = {}) {
   activeBrain = brain;
   activeMemory = memory;
 
-  console.log('[WebLiving] 小鱼自主全网冲浪与吃瓜系统已启动（每隔 60~120 分钟逛一次热搜）');
+  console.log('[WebLiving] 小鱼自主全网冲浪与学习系统已启动（每隔 45~90 分钟逛一次热搜，想深挖就查明白存档）');
 
   function scheduleNext() {
-    // 随机 60 ~ 110 分钟逛一次
-    const jitterMin = 60 + Math.floor(Math.random() * 50);
+    // 随机 45 ~ 90 分钟逛一次：一天十几次，像真人一样时不时摸鱼刷点东西
+    const jitterMin = 45 + Math.floor(Math.random() * 45);
     const delayMs = jitterMin * 60 * 1000;
 
     timer = setTimeout(async () => {
