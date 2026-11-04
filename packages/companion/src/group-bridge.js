@@ -14,7 +14,9 @@ export function initGroupBridge({ bot, dataDir = './data', limits = {} } = {}) {
     bot,
     dataDir,
     limits: {
-      dailyPerGroup: limits.dailyPerGroup ?? 5,
+      maxPerCommand: limits.maxPerCommand ?? 2,
+      commandWindowMs: limits.commandWindowMs ?? 60000,
+      dailyPerGroup: limits.dailyPerGroup ?? 30,
       minGapMs: limits.minGapMs ?? 8000,
       maxGapMs: limits.maxGapMs ?? 18000,
       allowedGroups: Array.isArray(limits.allowedGroups) ? limits.allowedGroups.map(String) : null,
@@ -22,6 +24,8 @@ export function initGroupBridge({ bot, dataDir = './data', limits = {} } = {}) {
     },
     queue: [],
     sentToday: {},
+    cmdWindowAt: 0,
+    cmdWindowCount: 0,
     dayKey: '',
     nextAt: 0,
     timer: null,
@@ -119,6 +123,17 @@ export function enqueueGroupMessage({ groupId, text, atQq } = {}) {
   if (!gid || !body) return { status: 'error', message: '群号或内容为空' };
   if (!allowed(gid)) return { status: 'error', message: `我不能往群 ${gid} 发消息` };
 
+  // 按"一次命令"计数：60 秒内的连续入队算同一条命令，最多 maxPerCommand 条
+  const now = Date.now();
+  if (now - bridge.cmdWindowAt > bridge.limits.commandWindowMs) {
+    bridge.cmdWindowAt = now;
+    bridge.cmdWindowCount = 0;
+  }
+  if (bridge.cmdWindowCount >= bridge.limits.maxPerCommand) {
+    return { status: 'error', message: `一句话顶多带 ${bridge.limits.maxPerCommand} 句，再说就成刷屏了，等会儿` };
+  }
+  bridge.cmdWindowCount += 1;
+
   const at = atQq ? `[CQ:at,qq=${String(atQq).replace(/\D/g, '')}] ` : '';
   bridge.queue.push({ gid, text: at + body, queuedAt: Date.now() });
   saveQueue();
@@ -133,7 +148,7 @@ export function startOutboxWorker() {
   if (!bridge || bridge.timer) return;
   bridge.timer = setInterval(() => { tick().catch(() => {}); }, 3000);
   tick().catch(() => {});
-  console.log('[群桥] 出队服务已启动（每群每日上限 ' + bridge.limits.dailyPerGroup + ' 条）');
+  console.log(`[群桥] 出队服务已启动（单次命令 ≤${bridge.limits.maxPerCommand} 条，每日兜底 ${bridge.limits.dailyPerGroup} 条/群）`);
 }
 
 async function tick() {
