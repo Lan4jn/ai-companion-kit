@@ -94,6 +94,62 @@ async function callProvider({ prompt, size, providerName }) {
     return { buffer: png, ext: 'png' };
   }
 
+  // Responses API：gpt-image 系列只在这条路上，图以 base64 从 SSE 里流出来
+  if (p.type === 'responses') {
+    const chatModel = p.chatModel || 'gpt-6.1-sol';
+    const imgModel = p.imageModel || model;
+    const res = await fetch(`${base}/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.apiKey}` },
+      body: JSON.stringify({
+        model: chatModel,
+        input: prompt,
+        tools: [{ type: 'image_generation', model: imgModel, ...(size ? { size } : {}) }],
+      }),
+      signal: AbortSignal.timeout(p.timeoutMs || 300000),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      throw new Error(`生图失败 ${res.status}: ${t.slice(0, 200)}`);
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let b64 = '';
+    let errMsg = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dataLine = chunk.split('\n').find((l) => l.startsWith('data: '));
+        if (!dataLine) continue;
+        let d;
+        try { d = JSON.parse(dataLine.slice(6)); } catch { continue; }
+        if (d.type === 'response.output_item.done') {
+          const item = d.item || {};
+          if (typeof item.result === 'string' && item.result.length > 100) b64 = item.result;
+          else if (item.image_url) b64 = `URL:${item.image_url}`;
+        } else if (d.type === 'response.failed' || d.type === 'error') {
+          errMsg = JSON.stringify(d.error || d).slice(0, 200);
+        }
+      }
+      if (b64) break;
+    }
+    if (errMsg) throw new Error('生图失败：' + errMsg);
+    if (!b64) throw new Error('生图流里没拿到图片');
+    if (b64.startsWith('URL:')) {
+      const u = b64.slice(4);
+      const img = await fetch(u, { signal: AbortSignal.timeout(60000) });
+      return { buffer: Buffer.from(await img.arrayBuffer()), ext: 'png' };
+    }
+    return { buffer: Buffer.from(b64, 'base64'), ext: 'png' };
+  }
+
   let url, body;
   if (p.type === 'ark') {
     url = `${base}/images/generations`;
@@ -132,11 +188,9 @@ async function callProvider({ prompt, size, providerName }) {
   throw new Error('生图返回既没有 url 也没有 b64_json');
 }
 
-/** 画一张并存进图库 */
-export async function generateImage({ prompt, tags = '', size, provider } = {}) {
-  if (!isImageGenReady()) throw new Error('生图功能未就绪');
+/** 画一张并存进图库（内部实现，可能要几分钟） */
+async function doGenerate({ prompt, tags = '', size, provider } = {}) {
   const text = String(prompt || '').trim();
-  if (!text) throw new Error('prompt 为空');
 
   const { buffer, ext } = await callProvider({ prompt: text, size, providerName: provider });
   if (!buffer?.length) throw new Error('图片数据为空');
@@ -159,6 +213,31 @@ export async function generateImage({ prompt, tags = '', size, provider } = {}) 
   const row = db.prepare('SELECT * FROM images WHERE path = ?').get(file);
   console.log(`[ImageGen] 画好了 #${row.id}：${text.slice(0, 40)} → ${path.relative(root, file)}`);
   return row;
+}
+
+/** 对外入口：等一小会儿，画不完就转后台，别把对话卡死 */
+export async function generateImage({ prompt, tags = '', size, provider, waitMs } = {}) {
+  if (!isImageGenReady()) throw new Error('生图功能未就绪');
+  const text = String(prompt || '').trim();
+  if (!text) throw new Error('prompt 为空');
+
+  const limit = Number(waitMs ?? cfg.waitMs ?? 60000);
+  const job = doGenerate({ prompt: text, tags, size, provider });
+
+  const row = await Promise.race([
+    job,
+    new Promise((r) => setTimeout(() => r(null), limit)),
+  ]);
+
+  if (row) return row;
+
+  // 超时：交给后台继续画，画完入库
+  job
+    .then((r) => console.log(`[ImageGen] 后台画完 #${r.id}：${text.slice(0, 30)}`))
+    .catch((e) => console.error('[ImageGen] 后台生图失败：' + (e?.message || e)));
+
+  console.log(`[ImageGen] 超过 ${Math.round(limit / 1000)} 秒还没画完，转后台：${text.slice(0, 30)}`);
+  return { pending: true, prompt: text, note: '还在画，画完会进图库' };
 }
 
 /** 按关键词找现成的图，返回候选让她自己挑 */
