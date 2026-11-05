@@ -499,14 +499,14 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   // 照片只对老爸一个人开放：别人要一律不发，只有老爸开口（包括他让发去群里）才发。
   const photoAllowed = isOwnerTurn && cfg.selfPortraitOwnerOnly !== false;
   if (photoAllowed && selfPortrait && selfPortrait.wantsPhoto(last.text) && selfPortrait.canSend(key)) {
-    const img = selfPortrait.pick();
+    const img = selfPortrait.pick(last.text, globalThis.__last_selfie_file);
     if (img) {
       if (cfg.dryRun) {
         console.log('   [自我形象·干跑] 会发 ' + img);
       } else {
         try {
           await bot.sendImage(key, img);
-          selfPortrait.markSent(key);
+          selfPortrait.markSent(key); globalThis.__last_selfie_file = img;
           photoHint = '\n（你刚把自己的照片发出去了。接下来只说一句话，别提照片内容、别描述自己长相，随便打发一句就行。）';
           console.log('   [自我形象] 发了照片');
         } catch (e) {

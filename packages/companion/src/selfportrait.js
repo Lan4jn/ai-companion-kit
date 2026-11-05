@@ -123,10 +123,30 @@ export class SelfPortrait {
     return Date.now() - last > cd;
   }
 
-  pick() {
+  pick(contextText = '', lastPath = '') {
     const imgs = this.images();
     if (!imgs.length) return null;
-    return imgs[Math.floor(Math.random() * imgs.length)];
+    if (imgs.length === 1) return imgs[0];
+
+    // 语境倾向
+    const t = String(contextText || '');
+    if (/洗脸|洗完脸|洗过脸|素颜|水润|湿/.test(t)) {
+      const match = imgs.find(f => f.includes('washface'));
+      if (match) return match;
+    }
+    if (/阳台|天气|阴天|刮风|外面|冷|凉/.test(t)) {
+      const match = imgs.find(f => f.includes('balcony'));
+      if (match) return match;
+    }
+    if (/生气|气鼓鼓|噘嘴|笨鱼|气人|不理你|嘟嘴/.test(t)) {
+      const match = imgs.find(f => f.includes('pout'));
+      if (match) return match;
+    }
+
+    // 排除上一次发过的那张，避免连发两张完全一样的图
+    const candidates = lastPath ? imgs.filter(f => f !== lastPath) : imgs;
+    const pool = candidates.length > 0 ? candidates : imgs;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
   markSent(key) {

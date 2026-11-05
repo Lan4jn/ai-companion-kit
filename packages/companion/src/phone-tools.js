@@ -758,8 +758,24 @@ export async function executePhoneTool(name, args = {}) {
           if (fs.existsSync(selfDir)) {
             const files = fs.readdirSync(selfDir).filter(f => /\.(png|jpe?g|webp)$/i.test(f));
             if (files.length > 0) {
-              const pick = files[Math.floor(Math.random() * files.length)];
-              targetFile = path.join(selfDir, pick);
+              const rText = String(args.reason || '');
+              // 语境挑选
+              let matched = null;
+              if (/洗脸|洗完脸|洗过脸|素颜|水润|湿/.test(rText)) matched = files.find(f => f.includes('washface'));
+              else if (/阳台|天气|阴天|刮风|外面|冷|凉/.test(rText)) matched = files.find(f => f.includes('balcony'));
+              else if (/生气|气鼓鼓|噘嘴|笨鱼|气人|不理你|嘟嘴/.test(rText)) matched = files.find(f => f.includes('pout'));
+
+              if (matched) {
+                targetFile = path.join(selfDir, matched);
+              } else {
+                // 排除刚刚发过的，避免老爸说“换一张”时又抽到同一张
+                const pool = (globalThis.__last_selfie_file && files.length > 1)
+                  ? files.filter(f => f !== globalThis.__last_selfie_file)
+                  : files;
+                const pick = pool[Math.floor(Math.random() * pool.length)];
+                targetFile = path.join(selfDir, pick);
+              }
+              globalThis.__last_selfie_file = path.basename(targetFile);
             }
           }
           if (!targetFile || !fs.existsSync(targetFile)) {
