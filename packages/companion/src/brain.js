@@ -317,9 +317,13 @@ export class Brain {
     }
 
     try {
+      const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey };
+      if (String(this.baseUrl).includes('opencode.ai')) {
+        hdrs['x-opencode-session'] = 'xiaoyu-inner-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      }
       const res = await fetch(this.baseUrl + '/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey },
+        headers: hdrs,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(Math.min(this.timeoutMs, 60000)),
       });

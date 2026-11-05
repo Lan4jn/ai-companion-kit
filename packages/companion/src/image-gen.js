@@ -246,9 +246,9 @@ async function doGenerate({ prompt, tags = '', size, quality, kind, provider } =
     INSERT INTO images (path, prompt, tags, kind, provider, model, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET prompt = excluded.prompt
-  `).run(file, text, String(tags || ''), String(kind || 'illustration'), p.name || '', p.model || '', Date.now());
+  `).run(path.relative(root, file), text, String(tags || ''), String(kind || 'illustration'), p.name || '', p.model || '', Date.now());
 
-  const row = db.prepare('SELECT * FROM images WHERE path = ?').get(file);
+  const row = db.prepare('SELECT * FROM images WHERE path = ?').get(path.relative(root, file));
   console.log(`[ImageGen] 画好了 #${row.id}：${text.slice(0, 40)} → ${path.relative(root, file)}`);
   return row;
 }
@@ -283,7 +283,7 @@ export function discardImage(id) {
   if (!isImageGenReady()) throw new Error('生图功能未就绪');
   const row = db.prepare(`SELECT * FROM images WHERE id = ?`).get(Number(id));
   if (!row) throw new Error(`图库里没有编号 ${id} 的图`);
-  const abs = path.join(dir, row.path);
+  const abs = path.isAbsolute(row.path) ? row.path : path.join(root, row.path);
   try { if (fs.existsSync(abs)) fs.unlinkSync(abs); } catch (e) { console.log('[ImageGen] 删文件失败：' + e.message); }
   db.prepare(`DELETE FROM images WHERE id = ?`).run(Number(id));
   console.log(`[ImageGen] 扔掉 #${id}：${String(row.prompt || '').slice(0, 30)}`);
@@ -321,7 +321,9 @@ export function getImage(id) {
   const row = db.prepare(`SELECT * FROM images WHERE id = ?`).get(Number(id));
   if (!row) return null;
   // 库里存的是相对 data 的路径，发图/读文件要的是绝对路径
-  return { ...row, absPath: path.join(root, row.path) };
+  // 老记录存相对路径，新记录存过绝对路径，两种都要认
+  const absPath = path.isAbsolute(row.path) ? row.path : path.join(root, row.path);
+  return { ...row, absPath };
 }
 
 function __oldGetImage(id) {
