@@ -36,7 +36,7 @@ let events = [];
 let pendingCriticism = [];
 let distilling = false;
 let selfImage = {
-  counts: { praise: 0, criticism: 0, incident: 0 },
+  counts: { praise: 0, criticism: 0, incident: 0, addressed: 0 },
   avoidRules: [],
   traits: [],
   updatedAt: 0,
@@ -96,6 +96,8 @@ export function observeIncoming(msg, selfId = '') {
   if (CRITICISM.test(text)) type = 'criticism';
   else if (PRAISE.test(text)) type = 'praise';
   else if (INCIDENT.test(text)) type = 'incident';
+  // 有人直接 @ 她：记下来攒语料，但不参与行为约束归纳（@ 不等于嫌）
+  else if (msg.isAtMe === true) type = 'addressed';
   if (!type) return '';
 
   const ev = {
@@ -115,7 +117,8 @@ export function observeIncoming(msg, selfId = '') {
   selfImage.updatedAt = Date.now();
   saveSelfImage();
 
-  console.log(`[Growth] ${type === 'praise' ? '被夸' : type === 'criticism' ? '被嫌' : '被问身份'} ← ${ev.from.nick}：${ev.theirWords.slice(0, 40)}`);
+  const label = { praise: '被夸', criticism: '被嫌', incident: '被问身份', addressed: '被叫' }[type] || type;
+  console.log(`[Growth] ${label} ← ${ev.from.nick}：${ev.theirWords.slice(0, 40)}`);
 
   // 3. 批评攒够就归纳成行为约束（异步，不阻塞对话）
   if (type === 'criticism') {
