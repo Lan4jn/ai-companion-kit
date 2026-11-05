@@ -665,7 +665,18 @@ export class OneBot {
   sendImage(key, file) {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
-    const message = '[CQ:image,file=' + file + ']';
+    // NapCat 跑在容器里，看不到宿主机的绝对路径——必须转 base64（跟 sendVoice 同一个坑）
+    let ref = String(file || '');
+    try {
+      if (!ref.startsWith('base64://') && !ref.startsWith('http')) {
+        const buf = fs.readFileSync(ref);
+        ref = 'base64://' + buf.toString('base64');
+      }
+    } catch (e) {
+      console.log('[onebot] 发图读不到文件：' + (e?.message || e) + ' → ' + file);
+      return Promise.resolve(null);
+    }
+    const message = [{ type: 'image', data: { file: ref } }];
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });
