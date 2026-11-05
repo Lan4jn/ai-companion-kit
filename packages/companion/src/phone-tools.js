@@ -537,7 +537,7 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'inspect_image',
-      description: '把图库里某张图调出来自己看。发图之前先看一眼，或者定期翻图库清理时用。看到图之后再决定要不要 discard_image。',
+      description: '把图库里某张图调出来真正看一眼。硬规矩：只要话题涉及任何一张图的具体内容（长什么样、好不好看、吓不吓人、要不要换），必须先调这个再开口——不许凭提示词或记忆描述你没看过的图。没调过就不要说“我看了”。',
       parameters: {
         type: 'object',
         properties: {

@@ -392,7 +392,7 @@ export class Brain {
         const dynamicPart = sessionMood.isDynamic
           ? `【你当前的即时情绪】：${sessionMood.label}（${moodDesc}）${sessionMood.reason ? '——原因：' + sessionMood.reason : ''}。请让这个心情自然渗透在你此刻的语气、词句长短和表情包选择中（切忌机械报幕自己的心情）。\n`
           : `你今天基准心境${moodDesc}。\n`;
-        nowLine = `现在是真实现实时间 ${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日${period} ${hm}。${dynamicPart}（注意：真实自然说话，绝对禁止把“刚醒/刚睡醒/睡到现在”当成口癖或借口反复说；可以在内心草稿箱（（心情: 状态，原因: xxx））里自然写下你听完对方的话、或者说完这句之后的心情变化）。\n`;
+        nowLine = `【当前时间，凡是要说到几点、早上晚上、今天昨天，一律以这一行为准，不许自己推】现在是真实现实时间 ${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日${period} ${hm}。${dynamicPart}（注意：真实自然说话，绝对禁止把“刚醒/刚睡醒/睡到现在”当成口癖或借口反复说；可以在内心草稿箱（（心情: 状态，原因: xxx））里自然写下你听完对方的话、或者说完这句之后的心情变化）。\n`;
       } catch (e) {}
     }
     const fullSituation = nowLine + (situation ? situation + '\n\n' : '') + (diary ? diary + '\n' : '') + learnedLine + recalledTurnsLine;
