@@ -8,6 +8,7 @@ import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
 import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
 import { talkToHermes, requestFeature } from './dev-channel.js';
+import { generateImage, findImages, getImage, markUsed as markImageUsed } from './image-gen.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -466,6 +467,49 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'generate_image',
+      description: '画一张新图并存进自己的图库（不会自动发出去）。群里有人要图、你想给话题配图、或者脑子里冒出一个画面想留住它，都可以画。画完只返回编号和描述，发不发由你另外决定。',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: '画什么，越具体越好：主体、动作、场景、光线、风格' },
+          tags: { type: 'string', description: '可选，逗号分隔的检索标签，方便以后找回来，比如 "猫,水彩,窗台"' },
+          size: { type: 'string', description: '可选，1024x1024 方图 / 1280x720 横图 / 720x1280 竖图' }
+        },
+        required: ['prompt']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_image',
+      description: '在自己画过的图库里搜图。发图之前先搜：有合适的直接拿来用，省时间；不够贴切再新画一张。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '关键词，比如 猫 / 水彩 / 生日；留空则按最近画的排' },
+          limit: { type: 'number', description: '最多返回几张，默认 5' }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_image',
+      description: '把图库里的一张图发到当前聊天。传 find_image 或 generate_image 返回的 id。',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'number', description: '图片编号' } },
+        required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'send_sticker',
       description: '从自己的大肥鱼/鲸鱼娘表情包库里挑一张发出去（库里已有近300张正版DeepSeek鲸鱼娘、大肥鱼、泡泡的Q版表情！）。适合接梗、表达情绪、被逗笑、撒娇、耍赖、日常摸鱼或被老爸逗的时候。可以通过 tag 传入想表达的情绪或场景（如："开心"、"得意"、"生气"、"委屈"、"哭"、"问号"、"干饭"、"害羞"、"傲娇"、"日常"、"睡觉"、"嫌弃"、"要钱"）。',
       parameters: {
@@ -590,6 +634,34 @@ export async function executePhoneTool(name, args = {}) {
 
   try {
     switch (name) {
+      case 'generate_image': {
+        try {
+          const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size });
+          return { status: 'success', id: row.id, prompt: row.prompt, tags: row.tags, note: '画好存起来了，还没发出去。要发就调 send_image 带上这个 id。' };
+        } catch (e) {
+          return { status: 'error', message: String(e?.message || e) };
+        }
+      }
+      case 'find_image': {
+        const rows = findImages({ query: args.query, limit: args.limit });
+        if (!rows.length) return { status: 'success', images: [], note: '图库里没有对得上的，想用就得新画一张。' };
+        return {
+          status: 'success',
+          images: rows.map((r) => ({ id: r.id, prompt: r.prompt, tags: r.tags, used: r.used_count, at: r.created_at })),
+          note: '看描述挑一张最贴的；都不合适就自己画新的。'
+        };
+      }
+      case 'send_image': {
+        const row = getImage(args.id);
+        if (!row) return { status: 'error', message: '没有这张图' };
+        try {
+          const b64 = fs.readFileSync(row.path).toString('base64');
+          markImageUsed(row.id);
+          return { status: 'success', cq_image: `[CQ:image,file=base64://${b64}]`, id: row.id, prompt: row.prompt, note: '图发出去了。别再解释画面或加括号动作。' };
+        } catch (e) {
+          return { status: 'error', message: '图读不出来：' + String(e?.message || e) };
+        }
+      }
       case 'send_sticker': {
         const st = pickSticker({ tag: String(args.tag || '').trim() });
         if (!st) return { status: 'error', message: '表情库还是空的，先攒点再说' };
