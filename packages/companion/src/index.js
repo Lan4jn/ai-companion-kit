@@ -36,7 +36,6 @@ import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
 import { initGrowth, observeIncoming, observeOwn, renderGrowth } from './growth.js';
 import { initImageGen } from './image-gen.js';
-import { initMemoryBrain } from './memory-brain.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
@@ -170,9 +169,6 @@ async function main() {
 
   // 成长记忆：群友对她的批评、表扬、特殊事件 → 自我认知
   initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth, brain });
-
-  // 长期记忆库（memory-brain）：只读接入，召回结果拼进 system
-  initMemoryBrain(cfg.memoryBrain);
 
   // 生图：画出来、存本地、建索引，发不发由她自己判断
   // 余额告急时怎么喊人：bot 还没建，先用闭包占位，建好后自动接上
