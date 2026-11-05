@@ -171,7 +171,19 @@ async function main() {
   initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth, brain });
 
   // 生图：画出来、存本地、建索引，发不发由她自己判断
-  initImageGen({ dataDir: cfg.dataDir || './data', cfg: cfg.imageGen });
+  // 余额告急时怎么喊人：bot 还没建，先用闭包占位，建好后自动接上
+  let alertBot = null;
+  initImageGen({
+    dataDir: cfg.dataDir || './data',
+    cfg: cfg.imageGen,
+    notify: (msg) => {
+      const owner = (cfg.ownerIds || [])[0];
+      if (!alertBot || !owner) return;
+      alertBot.api('send_private_msg', { user_id: Number(owner), message: msg })
+        .then(() => console.log('[ImageGen] 余额提醒已发：' + msg.slice(0, 40)))
+        .catch((e) => console.log('[ImageGen] 余额提醒发送失败：' + (e?.message || e)));
+    },
+  });
 
   /** @type {Map<string, NodeJS.Timeout>} 每个会话的合并定时器 */
   const pending = new Map();
@@ -267,6 +279,9 @@ async function main() {
 
   // 跨会话群桥：读群聊 + 队列发群消息
   initDevChannel({ dataDir: cfg.dataDir || './data', ...(cfg.devChannel || {}) });
+  // 生图的余额告急提醒要发到这个 bot 上
+  alertBot = bot;
+
   initGroupBridge({ bot, human, dataDir: cfg.dataDir || './data', limits: cfg.groupBridge || {} });
   startOutboxWorker();
 

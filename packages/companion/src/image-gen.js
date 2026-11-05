@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getBalanceCached } from './ark-billing.js';
 
 let Database = null;
 try { Database = (await import('better-sqlite3')).default; } catch {}
@@ -22,8 +23,10 @@ let root = '';
 let genDir = '';
 let cfg = { enabled: false, default: '', providers: {} };
 let initialized = false;
+let notifyFn = null;   // 由 index.js 注入：余额告急时怎么喊人
+let lastAlertAt = 0;
 
-export function initImageGen({ dataDir, cfg: c } = {}) {
+export function initImageGen({ dataDir, cfg: c, notify = null } = {}) {
   root = dataDir || path.join(process.cwd(), 'data');
   genDir = path.join(root, 'generated');
   cfg = {
@@ -31,6 +34,7 @@ export function initImageGen({ dataDir, cfg: c } = {}) {
     default: c?.default || 'ark',
     providers: c?.providers || {},
     waitMs: c?.waitMs,   // 之前漏了，配置里写的 90 秒没能生效，一直用默认 60 秒
+    lowBalance: c?.lowBalance,   // 余额告警阈值
   };
   try { fs.mkdirSync(genDir, { recursive: true }); } catch {}
 
@@ -63,7 +67,8 @@ export function initImageGen({ dataDir, cfg: c } = {}) {
     // 老库补列：kind 用来分图库类型（插画/表情/壁纸/头像/场景）
     const cols = db.prepare(`PRAGMA table_info(images)`).all().map((c) => c.name);
     if (!cols.includes('kind')) db.exec(`ALTER TABLE images ADD COLUMN kind TEXT DEFAULT 'illustration'`);
-    initialized = true;
+    notifyFn = typeof notify === 'function' ? notify : null;
+  initialized = true;
     const n = db.prepare('SELECT COUNT(*) AS c FROM images').get().c;
     console.log(`[ImageGen] 图库已就绪：${n} 张，默认驱动 ${cfg.default}`);
   } catch (e) {
@@ -198,10 +203,33 @@ async function callProvider({ prompt, size, quality, providerName }) {
   throw new Error('生图返回既没有 url 也没有 b64_json');
 }
 
+/** 火山驱动开画前看一眼余额；欠费或快见底就喊人（6 小时内只喊一次，别刷屏） */
+async function warnIfBroke(providerName) {
+  if (!notifyFn) return;
+  // 只有走火山才查余额：GPT 那条线花的是订阅窗口，跟火山余额没关系
+  const p = cfg.providers?.[providerName || cfg.default];
+  if (!p || p.type !== 'ark') return;
+  const bal = await getBalanceCached();
+  console.log('[ImageGen] 余额检查:', bal ? `${bal.available} 元 / 阈值 ${cfg.lowBalance}` : '查不到');
+  if (!bal) return;
+  const low = Number(cfg.lowBalance ?? 5);
+  let msg = '';
+  if (bal.arrears > 0) {
+    msg = `火山欠费了（可用 ${bal.available} 元，欠 ${bal.arrears} 元）。画图会直接 403，去费用中心充一下。`;
+  } else if (bal.available < low) {
+    msg = `火山只剩 ${bal.available} 元了，撑不了多久。要不充点？`;
+  }
+  if (!msg) return;
+  if (Date.now() - lastAlertAt < 6 * 3600 * 1000) return;
+  lastAlertAt = Date.now();
+  try { notifyFn(msg); } catch (e) { console.log('[ImageGen] 余额提醒发不出去：' + e.message); }
+}
+
 /** 画一张并存进图库（内部实现，可能要几分钟） */
 async function doGenerate({ prompt, tags = '', size, quality, kind, provider } = {}) {
   const text = String(prompt || '').trim();
 
+  await warnIfBroke(provider);
   const { buffer, ext } = await callProvider({ prompt: text, size, quality, providerName: provider });
   if (!buffer?.length) throw new Error('图片数据为空');
 
