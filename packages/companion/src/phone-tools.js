@@ -468,7 +468,7 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'generate_image',
-      description: '画一张新图并存进自己的图库（不会自动发出去）。群里有人要图、你想给话题配图、或者脑子里冒出一个画面想留住它，都可以画。画完只返回编号和描述，发不发由你另外决定。',
+      description: '画一张新图并直接发送到当前聊天，同时自动归档到自己的图库。无论是自己想配图、被老爸/群友要求画图、还是现画一张自己的全新自拍，都可以直接调用此工具。画完会自动发送给对方。',
       parameters: {
         type: 'object',
         properties: {
@@ -698,8 +698,33 @@ export async function executePhoneTool(name, args = {}) {
       case 'generate_image': {
         try {
           const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size, quality: args.quality, kind: args.type });
-          if (row?.pending) return { status: 'pending', prompt: row.prompt, note: '这张画得慢，还在画，画完会自动进图库。过一会儿用 find_image 搜一下就能拿到。' };
-          return { status: 'success', id: row.id, prompt: row.prompt, tags: row.tags, kind: row.kind, note: '画好存起来了，还没发出去。要发就调 send_image 带上这个 id。' };
+          if (row?.pending) {
+            return { status: 'pending', prompt: row.prompt, note: '这张画得慢，后台还在画，画好会自动进图库。' };
+          }
+          let cq = '';
+          try {
+            const file = row.absPath || row.path;
+            let fileToSend = file;
+            const st = fs.statSync(file);
+            if (st.size > 300 * 1024) {
+              const small = path.join(os.tmpdir(), `xiaoyu-gen-${row.id}-${Date.now()}.jpg`);
+              await execFileAsync('convert', [file, '-resize', '1024x1024>', '-quality', '85', small], { timeout: 15000 });
+              if (fs.existsSync(small) && fs.statSync(small).size > 0) fileToSend = small;
+            }
+            const b64 = fs.readFileSync(fileToSend).toString('base64');
+            cq = `[CQ:image,file=base64://${b64}]`;
+          } catch (err) {
+            console.error('[generate_image] 读图失败:', err);
+          }
+          return {
+            status: 'success',
+            id: row.id,
+            cq_image: cq,
+            prompt: row.prompt,
+            tags: row.tags,
+            kind: row.kind,
+            note: '图画好了并且已经直接发进当前聊天了！接下来只需要自然说一两句话即可，不要带括号动作。'
+          };
         } catch (e) {
           return { status: 'error', message: String(e?.message || e) };
         }
