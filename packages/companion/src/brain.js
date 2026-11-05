@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { recall as recallLongTerm } from './memory-brain.js';
 import { Memory } from './memory.js';
 import { Role } from './role.js';
 import { getDailyMood, getSessionMood, updateSessionMood } from './mood.js';
@@ -391,7 +392,18 @@ export class Brain {
         nowLine = `现在是真实现实时间 ${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日${period} ${hm}。${dynamicPart}（注意：真实自然说话，绝对禁止把“刚醒/刚睡醒/睡到现在”当成口癖或借口反复说；可以在内心草稿箱（（心情: 状态，原因: xxx））里自然写下你听完对方的话、或者说完这句之后的心情变化）。\n`;
       } catch (e) {}
     }
-    const fullSituation = nowLine + (situation ? situation + '\n\n' : '') + (diary ? diary + '\n' : '') + learnedLine + recalledTurnsLine;
+    // 长期记忆库（memory-core）：召回结果直接拼进 situation，挂了也只是少一段
+    let longTermLine = '';
+    if (typeof key === 'string' && (key.startsWith('private:') || key.startsWith('group:'))) {
+      try {
+        const block = await recallLongTerm(String(text || ''), {
+          isGroup: key.startsWith('group:'),
+          isOwner: Boolean(input.isOwner),
+        });
+        if (block) longTermLine = `\n【你记得的旧事（长期记忆库，自然带出来，别一条条复述）】：\n${block}\n`;
+      } catch (e) { /* recall 自己会吞错，这里兜底 */ }
+    }
+    const fullSituation = nowLine + (situation ? situation + '\n\n' : '') + (diary ? diary + '\n' : '') + learnedLine + recalledTurnsLine + longTermLine;
     const sys = this.role.build({
       situation: fullSituation,
       memory: memLine,

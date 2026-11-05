@@ -36,6 +36,7 @@ import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
 import { initGrowth, observeIncoming, observeOwn, renderGrowth } from './growth.js';
 import { initImageGen } from './image-gen.js';
+import { initMemoryBrain } from './memory-brain.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
@@ -170,19 +171,17 @@ async function main() {
   // 成长记忆：群友对她的批评、表扬、特殊事件 → 自我认知
   initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth, brain });
 
+  // 长期记忆库（memory-brain）：只读接入，召回结果拼进 system
+  initMemoryBrain(cfg.memoryBrain);
+
   // 生图：画出来、存本地、建索引，发不发由她自己判断
   // 余额告急时怎么喊人：bot 还没建，先用闭包占位，建好后自动接上
   let alertBot = null;
   initImageGen({
     dataDir: cfg.dataDir || './data',
     cfg: cfg.imageGen,
-    notify: (msg) => {
-      const owner = (cfg.ownerIds || [])[0];
-      if (!alertBot || !owner) return;
-      alertBot.api('send_private_msg', { user_id: Number(owner), message: msg })
-        .then(() => console.log('[ImageGen] 余额提醒已发：' + msg.slice(0, 40)))
-        .catch((e) => console.log('[ImageGen] 余额提醒发送失败：' + (e?.message || e)));
-    },
+    // 余额告警交给 Hermes 的 cron 巡检（系统口吻），她这边只留日志
+    notify: (msg) => console.log('[ImageGen] 余额告警（不发送，由 cron 巡检负责）：' + msg),
   });
 
   /** @type {Map<string, NodeJS.Timeout>} 每个会话的合并定时器 */
