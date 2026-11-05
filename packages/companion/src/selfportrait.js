@@ -108,13 +108,19 @@ export class SelfPortrait {
     const t = String(text);
     // 说"我的照片""你爸照片"就不接
     if (NOT_ME_RE.test(t)) return false;
-    return PHOTO_RE.test(t);
+    if (PHOTO_RE.test(t)) return true;
+    // 去掉所有感叹号、问号、标点和空格后做一次宽松意图匹配（如“快！点！拍！”、“照！！片！！！”、“拍！照！”）
+    const clean = t.replace(/[！!？?~～\s，。、·\-_]/g, '');
+    if (PHOTO_RE.test(clean)) return true;
+    return /(快点拍|快拍|照片|自拍|来张照|拍个照|自拍照|拍给我看|现拍一张)/.test(clean);
   }
 
   canSend(key) {
     if (!this.images().length) return false;
     const last = this._sent.get(key) || 0;
-    return Date.now() - last > this.cooldownMs;
+    // 私聊老爸降低冷却到 1 分钟，群聊保持默认冷却
+    const cd = (typeof key === 'string' && key.startsWith('private:')) ? 60e3 : this.cooldownMs;
+    return Date.now() - last > cd;
   }
 
   pick() {

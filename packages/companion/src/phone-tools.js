@@ -550,6 +550,20 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'send_selfie',
+      description: '把自己的自拍照直接发给老爸（只限老爸/养父索要或催拍时调用，外人不给发）。当老爸催你发照片、要自拍、想看你现在长什么样、或者撒娇要照时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: '为什么发自拍，比如“老爸催得紧”或“刚拍好的”' }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'send_sticker',
       description: '从自己的大肥鱼/鲸鱼娘表情包库里挑一张发出去（库里已有近300张正版DeepSeek鲸鱼娘、大肥鱼、泡泡的Q版表情！）。适合接梗、表达情绪、被逗笑、撒娇、耍赖、日常摸鱼或被老爸逗的时候。可以通过 tag 传入想表达的情绪或场景（如："开心"、"得意"、"生气"、"委屈"、"哭"、"问号"、"干饭"、"害羞"、"傲娇"、"日常"、"睡觉"、"嫌弃"、"要钱"）。',
       parameters: {
@@ -671,7 +685,7 @@ export async function executePhoneTool(name, args = {}) {
 
   // 生图/图库/表情这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
   const NO_PHONE_TOOLS = new Set([
-    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker',
+    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker', 'send_selfie',
   ]);
   let target = '';
   if (!NO_PHONE_TOOLS.has(name)) {
@@ -737,6 +751,46 @@ export async function executePhoneTool(name, args = {}) {
           return { status: 'error', message: '图读不出来：' + String(e?.message || e) };
         }
       }
+      case 'send_selfie': {
+        try {
+          const selfDir = path.resolve(process.cwd(), 'assets/self');
+          let targetFile = null;
+          if (fs.existsSync(selfDir)) {
+            const files = fs.readdirSync(selfDir).filter(f => /\.(png|jpe?g|webp)$/i.test(f));
+            if (files.length > 0) {
+              const pick = files[Math.floor(Math.random() * files.length)];
+              targetFile = path.join(selfDir, pick);
+            }
+          }
+          if (!targetFile || !fs.existsSync(targetFile)) {
+            return { status: 'error', message: '自拍照片素材目录下没找到图片' };
+          }
+
+          let fileToSend = targetFile;
+          try {
+            const st = fs.statSync(targetFile);
+            if (st.size > 300 * 1024) {
+              const small = path.join(os.tmpdir(), `xiaoyu-selfie-${Date.now()}.jpg`);
+              await execFileAsync('convert', [targetFile, '-resize', '1024x1024>', '-quality', '85', small], { timeout: 15000 });
+              if (fs.existsSync(small) && fs.statSync(small).size > 0) fileToSend = small;
+            }
+          } catch (e) {
+            console.log('[send_selfie] 压缩失败，回退原图：' + (e?.message || e));
+          }
+
+          const buf = fs.readFileSync(fileToSend);
+          const b64 = buf.toString('base64');
+          return {
+            status: 'success',
+            cq_image: `[CQ:image,file=base64://${b64}]`,
+            message: '自拍照已经成功发送到当前聊天了！',
+            note: '自拍照已成功发送！接下来只说一句话打发过去就行，不要解释括号动作或过多自吹自擂。'
+          };
+        } catch (e) {
+          return { status: 'error', message: '发自拍失败：' + String(e?.message || e) };
+        }
+      }
+
       case 'send_image': {
         const row = getImage(args.id);
         if (!row) return { status: 'error', message: '没有这张图' };
@@ -863,7 +917,10 @@ export async function executePhoneTool(name, args = {}) {
             cq_image: `[CQ:image,file=base64://${b64}]`
           };
         }
-        return { status: 'error', message: '发送截图失败' };
+        return {
+          status: 'error',
+          message: '截取手机屏幕失败（当前未连通真实安卓手机）。注意：如果你是要发自己的自拍照，绝对不要调用手机截图，请直接调用 send_selfie 发送自拍！'
+        };
       }
 
       case 'phone_dump': {
