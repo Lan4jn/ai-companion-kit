@@ -691,7 +691,8 @@ export async function executePhoneTool(name, args = {}) {
         const row = getImage(args.id);
         if (!row) return { status: 'error', message: '没有这张图' };
         try {
-          const b64 = fs.readFileSync(row.path).toString('base64');
+          // 库里存的是相对 data 的路径，得用 absPath 才读得到
+          const b64 = fs.readFileSync(row.absPath || row.path).toString('base64');
           markImageUsed(row.id);
           return { status: 'success', cq_image: `[CQ:image,file=base64://${b64}]`, id: row.id, prompt: row.prompt, note: '图发出去了。别再解释画面或加括号动作。' };
         } catch (e) {

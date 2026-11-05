@@ -27,7 +27,7 @@ let notifyFn = null;   // 由 index.js 注入：余额告急时怎么喊人
 let lastAlertAt = 0;
 
 export function initImageGen({ dataDir, cfg: c, notify = null } = {}) {
-  root = dataDir || path.join(process.cwd(), 'data');
+  root = path.resolve(dataDir || path.join(process.cwd(), 'data'));   // 绝对化，服务 cwd 变了也不会读错文件
   genDir = path.join(root, 'generated');
   cfg = {
     enabled: c?.enabled !== false,
@@ -317,6 +317,14 @@ export function findImages({ query = '', limit = 5, kind = '' } = {}) {
 }
 
 export function getImage(id) {
+  if (!isImageGenReady()) return null;
+  const row = db.prepare(`SELECT * FROM images WHERE id = ?`).get(Number(id));
+  if (!row) return null;
+  // 库里存的是相对 data 的路径，发图/读文件要的是绝对路径
+  return { ...row, absPath: path.join(root, row.path) };
+}
+
+function __oldGetImage(id) {
   if (!isImageGenReady()) return null;
   return db.prepare('SELECT * FROM images WHERE id = ?').get(Number(id)) || null;
 }
