@@ -119,7 +119,7 @@ async function main() {
   if (process.argv.includes('--check')) { console.log('检查完毕。'); return; }
   if (!cfg.apiKey) console.log('⚠️ 没配 apiKey，模型调用会失败\n');
 
-  const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, vision: cfg.vision, visionFallback: cfg.visionFallback, videoVision: cfg.videoVision,
+  const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, mainVision: cfg.mainVision, vision: cfg.vision, visionFallback: cfg.visionFallback, videoVision: cfg.videoVision,
     recall: recallKnowledge, role, memory, dataDir: cfg.dataDir });
   const human = new Humanizer(cfg.humanize);
 

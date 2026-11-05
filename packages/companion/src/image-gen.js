@@ -30,6 +30,7 @@ export function initImageGen({ dataDir, cfg: c } = {}) {
     enabled: c?.enabled !== false,
     default: c?.default || 'ark',
     providers: c?.providers || {},
+    waitMs: c?.waitMs,   // 之前漏了，配置里写的 90 秒没能生效，一直用默认 60 秒
   };
   try { fs.mkdirSync(genDir, { recursive: true }); } catch {}
 
@@ -59,6 +60,9 @@ export function initImageGen({ dataDir, cfg: c } = {}) {
       CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_images_used ON images(used_count DESC);
     `);
+    // 老库补列：kind 用来分图库类型（插画/表情/壁纸/头像/场景）
+    const cols = db.prepare(`PRAGMA table_info(images)`).all().map((c) => c.name);
+    if (!cols.includes('kind')) db.exec(`ALTER TABLE images ADD COLUMN kind TEXT DEFAULT 'illustration'`);
     initialized = true;
     const n = db.prepare('SELECT COUNT(*) AS c FROM images').get().c;
     console.log(`[ImageGen] 图库已就绪：${n} 张，默认驱动 ${cfg.default}`);
@@ -80,7 +84,7 @@ function pickProvider(name) {
 }
 
 /** 调驱动画一张，返回 { buffer, ext } */
-async function callProvider({ prompt, size, providerName }) {
+async function callProvider({ prompt, size, quality, providerName }) {
   const p = pickProvider(providerName);
   if (!p) throw new Error(`没有可用的生图驱动（${providerName || cfg.default} 未配置 apiKey）`);
 
@@ -104,7 +108,12 @@ async function callProvider({ prompt, size, providerName }) {
       body: JSON.stringify({
         model: chatModel,
         input: prompt,
-        tools: [{ type: 'image_generation', model: imgModel, ...(size ? { size } : {}) }],
+        tools: [{
+          type: 'image_generation',
+          model: imgModel,
+          ...(size ? { size } : {}),
+          ...(quality ? { quality } : {}),
+        }],
       }),
       signal: AbortSignal.timeout(p.timeoutMs || 300000),
     });
@@ -154,6 +163,7 @@ async function callProvider({ prompt, size, providerName }) {
   if (p.type === 'ark') {
     url = `${base}/images/generations`;
     body = { model, prompt, size: sz, response_format: 'url', watermark: false };
+    if (quality) body.quality = quality;
   } else {
     url = `${base}/images/generations`;
     body = { model, prompt, size: sz, n: 1 };
@@ -189,10 +199,10 @@ async function callProvider({ prompt, size, providerName }) {
 }
 
 /** 画一张并存进图库（内部实现，可能要几分钟） */
-async function doGenerate({ prompt, tags = '', size, provider } = {}) {
+async function doGenerate({ prompt, tags = '', size, quality, kind, provider } = {}) {
   const text = String(prompt || '').trim();
 
-  const { buffer, ext } = await callProvider({ prompt: text, size, providerName: provider });
+  const { buffer, ext } = await callProvider({ prompt: text, size, quality, providerName: provider });
   if (!buffer?.length) throw new Error('图片数据为空');
 
   // hash 带上 prompt：同一张图配不同描述也算两条，不会被 ON CONFLICT 吃掉
@@ -205,10 +215,10 @@ async function doGenerate({ prompt, tags = '', size, provider } = {}) {
 
   const p = pickProvider(provider) || {};
   const info = db.prepare(`
-    INSERT INTO images (path, prompt, tags, provider, model, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO images (path, prompt, tags, kind, provider, model, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET prompt = excluded.prompt
-  `).run(file, text, String(tags || ''), p.name || '', p.model || '', Date.now());
+  `).run(file, text, String(tags || ''), String(kind || 'illustration'), p.name || '', p.model || '', Date.now());
 
   const row = db.prepare('SELECT * FROM images WHERE path = ?').get(file);
   console.log(`[ImageGen] 画好了 #${row.id}：${text.slice(0, 40)} → ${path.relative(root, file)}`);
@@ -216,13 +226,13 @@ async function doGenerate({ prompt, tags = '', size, provider } = {}) {
 }
 
 /** 对外入口：等一小会儿，画不完就转后台，别把对话卡死 */
-export async function generateImage({ prompt, tags = '', size, provider, waitMs } = {}) {
+export async function generateImage({ prompt, tags = '', size, quality, kind, provider, waitMs } = {}) {
   if (!isImageGenReady()) throw new Error('生图功能未就绪');
   const text = String(prompt || '').trim();
   if (!text) throw new Error('prompt 为空');
 
   const limit = Number(waitMs ?? cfg.waitMs ?? 60000);
-  const job = doGenerate({ prompt: text, tags, size, provider });
+  const job = doGenerate({ prompt: text, tags, size, quality, kind, provider });
 
   const row = await Promise.race([
     job,
@@ -240,24 +250,39 @@ export async function generateImage({ prompt, tags = '', size, provider, waitMs 
   return { pending: true, prompt: text, note: '还在画，画完会进图库' };
 }
 
+/** 扔掉图库里的一张图（文件 + 索引一起删） */
+export function discardImage(id) {
+  if (!isImageGenReady()) throw new Error('生图功能未就绪');
+  const row = db.prepare(`SELECT * FROM images WHERE id = ?`).get(Number(id));
+  if (!row) throw new Error(`图库里没有编号 ${id} 的图`);
+  const abs = path.join(dir, row.path);
+  try { if (fs.existsSync(abs)) fs.unlinkSync(abs); } catch (e) { console.log('[ImageGen] 删文件失败：' + e.message); }
+  db.prepare(`DELETE FROM images WHERE id = ?`).run(Number(id));
+  console.log(`[ImageGen] 扔掉 #${id}：${String(row.prompt || '').slice(0, 30)}`);
+  return { id: Number(id), prompt: row.prompt, removed: true };
+}
+
 /** 按关键词找现成的图，返回候选让她自己挑 */
-export function findImages({ query = '', limit = 5 } = {}) {
+export function findImages({ query = '', limit = 5, kind = '' } = {}) {
   if (!isImageGenReady()) return [];
   const q = String(query || '').trim();
   const lim = Math.max(1, Math.min(10, Number(limit) || 5));
 
+  const k = String(kind || '').trim();
   if (!q) {
+    if (k) return db.prepare(`SELECT * FROM images WHERE kind = ? ORDER BY created_at DESC LIMIT ?`).all(k, lim);
     return db.prepare(`SELECT * FROM images ORDER BY created_at DESC LIMIT ?`).all(lim);
   }
 
   const words = q.split(/[\s,，、]+/).filter(Boolean).slice(0, 5);
-  const conds = words.map(() => `(prompt LIKE ? OR tags LIKE ?)`).join(' OR ');
+  const conds = words.map(() => `(prompt LIKE ? OR tags LIKE ?)`).join(' OR ') + (k ? ' ' : '');
   const params = [];
   for (const w of words) { params.push(`%${w}%`, `%${w}%`); }
+  if (k) { params.unshift(k); }
   params.push(lim);
 
   const rows = db.prepare(`
-    SELECT * FROM images WHERE ${conds}
+    SELECT * FROM images WHERE ${k ? 'kind = ? AND ' : ''}(${conds})
     ORDER BY used_count DESC, created_at DESC LIMIT ?
   `).all(...params);
   return rows;

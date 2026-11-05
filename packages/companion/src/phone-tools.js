@@ -8,7 +8,7 @@ import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
 import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
 import { talkToHermes, requestFeature } from './dev-channel.js';
-import { generateImage, findImages, getImage, markUsed as markImageUsed } from './image-gen.js';
+import { generateImage, findImages, getImage, discardImage, markUsed as markImageUsed } from './image-gen.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -474,6 +474,16 @@ export const PHONE_TOOLS = [
         properties: {
           prompt: { type: 'string', description: '画什么，越具体越好：主体、动作、场景、光线、风格' },
           tags: { type: 'string', description: '可选，逗号分隔的检索标签，方便以后找回来，比如 "猫,水彩,窗台"' },
+          type: {
+            type: 'string',
+            enum: ['插画', '表情', '壁纸', '头像', '场景'],
+            description: '这张图归到哪一类，决定以后怎么用它。表情=适合当表情包发的；插画=叙事配图；壁纸=满屏大图；头像=方形人像；场景=房间背景'
+          },
+          quality: {
+            type: 'string',
+            enum: ['low', 'medium', 'high'],
+            description: '画质档位。low 最快够用，medium 默认，high 细节最好但要多等一会儿'
+          },
           size: { type: 'string', description: '可选，1024x1024 方图 / 1280x720 横图 / 720x1280 竖图' }
         },
         required: ['prompt']
@@ -489,6 +499,7 @@ export const PHONE_TOOLS = [
         type: 'object',
         properties: {
           query: { type: 'string', description: '关键词，比如 猫 / 水彩 / 生日；留空则按最近画的排' },
+          type: { type: 'string', enum: ['插画', '表情', '壁纸', '头像', '场景'], description: '可选，只看某一类' },
           limit: { type: 'number', description: '最多返回几张，默认 5' }
         },
         required: []
@@ -503,6 +514,21 @@ export const PHONE_TOOLS = [
       parameters: {
         type: 'object',
         properties: { id: { type: 'number', description: '图片编号' } },
+        required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'discard_image',
+      description: '把图库里不想要的图删掉。画完之后自己看一眼：跟提示词不符、跟已有的撞场景、以后八成用不上的，就删掉别占地方。删之前想清楚，删了要重画就得再花时间和钱。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: '图片编号（generate_image 或 find_image 返回的 id）' },
+          reason: { type: 'string', description: '可选，为什么不要了，写一句给自己看' }
+        },
         required: ['id']
       }
     }
@@ -636,19 +662,29 @@ export async function executePhoneTool(name, args = {}) {
     switch (name) {
       case 'generate_image': {
         try {
-          const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size });
-          return { status: 'success', id: row.id, prompt: row.prompt, tags: row.tags, note: '画好存起来了，还没发出去。要发就调 send_image 带上这个 id。' };
+          const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size, quality: args.quality, kind: args.type });
+          if (row?.pending) return { status: 'pending', prompt: row.prompt, note: '这张画得慢，还在画，画完会自动进图库。过一会儿用 find_image 搜一下就能拿到。' };
+          return { status: 'success', id: row.id, prompt: row.prompt, tags: row.tags, kind: row.kind, note: '画好存起来了，还没发出去。要发就调 send_image 带上这个 id。' };
         } catch (e) {
           return { status: 'error', message: String(e?.message || e) };
         }
       }
       case 'find_image': {
-        const rows = findImages({ query: args.query, limit: args.limit });
+        const rows = findImages({ query: args.query, limit: args.limit, kind: args.type });
         if (!rows.length) return { status: 'success', images: [], note: '图库里没有对得上的，想用就得新画一张。' };
         return {
           status: 'success',
-          images: rows.map((r) => ({ id: r.id, prompt: r.prompt, tags: r.tags, used: r.used_count, at: r.created_at })),
+          images: rows.map((r) => ({ id: r.id, prompt: r.prompt, tags: r.tags, kind: r.kind, used: r.used_count, at: r.created_at })),
           note: '看描述挑一张最贴的；都不合适就自己画新的。'
+        };
+      }
+      case 'discard_image': {
+        const r = discardImage(args.id);
+        return {
+          status: 'success',
+          id: r.id,
+          prompt: r.prompt,
+          note: '删了。以后要类似的再画一张就行。' + (args.reason ? `（原因：${args.reason}）` : ''),
         };
       }
       case 'send_image': {

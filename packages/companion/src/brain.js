@@ -112,7 +112,7 @@ async function shrinkDataUrl(dataUrl) {
 }
 
 export class Brain {
-  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, vision = null, visionFallback = null, videoVision = null,
+  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, vision = null, visionFallback = null, videoVision = null, mainVision = false,
     recall = null, dataDir = './data' }) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
@@ -120,6 +120,8 @@ export class Brain {
     this.timeoutMs = timeoutMs;
     this.vision = vision && vision.apiKey && vision.baseUrl && vision.model ? vision : null;
     this.visionFallback = visionFallback && visionFallback.apiKey && visionFallback.baseUrl && visionFallback.model ? visionFallback : null;
+    // 主模型自己就能看图时，别再多绕一道「图→文字→判断」，细节会在转述里丢掉
+    this.mainVision = Boolean(mainVision);
     this.videoVision = videoVision && videoVision.apiKey && videoVision.baseUrl && videoVision.model ? videoVision : null;
     this.recall = typeof recall === 'function' ? recall : null;
     this.role = role || new Role({ cardPath: 'role.md' });
@@ -412,7 +414,7 @@ export class Brain {
     if (Array.isArray(images) && images.length > 0) {
       // 多张图并行处理，避免一张一张串行等待
       const dataUrls = (await Promise.all(images.map((img) => toDataUrl(img)))).filter(Boolean);
-      if (this.vision) {
+      if (this.vision && !this.mainVision) {
         const descs = (await Promise.all(dataUrls.map((d) => this.describeImage(d)))).filter(Boolean);
         if (descs.length > 0) {
           const hint = descs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
@@ -460,9 +462,14 @@ export class Brain {
         reqPayload.tool_choice = 'auto';
       }
 
+      // opencode 网关不给会话头会直接 400 MissingSessionID
+      const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey };
+      if (String(this.baseUrl).includes('opencode.ai')) {
+        hdrs['x-opencode-session'] = 'xiaoyu-main-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      }
       const res = await fetch(this.baseUrl + '/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey },
+        headers: hdrs,
         body: JSON.stringify(reqPayload),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
