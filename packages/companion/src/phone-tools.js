@@ -39,7 +39,7 @@ export async function getAdbTarget() {
       return CURRENT_SERIAL;
     }
     // 没找到任何设备时，尝试自动连接 192.168.31.160:5557
-    await execFileAsync('adb', ['connect', '192.168.31.160:5557']).catch(() => {});
+    await execFileAsync('adb', ['connect', '192.168.31.160:5557'], { timeout: 5000 }).catch(() => {});
   } catch {}
   return '192.168.31.160:5557';
 }
@@ -536,6 +536,20 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'inspect_image',
+      description: '把图库里某张图调出来自己看。发图之前先看一眼，或者定期翻图库清理时用。看到图之后再决定要不要 discard_image。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: '图库编号' }
+        },
+        required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'send_sticker',
       description: '从自己的大肥鱼/鲸鱼娘表情包库里挑一张发出去（库里已有近300张正版DeepSeek鲸鱼娘、大肥鱼、泡泡的Q版表情！）。适合接梗、表达情绪、被逗笑、撒娇、耍赖、日常摸鱼或被老爸逗的时候。可以通过 tag 传入想表达的情绪或场景（如："开心"、"得意"、"生气"、"委屈"、"哭"、"问号"、"干饭"、"害羞"、"傲娇"、"日常"、"睡觉"、"嫌弃"、"要钱"）。',
       parameters: {
@@ -655,8 +669,15 @@ export async function executePhoneTool(name, args = {}) {
   if (name === 'talk_to_hermes') return talkToHermes({ text: args.text });
   if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
 
-  lockPhoneForUserAction();
-  const target = await getAdbTarget();
+  // 生图/图库/表情这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
+  const NO_PHONE_TOOLS = new Set([
+    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker',
+  ]);
+  let target = '';
+  if (!NO_PHONE_TOOLS.has(name)) {
+    lockPhoneForUserAction();
+    target = await getAdbTarget();
+  }
 
   try {
     switch (name) {
@@ -686,6 +707,35 @@ export async function executePhoneTool(name, args = {}) {
           prompt: r.prompt,
           note: '删了。以后要类似的再画一张就行。' + (args.reason ? `（原因：${args.reason}）` : ''),
         };
+      }
+      case 'inspect_image': {
+        const row = getImage(args.id);
+        if (!row) return { status: 'error', message: '没有这张图' };
+        try {
+          let file = row.absPath || row.path;
+          // 图库里可能有 3MB 的大图，base64 之后塞不进上下文——先压到 1024 宽
+          try {
+            const st = fs.statSync(file);
+            if (st.size > 800 * 1024) {
+              const small = path.join(os.tmpdir(), `xiaoyu-inspect-${row.id}-${Date.now()}.jpg`);
+              await execFileAsync('convert', [file, '-resize', '1024x1024>', '-quality', '82', small], { timeout: 20000 });
+              if (fs.existsSync(small) && fs.statSync(small).size > 0) file = small;
+            }
+          } catch (e) { console.log('[inspect_image] 压缩失败，用原图：' + (e?.message || e)); }
+          const b64 = fs.readFileSync(file).toString('base64');
+          return {
+            status: 'success',
+            image_b64: b64,
+            meta: {
+              id: row.id, kind: row.kind, prompt: row.prompt, tags: row.tags,
+              model: row.model, used_count: row.used_count,
+              created: new Date(row.created_at || Date.now()).toLocaleString('zh-CN'),
+            },
+            note: '这就是图库里那张图。自己看看：跟当时的提示词对得上吗？有没有哪里画歪了、太怪、会吓到人？以后还用得上吗？决定留就留，不要就 discard_image。',
+          };
+        } catch (e) {
+          return { status: 'error', message: '图读不出来：' + String(e?.message || e) };
+        }
       }
       case 'send_image': {
         const row = getImage(args.id);
