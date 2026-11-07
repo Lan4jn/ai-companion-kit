@@ -507,7 +507,7 @@ export class Brain {
     let activeProvIdx = -1;
 
     for (let round = 0; round < 3; round++) {
-      // 构造三层降级提供商列表：[0] 主提供商 (opencode) -> [1] Gemini -> [2] ARK
+      // 构造多层降级提供商列表：[0] 主通道 (opencode) -> ...fallbacks
       const providers = [
         { name: 'opencode-go', baseUrl: this.baseUrl, apiKey: this.apiKey, model: this.model },
         ...this.llmFallbacks
