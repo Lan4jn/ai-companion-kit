@@ -139,7 +139,7 @@ export class Brain {
    * 会按 vision → visionFallback 的顺序重试；全部失败才返回 null。
    * 每一步失败都记日志，不然静默 null 会让上层以为"读到了但没内容"。
    */
-  async describeImage(dataUrl, { timeoutMs = 25000, prefer = null, shrink = true } = {}) {
+  async describeImage(dataUrl, { timeoutMs = 25000, prefer = null, shrink = true, isSticker = false } = {}) {
     if (!dataUrl) return null;
 
     const chain = prefer === 'videoVision' && this.videoVision
@@ -153,7 +153,7 @@ export class Brain {
     const small = shrink ? await shrinkDataUrl(dataUrl) : dataUrl;
 
     for (const v of providers) {
-      const text = await this._visionCall(v, small, timeoutMs);
+      const text = await this._visionCall(v, small, timeoutMs, { isSticker });
       if (text) return text;
     }
     console.log('[vision] 所有视觉模型都失败，这张图按"读不出来"处理');
@@ -161,7 +161,7 @@ export class Brain {
   }
 
   /** 单次视觉请求；失败返回 null 并打印原因 */
-  async _visionCall(v, small, timeoutMs) {
+  async _visionCall(v, small, timeoutMs, { isSticker = false } = {}) {
     const base = String(v.baseUrl).replace(/\/+$/, '');
     try {
       const headers = {
@@ -175,6 +175,11 @@ export class Brain {
       if (v.headers && typeof v.headers === 'object') {
         for (const [hk, hv] of Object.entries(v.headers)) headers[hk] = String(hv);
       }
+
+      const promptText = isSticker
+        ? '用中文提炼这张表情包/梗图的核心含义。绝对不要描述图片的边框或几何形状。请直接提炼三要素：1. 【图内配字】（无文字填“无”）；2. 【画面神态/角色】（如：柴犬斜眼笑、小猫委屈眼眶含泪、熊猫头蔑视等，10字内）；3. 【表达意图/潜台词】（对方发这张表情包想表达的态度或情绪，如：无语鄙视、挑衅反问、撒娇求关注、冷嘲热讽、爆笑认同等，10字内）。输出格式示例：【文字：“xxx” | 画面：柴犬斜眼笑 | 意图：挑衅看戏】。'
+        : '用中文提炼这张图片的核心信息。严格禁止描述图片的几何形状、长宽比或构图（绝对不要出现“长方形”、“长条”、“方形”、“竖版”、“这是一张图片”等字眼）。如果是截图或聊天记录，重点直接提取里面的关键文字内容和关键数字（谁说的、说了什么、关键弹窗）；如果是照片，说清场景、人物和正在做的事；如果是表情包/梗图，提取文字与意图。不要客套，不要评论。';
+
       const res = await fetch(base + '/chat/completions', {
         method: 'POST',
         headers,
@@ -187,7 +192,7 @@ export class Brain {
             content: [
               {
                 type: 'text',
-                text: '用中文提炼这张图片的核心信息。严格禁止描述图片的几何形状、长宽比或构图（绝对不要出现“长方形”、“长条”、“方形”、“竖版”、“这是一张图片”等字眼）。如果是截图或聊天记录，重点直接提取里面的关键文字内容和关键数字（谁说的、说了什么、关键弹窗）；如果是照片，说清场景、人物和正在做的事。不要客套，不要评论。',
+                text: promptText,
               },
               { type: 'image_url', image_url: { url: small } },
             ],
@@ -201,7 +206,7 @@ export class Brain {
       }
       const body = await res.json();
       const msg = body?.choices?.[0]?.message || {};
-      const c = msg.content;
+      const c = msg.content || msg.reasoning_content;
       if (typeof c === 'string' && c.trim()) return c.trim();
       if (Array.isArray(c)) {
         const joined = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join(' ').trim();
@@ -417,28 +422,56 @@ export class Brain {
     }
 
     let userContent = String(text || '');
-    if (Array.isArray(images) && images.length > 0) {
+    const allImagesToProcess = (Array.isArray(images) && images.length > 0)
+      ? images
+      : (Array.isArray(stickerImages) ? stickerImages : []);
+
+    let visualAnalyzed = false;
+
+    if (allImagesToProcess.length > 0) {
       // 多张图并行处理，避免一张一张串行等待
-      const dataUrls = (await Promise.all(images.map((img) => toDataUrl(img)))).filter(Boolean);
-      if (this.vision && !this.mainVision) {
-        const descs = (await Promise.all(dataUrls.map((d) => this.describeImage(d)))).filter(Boolean);
-        if (descs.length > 0) {
-          const hint = descs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
-          userContent = `${String(text || '').trim()}\n\n【背景信息：群友发了一张图，内容概括：${hint}】\n【★严禁直接评价图片★】：真人绝对不会像阅卷老师或AI识图工具一样，直接开口点评“这图怎么怎么样”、“这画面是把人拎走”、“你发的图是…”！绝对禁止对图片画面本身做任何描述、复述、分析或说明！图只是一个情境背景，你说话要完全聚焦在群友当下的发言或当时的话题上，像真人网民一样顺着情绪直接接话、吐槽或发表情包，绝不当看图说话机器人！`.trim();
+      const dataUrlsWithMeta = await Promise.all(
+        allImagesToProcess.map(async (img) => {
+          const dUrl = await toDataUrl(img);
+          if (!dUrl) return null;
+          const isStk = (Array.isArray(stickerImages) && stickerImages.includes(img)) || stickers > 0;
+          return { dataUrl: dUrl, isSticker: isStk };
+        })
+      );
+      const validItems = dataUrlsWithMeta.filter(Boolean);
+
+      if (this.vision && !this.mainVision && validItems.length > 0) {
+        const descs = await Promise.all(
+          validItems.map((item) => this.describeImage(item.dataUrl, { isSticker: item.isSticker }))
+        );
+        const validDescs = descs.filter(Boolean);
+        const hasSticker = validItems.some((item) => item.isSticker);
+
+        if (validDescs.length > 0) {
+          visualAnalyzed = true;
+          const hint = validDescs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
+          const cleanText = String(text || '').replace(/\[CQ:at,[^\]]+\]/g, '').replace(/\[图片\]/g, '').trim();
+          const isPureStickerAt = !cleanText;
+
+          if (isPureStickerAt || hasSticker) {
+            userContent = `${String(text || '').trim()}\n\n【背景信息：对方发了表情包/梗图，视觉模型为你提炼出的真实含义如下】：\n${hint}\n【★核心聊天法则★】：\n1. 真正读出对方的意思：结合上面的解析，看清对方发这个表情包的核心态度（如：无语嫌弃、嘲弄反驳、挑衅、卖萌、或者在开你玩笑）。\n2. 像真人老群友/贴心女儿一样自然接话：根据对方在表情包里表达的真实态度、吐槽或图里文字，直接顺着接话、反驳、接梗或发针对性表情包！\n3. 严禁死板念经：绝对不要像识图机器一样生硬复述“你发了一张xxx上面写着xxx”，而是直接针对对方的这层情绪和态度说话（例如老爸发嫌弃表情包，你可以直接怼回去、撒娇抱怨或问老爸干嘛嫌弃你，绝不用点评图片本身）！`.trim();
+          } else {
+            userContent = `${String(text || '').trim()}\n\n【背景信息：群友发了一张图，内容概括：${hint}】\n【★严禁直接评价图片★】：真人绝对不会像阅卷老师或AI识图工具一样，直接开口点评“这图怎么怎么样”、“这画面是把人拎走”、“你发的图是…”！绝对禁止对图片画面本身做任何描述、复述、分析或说明！图只是一个情境背景，你说话要完全聚焦在群友当下的发言或当时的话题上，像真人网民一样顺着情绪直接接话、吐槽或发表情包，绝不当看图说话机器人！`.trim();
+          }
         } else {
-          userContent = `${String(text || '').trim() || '？'}\n\n（注：群友发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
+          userContent = `${String(text || '').trim() || '？'}\n\n（注：对方发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
         }
-      } else if (dataUrls.length > 0) {
+      } else if (validItems.length > 0) {
         const parts = [{ type: 'text', text: String(text || '[图片]') }];
-        for (const d of dataUrls) parts.push({ type: 'image_url', image_url: { url: d } });
+        for (const item of validItems) parts.push({ type: 'image_url', image_url: { url: item.dataUrl } });
         userContent = parts;
       } else {
-        userContent = `${String(text || '').trim() || '？'}\n\n（注：群友发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
+        userContent = `${String(text || '').trim() || '？'}\n\n（注：对方发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
       }
     }
 
-    // 表情包处理法则：表情包只是聊天调节氛围的工具，绝对不能当成阅读理解题来复述或点评内容！
-    if (stickers > 0) {
+    // 表情包处理法则：仅当没有经过视觉模型解析时，才进行兜底提示
+    if (stickers > 0 && !visualAnalyzed) {
       const base = typeof userContent === 'string' ? userContent : String(text || '');
       const isPureStickerAt = !text || !text.replace(/\[CQ:at,[^\]]+\]/g, '').trim();
       const tail = isPureStickerAt

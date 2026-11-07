@@ -484,10 +484,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   const images = items.flatMap((m) => m.images || []).filter(Boolean);
 
-  // 表情包不是"要分析的图片"。真人看到表情包不会去描述画面，
-  // 所以这里先把它们从 vision 队列里摘出来，只保留一个数量给模型。
+  // 区分普通图片与表情包（sub_type=1 或 mface）
   const stickerUrls = [];
-  const stickerImageUrls = [];   // sub_type=1 的图：既是"表情包"，也可能是一张画，照样要看得见
+  const stickerImageUrls = [];   // sub_type=1 或 mface 的图：既是"表情包"，也是画面，必须让视觉模型能读懂真实含义
   let stickerCount = 0;
   for (const m of items) {
     if (!Array.isArray(m.raw)) continue;
@@ -499,16 +498,21 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       stickerCount++;
       if (s.data?.url) {
         stickerUrls.push(String(s.data.url));
-        if (isStickerImg) stickerImageUrls.push(String(s.data.url));
+        stickerImageUrls.push(String(s.data.url));
       }
     }
   }
-  let normalImages = images.filter((u) => !stickerUrls.includes(u));
+
+  // 无论普通图还是表情包，只要带有 URL，全部纳入视觉解析队列（保留表情包标识）
+  let allImages = [...images];
+  for (const u of stickerUrls) {
+    if (!allImages.includes(u)) allImages.push(u);
+  }
 
   // 连续对话视觉补偿：必须严格防误触，杜绝把群友发的图强行塞给无关对话！
-  if (normalImages.length === 0 && recentGroupImages.has(key)) {
+  if (allImages.length === 0 && recentGroupImages.has(key)) {
     const cutoff = Date.now() - 45000; // 缩短到 45 秒内
-    const validRecent = (recentGroupImages.get(key) || []).filter((item) => item.time >= cutoff && !stickerUrls.includes(item.url));
+    const validRecent = (recentGroupImages.get(key) || []).filter((item) => item.time >= cutoff);
     const userImg = validRecent.slice().reverse().find((item) => item.userId === last.userId);
 
     // 严禁单字粗暴匹配！必须是明确具体的看图词组（如“看看这张图”、“图里是啥”、“这截图”）
@@ -518,7 +522,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     // 2. 只有当明确带有“看图/这图里”这种指令时，才允许跨人看上一张图；老爸说话且未指代图片时绝不跨人塞图！
     const candidate = userImg || (hasExplicitImageRef ? validRecent[validRecent.length - 1] : null);
     if (candidate && (candidate.userId === last.userId || hasExplicitImageRef)) {
-      normalImages.push(candidate.url);
+      allImages.push(candidate.url);
       console.log(`   [视觉补偿] 自动关联 ${candidate.name} 在 ${Math.round((Date.now() - candidate.time) / 1000)}秒前发出的图片`);
     }
   }
@@ -666,7 +670,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
-  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: normalImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint, history, sassy: useSassy });
+  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: allImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint, history, sassy: useSassy });
   if (useSassy) console.log('   [人格] 本轮用毒舌版');
   if (!out && !voiceB64) { console.log('   （没说话）'); return; }
 

@@ -31,6 +31,9 @@ function extractImages(segs) {
     if (s.type === 'image') {
       const u = s.data?.url || s.data?.file;
       if (u) urls.push(String(u));
+    } else if (s.type === 'mface') {
+      const u = s.data?.url || s.data?.file;
+      if (u) urls.push(String(u));
     } else if (s.type === 'forward') {
       const subNodes = s.data?.content || s.data?.messages;
       if (Array.isArray(subNodes)) {
