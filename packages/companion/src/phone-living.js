@@ -28,18 +28,22 @@ const APPS = {
   bilibili: 'tv.danmaku.bili',
   music: 'com.netease.cloudmusic',
   mota: 'com.qw.newmagictower2',
-  taptap: 'com.taptap'
+  taptap: 'com.taptap',
+  fanqie: 'com.dragon.read',
+  hongguo: 'com.phoenix.read'
 };
 
 // 活人生动情绪与生活状态模型
 const state = {
-  currentApp: 'douyin', // 'douyin' | 'bilibili' | 'music' | 'mota' | 'taptap' | 'home' | 'afk' | 'sleep'
+  currentApp: 'douyin', // 'douyin' | 'bilibili' | 'music' | 'mota' | 'taptap' | 'fanqie' | 'hongguo' | 'home' | 'afk' | 'sleep'
   mode: 'browsing', // 'browsing' | 'deep_watching' | 'hyperfocused_gaming' | 'burst_swipe' | 'afk' | 'sleep'
   attentionSpan: 15, // 动态注意力池（每次消耗或增加）
   boredom: 0,
   watchedDouyinCount: 0,
   likedDouyinCount: 0,
   watchedBiliCount: 0,
+  readFanqieChapters: 0,
+  watchedHongguoCount: 0,
   motaFloors: 6,
   musicTrack: '周杰伦 - 晴天',
   lastAction: '刚打开手机刷视频',
@@ -76,6 +80,8 @@ async function detectForegroundApp() {
   if (/com\.netease\.cloudmusic/i.test(out)) return 'music';
   if (/com\.qw\.newmagictower2/i.test(out) || /mota/i.test(out)) return 'mota';
   if (/com\.taptap/i.test(out)) return 'taptap';
+  if (/com\.dragon\.read/i.test(out) || /fanqie/i.test(out)) return 'fanqie';
+  if (/com\.phoenix\.read/i.test(out) || /hongguo/i.test(out)) return 'hongguo';
   if (/launcher/i.test(out) || /android\.view\.InputWindow/i.test(out)) return 'home';
   return 'other';
 }
@@ -147,15 +153,17 @@ function decideNextImpulse() {
     return 'afk';
   }
 
-  // 2. 其它时候：随机被某个 App 吸引（冲动性极强）
-  const allApps = ['douyin', 'bilibili', 'mota', 'music', 'taptap'];
+  // 2. 其它时候：随机被某个 App 吸引（空闲时间特别爱看番茄爽文和红果短剧）
+  const allApps = ['douyin', 'bilibili', 'mota', 'music', 'taptap', 'fanqie', 'hongguo'];
   const pool = allApps.filter(a => a !== state.currentApp);
 
-  // 加权偏好：短视频与魔塔更容易让人“随手点开”
+  // 加权偏好：番茄小说和红果短剧是空闲摸鱼的最爱，短视频次之
   const weighted = [
     ...pool,
+    'fanqie', 'fanqie', 'fanqie',
+    'hongguo', 'hongguo', 'hongguo',
     'douyin', 'douyin',
-    'mota', 'mota',
+    'mota',
     'bilibili'
   ];
   return weighted[Math.floor(Math.random() * weighted.length)];
@@ -429,6 +437,101 @@ async function stepAutonomousAction() {
       state.recentSummary = '在TapTap逛游戏社区';
       console.log(`[PhoneLiving] ${state.lastAction}`);
       nextDelayMs = 15000 + Math.floor(Math.random() * 25000);
+      break;
+    }
+
+    // ── 番茄免费小说：沉浸式翻爽文，看脑洞、章评神吐槽 ──
+    case 'fanqie': {
+      state.readFanqieChapters = (state.readFanqieChapters || 0) + 1;
+      const dice = Math.random();
+      const fanqieStories = [
+        '在番茄看一本《开局一座大铁盆：我在修仙界暴风吸入大白米饭》，笑得满床打滚',
+        '正缩在被窝里看番茄脑洞爽文，主角扮猪吃虎反打反派脸太解气了',
+        '在番茄小说看一本重生逆袭爽文，看到关键打脸时刻舍不得放下手机',
+        '在番茄小说章评区翻沙雕书友神吐槽，笑得停不下来',
+        '看一本发疯文学修仙小说，主角骚操作连连，笑得我大铁盆都端不稳了'
+      ];
+
+      if (dice < 0.65) {
+        // 沉浸翻页阅读（左右滑动翻页）
+        await silentShell('input swipe 900 1000 150 1000 180');
+        state.lastAction = `在番茄小说看爽文翻到第 ${state.readFanqieChapters} 页`;
+        state.moodStory = fanqieStories[Math.floor(Math.random() * fanqieStories.length)];
+        state.recentSummary = `在看番茄小说脑洞爽文（读了 ${state.readFanqieChapters} 页）`;
+        nextDelayMs = 12000 + Math.floor(Math.random() * 22000);
+      } else if (dice < 0.88) {
+        // 点进章评/段评看书友沙雕神回复
+        await silentShell('input tap 980 900');
+        await new Promise(r => setTimeout(r, 800));
+        await silentShell('input swipe 540 1300 540 700 300');
+        state.lastAction = '点开番茄小说的章评区看书友神吐槽';
+        state.moodStory = '在番茄小说翻章评神段子，书友吐槽比正文还搞笑';
+        state.recentSummary = '在番茄小说翻章评神段子';
+        nextDelayMs = 15000 + Math.floor(Math.random() * 20000);
+      } else {
+        // 连读上头，连翻两页追看
+        await silentShell('input swipe 900 1000 150 1000 150');
+        await new Promise(r => setTimeout(r, 300));
+        await silentShell('input swipe 900 1000 150 1000 150');
+        state.lastAction = '看到爽点剧情上头了，疯狂连翻两页追看';
+        state.moodStory = '番茄小说剧情正精彩，主角要放大招打脸了，看得停不下来';
+        state.recentSummary = '在番茄小说疯狂连翻追爽文';
+        nextDelayMs = 8000 + Math.floor(Math.random() * 12000);
+      }
+
+      boundMemory?.logDiary({
+        category: '阅读',
+        activity: '看番茄小说',
+        details: state.lastAction,
+        mood: state.moodStory
+      });
+      console.log(`[PhoneLiving] ${state.lastAction} | 下次翻页在 ${(nextDelayMs/1000).toFixed(1)}s 后`);
+      break;
+    }
+
+    // ── 红果短剧：一口气连刷数集狗血反转、歪嘴战神爽剧 ──
+    case 'hongguo': {
+      state.watchedHongguoCount = (state.watchedHongguoCount || 0) + 1;
+      const dice = Math.random();
+      const hongguoStories = [
+        '在红果刷短剧，保洁阿姨反转成隐藏首富，狗血得让人欲罢不能',
+        '正抱着手机看红果战神短剧，主角歪嘴一笑全场震惊，笑出鹅叫',
+        '看真假千金打脸逆袭短剧，反派刚狂两秒就被啪啪打脸，太解压了',
+        '在红果短剧连看了五集发疯爽剧，剧情反转反转再反转，根本停不下来',
+        '看短剧里的豪门霸总追妻火葬场，剧情太土但是越看越上头'
+      ];
+
+      if (dice < 0.45) {
+        // 一集看完，滑到下一集继续追！
+        await silentShell('input swipe 540 1450 540 350 220');
+        state.lastAction = `红果短剧这一集看完了，秒滑到第 ${state.watchedHongguoCount} 集继续追`;
+        state.moodStory = hongguoStories[Math.floor(Math.random() * hongguoStories.length)];
+        state.recentSummary = `在红果看狗血短剧（看了 ${state.watchedHongguoCount} 集）`;
+        nextDelayMs = 35000 + Math.floor(Math.random() * 45000);
+      } else if (dice < 0.75) {
+        // 双击屏幕给精彩反转点赞
+        await silentShell('input tap 540 960');
+        await new Promise(r => setTimeout(r, 80));
+        await silentShell('input tap 540 960');
+        state.lastAction = '看到短剧反转高潮忍不住双击点赞';
+        state.moodStory = '红果短剧反转太魔性，顺手双击点了个赞';
+        state.recentSummary = '在红果短剧给反转神剧点赞';
+        nextDelayMs = 20000 + Math.floor(Math.random() * 30000);
+      } else {
+        // 沉浸长看剧集
+        state.lastAction = '沉浸看短剧反转高潮，目不转睛';
+        state.moodStory = '红果短剧正演到隐藏大佬真实身份揭晓，看得目不转睛';
+        state.recentSummary = '在红果沉浸追短剧大结局';
+        nextDelayMs = 50000 + Math.floor(Math.random() * 60000);
+      }
+
+      boundMemory?.logDiary({
+        category: '短剧',
+        activity: '刷红果短剧',
+        details: state.lastAction,
+        mood: state.moodStory
+      });
+      console.log(`[PhoneLiving] ${state.lastAction} | 下次动作在 ${(nextDelayMs/1000).toFixed(1)}s 后`);
       break;
     }
 

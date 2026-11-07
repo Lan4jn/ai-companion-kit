@@ -180,10 +180,11 @@ export async function fetchTrendingTopics(dataDir = '') {
   }
 
   const GAME_PAT = /(游戏|steam|epic|显卡|cpu|装机|主机|单机|联机|怪物猎人|怪猎|荒野|黑神话|三角洲|无畏契约|瓦罗兰特|cs2|csgo|pubg|吃鸡|云顶|原神|星铁|崩铁|绝区零|鸣潮|明日方舟|王者|英雄联盟|lol|s赛|赛季|暴雷|虚幻5|暴雪|网易|腾讯|米哈游|外挂|mod|打折|史低|优化|补丁|开黑|电竞|选手|转会)/i;
+  const NOVEL_DRAMA_PAT = /(番茄|短剧|红果|小说|爽文|重生|打脸|霸总|反转|战神|赘婿|网文|连载|断章|书评|爆款|穿越|修仙|女帝|首富|真假千金)/i;
   filtered.sort((a, b) => {
-    const aGame = GAME_PAT.test(a.title) ? 1 : 0;
-    const bGame = GAME_PAT.test(b.title) ? 1 : 0;
-    return bGame - aGame;
+    const aScore = (GAME_PAT.test(a.title) ? 2 : 0) + (NOVEL_DRAMA_PAT.test(a.title) ? 2 : 0);
+    const bScore = (GAME_PAT.test(b.title) ? 2 : 0) + (NOVEL_DRAMA_PAT.test(b.title) ? 2 : 0);
+    return bScore - aScore;
   });
 
   return filtered;
@@ -218,15 +219,15 @@ export async function browseWebTopic({ brain, memory, topic = null, prompt = '' 
     // 取前 15 个话题供小鱼选择
     const candidates = trending.slice(0, 15).map(x => `[${x.source}] ${x.title}`);
     const desireContext = renderDesirePrompt('web');
-    const pickPrompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁游戏宅女，平时最爱单机大作、Steam/主机游戏、硬核射击电竞、数码硬件装机，以及游戏圈的各种离谱乐子、新版本改动与口碑暴雷。
+    const pickPrompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁女孩子，平时除了痴迷单机大作、Steam游戏、硬核射击、数码硬件装机，所有空闲时间都超级爱抱着手机看【番茄免费小说】（沙雕脑洞文、反转打脸爽文、修仙穿越发疯文学）和狂刷【红果免费短剧】（歪嘴龙王、真假千金反转、豪门打脸爽剧名场面）。
 ${desireContext}
-你现在正打开手机/电脑热榜摸鱼。请从以下实时热搜列表中，【优先挑选】与游戏、电竞、数码硬件、网络名场面最相关的话题；如果实在没有游戏话题，再选沙雕吃瓜吐槽：
+你现在正打开手机/电脑热榜摸鱼。请从以下实时热搜列表中，【优先挑选】与游戏、数码硬件、番茄小说/脑洞爽文、短剧/反转爆梗、网络沙雕名场面最相关的话题；如果实在没有，再选日常吃瓜吐槽：
 ${JSON.stringify(candidates)}
 
 请以 JSON 格式输出：
 {
   "topic": "你选的话题名称（去掉 [微博] 等前缀，只留纯标题）",
-  "reason": "你为什么选它（用口语随性一句话，如：看看怪猎荒野优化到底救回来没、又哪个英雄被砍废了？）"
+  "reason": "你为什么选它（用口语随性一句话，如：看看怪猎荒野优化到底救回来没 / 这本爽文脑洞有点意思，去瞅瞅 / 又有新狗血短剧反转了？）"
 }`;
 
     try {
@@ -473,23 +474,23 @@ export async function decideWebSurfing({ brain, memory, dataDir } = {}) {
   } catch {}
 
   const desireContext = renderDesirePrompt('web');
-  const prompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁游戏宅女，平时最爱单机大作、Steam/主机游戏、硬核射击电竞、数码硬件装机，以及游戏圈的各种离谱乐子与八卦。
+  const prompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁女孩子，平时最爱单机大作、Steam/主机游戏、硬核射击电竞、数码硬件装机，而且所有空闲时间都超级爱抱着手机看【番茄免费小说】（沙雕脑洞文、打脸爽文、发疯文学）和狂刷【红果免费短剧】（歪嘴战神、反转狗血爽剧）。
 ${desireContext}
 现在是 ${timeStr}。
 ${lastSurfedContext}
 ${recentChatContext}
 你现在正一个人在电脑/手机前发呆待着。
-请问问你自己的内心：这会儿有没有什么冲动想去网上（B站/微博/热搜）转转吃瓜？或者去搜一搜最近关心的游戏/硬件/网络新鲜事？还是说这会儿正歇着发呆，完全不想去搜东西？
+请问问你自己的内心：这会儿有没有什么冲动想去网上（B站/微博/热搜）转转吃瓜？或者去搜一搜最近关心的游戏/硬件/番茄爽文脑洞/红果短剧爆梗？还是说这会儿正歇着发呆，完全不想去搜东西？
 
 【真人网民的真实状态】：
-- 真人不会每时每刻都想开网页。如果刚刚聊到好玩的话题脑子还热乎、或者闲着无聊想看看游戏圈有啥新大瓜，就会想去看看（want: true）；
+- 真人不会每时每刻都想开网页。如果刚刚聊到好玩的话题脑子还热乎、或者闲着无聊想看看游戏圈/网文圈/短剧圈有啥新大瓜，就会想去看看（want: true）；
 - 如果刚才刚查过、脑子发懵、或者现在只想继续发呆放空歇着，就不会去开网页（want: false）。
 
 请严格以 JSON 格式输出：
 {
   "want": true 或 false,
-  "reason": "你内心的随性真实想法（口语化，10~30字，如：刚听群友聊怪猎，我得去搜搜最新优化到底咋样 / 刚才看过了，现在脑子有点懵，先趴着放空会儿）",
-  "keyword": "如果有特别想查的具体关键词就写出来（如：怪猎荒野优化、270K跑分），如果只是想随便看热搜榜则填空字符串"
+  "reason": "你内心的随性真实想法（口语化，10~30字，如：刚听群友聊怪猎，我得去搜搜最新优化到底咋样 / 闲着没事搜搜最近番茄有啥高分沙雕脑洞文 / 刚才看过了，现在脑子有点懵，先趴着放空会儿）",
+  "keyword": "如果有特别想查的具体关键词就写出来（如：怪猎荒野优化、番茄脑洞爽文热榜、270K跑分、爆款短剧反转），如果只是想随便看热搜榜则填空字符串"
 }`;
 
   try {
