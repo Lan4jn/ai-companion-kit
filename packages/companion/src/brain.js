@@ -517,7 +517,7 @@ export class Brain {
     let lastJson = null;
     let activeProvIdx = -1;
 
-    for (let round = 0; round < 3; round++) {
+    for (let round = 0; round < 5; round++) {
       // 构造多层降级提供商列表：[0] 主通道 (opencode) -> ...fallbacks
       const providers = [
         { name: 'opencode-go', baseUrl: this.baseUrl, apiKey: this.apiKey, model: this.model },
@@ -556,7 +556,7 @@ export class Brain {
           temperature: 1.1,
           stream: false,
         };
-        if (enableTools && round < 2) {
+        if (enableTools && round < 4) {
           reqPayload.tools = ALL_TOOLS;
           reqPayload.tool_choice = 'auto';
         }
@@ -640,7 +640,7 @@ export class Brain {
       }
 
       // 如果模型触发了工具调用，且未超过轮次限制
-      if (toolCalls.length > 0 && round < 2) {
+      if (toolCalls.length > 0 && round < 4) {
         console.log(`[工具调用] 第 ${round + 1} 轮，小鱼触发了 ${toolCalls.length} 个操作：` + toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments || ''})`).join(', '));
         messages.push({
           role: 'assistant',

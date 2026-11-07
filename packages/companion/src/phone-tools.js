@@ -82,6 +82,29 @@ async function shell(cmd, timeout = 30000) {
 }
 
 /**
+ * 获取当前屏幕实际逻辑分辨率与旋转方向（自适应横屏/竖屏游戏）
+ */
+export async function getDisplayMetrics() {
+  try {
+    const wmOut = await shell('wm size', 5000).catch(() => '');
+    const sizeMatch = wmOut.match(/Physical size:\s*(\d+)x(\d+)/);
+    let physW = sizeMatch ? Number(sizeMatch[1]) : 1080;
+    let physH = sizeMatch ? Number(sizeMatch[2]) : 2376;
+
+    const winOut = await shell('dumpsys window', 5000).catch(() => '');
+    const rotMatch = winOut.match(/mCurrentRotation=ROTATION_(\d+)/) || winOut.match(/mDisplayRotation=ROTATION_(\d+)/);
+    const rot = rotMatch ? rotMatch[1] : '0';
+    const isLand = rot === '90' || rot === '270';
+
+    const width = isLand ? Math.max(physW, physH) : Math.min(physW, physH);
+    const height = isLand ? Math.min(physW, physH) : Math.max(physW, physH);
+    return { width, height, isLandscape: isLand, rotation: rot };
+  } catch (e) {
+    return { width: 1080, height: 2376, isLandscape: false, rotation: '0' };
+  }
+}
+
+/**
  * 高性能截屏并通过 ImageMagick 实时管道压制为轻量高质量 JPEG base64 (约 50KB~80KB)
  */
 export async function captureScreenBase64() {
@@ -267,12 +290,12 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'phone_tap',
-      description: '根据具体屏幕坐标点击（适合游戏画布或无文字的图标）。',
+      description: '点击手机屏幕。强烈推荐在游戏界面使用！支持绝对坐标或相对百分比（0~1之间的小数或0~100）：例如想点右下角传 x: 0.84, y: 0.88，想点中心传 x: 0.5, y: 0.5。系统会自动换算为当前屏幕实际分辨率（自动兼容横竖屏游戏）。',
       parameters: {
         type: 'object',
         properties: {
-          x: { type: 'number', description: '横坐标 X' },
-          y: { type: 'number', description: '纵坐标 Y' }
+          x: { type: 'number', description: '横坐标 X（支持 0~1 的百分比小数，或像素绝对坐标）' },
+          y: { type: 'number', description: '纵坐标 Y（支持 0~1 的百分比小数，或像素绝对坐标）' }
         },
         required: ['x', 'y']
       }
@@ -969,25 +992,27 @@ export async function executePhoneTool(name, args = {}) {
 
       // 2. 感知与视觉
       case 'phone_get_screen': {
-        const b64 = await captureScreenBase64();
+        const [b64, metrics] = await Promise.all([captureScreenBase64(), getDisplayMetrics()]);
         if (b64) {
           return {
             status: 'success',
-            message: '已截取手机当前画面',
-            image_b64: b64
+            message: `已截取手机当前画面。当前屏幕尺寸为 ${metrics.width}x${metrics.height} (${metrics.isLandscape ? '横屏游戏' : '竖屏'})。如果是游戏界面请调用 phone_tap 传入相对百分比（如 x: 0.84, y: 0.88）或绝对坐标进行精准点击！`,
+            image_b64: b64,
+            metrics
           };
         }
         return { status: 'error', message: '截屏失败' };
       }
 
       case 'phone_send_screenshot_to_chat': {
-        const b64 = await captureScreenBase64();
+        const [b64, metrics] = await Promise.all([captureScreenBase64(), getDisplayMetrics()]);
         if (b64) {
           return {
             status: 'success',
-            message: '已生成手机截图并发送给对方',
+            message: `已生成手机截图并发送给对方。当前屏幕尺寸为 ${metrics.width}x${metrics.height} (${metrics.isLandscape ? '横屏游戏' : '竖屏'})。`,
             image_b64: b64,
-            cq_image: `[CQ:image,file=base64://${b64}]`
+            cq_image: `[CQ:image,file=base64://${b64}]`,
+            metrics
           };
         }
         return {
@@ -1077,7 +1102,7 @@ export async function executePhoneTool(name, args = {}) {
         if (!want) return { status: 'error', message: '请指定要点击的文字' };
 
         const remote = '/sdcard/_ui.xml';
-        await shell(`uiautomator dump ${remote}`);
+        await shell(`uiautomator dump ${remote}`).catch(() => {});
         const r = await adb(['shell', 'cat', remote]);
         const hits = [];
         const re = /<node[^>]*>/g;
@@ -1092,16 +1117,38 @@ export async function executePhoneTool(name, args = {}) {
           const [, x1, y1, x2, y2] = bm.map(Number);
           hits.push({ text: t, x: Math.round((x1 + x2) / 2), y: Math.round((y1 + y2) / 2) });
         }
-        if (!hits.length) return { status: 'error', message: `屏幕上未找到包含「${want}」的文字按钮` };
+        if (!hits.length) {
+          const metrics = await getDisplayMetrics();
+          return {
+            status: 'error',
+            message: `屏幕上未找到包含「${want}」的文字按钮。注意：当前极可能是全屏游戏界面（游戏画面通常无法读取文字节点），请立刻改用 phone_tap 并传入相对百分比（如 x: 0.85, y: 0.88）或像素坐标进行直接点击！当前屏幕尺寸为 ${metrics.width}x${metrics.height}`
+          };
+        }
         const hit = hits[Math.min(index, hits.length - 1)];
         await shell(`input tap ${hit.x} ${hit.y}`);
         return { status: 'success', message: `已点击「${hit.text}」位于 (${hit.x}, ${hit.y})` };
       }
 
       case 'phone_tap': {
-        const { x, y } = args;
-        await shell(`input tap ${Math.round(x)} ${Math.round(y)}`);
-        return { status: 'success', message: `已点击 (${x}, ${y})` };
+        const metrics = await getDisplayMetrics();
+        let rawX = Number(args.x);
+        let rawY = Number(args.y);
+
+        // 自动识别并换算百分比（例如 0.84 换算为 width * 0.84，或者整数 84 换算为 84%）
+        if (rawX > 0 && rawX <= 1) {
+          rawX = rawX * metrics.width;
+        } else if (rawX > 1 && rawX <= 100 && (rawY > 0 && rawY <= 100) && metrics.width > 200) {
+          rawX = (rawX / 100) * metrics.width;
+          rawY = (rawY / 100) * metrics.height;
+        }
+        if (rawY > 0 && rawY <= 1) {
+          rawY = rawY * metrics.height;
+        }
+
+        const x = Math.round(rawX);
+        const y = Math.round(rawY);
+        await shell(`input tap ${x} ${y}`);
+        return { status: 'success', message: `已点击坐标 (${x}, ${y}) [屏幕当前尺寸: ${metrics.width}x${metrics.height}]` };
       }
 
       case 'phone_swipe': {
