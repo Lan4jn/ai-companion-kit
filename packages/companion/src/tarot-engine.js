@@ -89,7 +89,15 @@ export function pickCard({ dataDir, history = [], now = Date.now(), rnd = Math.r
  * 每天跑一次：纯随机抽一张，写 data/tarot.json。
  * 一天只算一次；重启后若当天没算过会补算。
  */
-export function tarotDailyTick(dataDir, log = console.log, now = Date.now(), rnd = Math.random) {
+export function tarotDailyTick(dataDirOrLog, maybeLog, now = Date.now(), rnd = Math.random) {
+  let dataDir = null;
+  let log = console.log;
+  if (typeof dataDirOrLog === 'string') {
+    dataDir = dataDirOrLog;
+    if (typeof maybeLog === 'function') log = maybeLog;
+  } else if (typeof dataDirOrLog === 'function') {
+    log = dataDirOrLog;
+  }
   const key = dayKey(now);
   const st = readTarot(dataDir);
   if (st.enabled === false) return { skipped: true, disabled: true };
@@ -122,7 +130,15 @@ export function tarotDailyTick(dataDir, log = console.log, now = Date.now(), rnd
   return record;
 }
 
-export function tarotReroll(dataDir, log = console.log, now = Date.now(), rnd = Math.random) {
+export function tarotReroll(dataDirOrLog, maybeLog, now = Date.now(), rnd = Math.random) {
+  let dataDir = null;
+  let log = console.log;
+  if (typeof dataDirOrLog === 'string') {
+    dataDir = dataDirOrLog;
+    if (typeof maybeLog === 'function') log = maybeLog;
+  } else if (typeof dataDirOrLog === 'function') {
+    log = dataDirOrLog;
+  }
   const st = readTarot(dataDir);
   if (st.enabled === false) return { disabled: true };
   const key = dayKey(now);
