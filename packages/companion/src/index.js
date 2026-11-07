@@ -748,9 +748,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   // 手机操作与玩游戏感知检测
   let phoneHint = '';
-  const wantsPhoneAction = /(操作手机|玩游戏|代打|点一下|帮我点|点这里|看看手机|截个屏|发个截图|怎么不玩|没看到你.*玩|会不会操作|手机权限|控制手机|动一下|动都没动|按一下)/i.test(text);
+  const wantsPhoneAction = /(操作手机|玩游戏|代打|点一下|帮我点|点这里|看(看)?手机|截(个)?屏|发(个)?截图|怎么不玩|没看到你.*玩|会不会操作|手机权限|控制手机|动一下|动都没动|按一下|然后呢|你自己看|你在干嘛|发(张)?图)/i.test(text);
   if (wantsPhoneAction) {
-    phoneHint = '\n【系统特别指令·手机与游戏真实操作能力】：\n你已经完整连接了老爸的手机（OnePlus），拥有真实的 ADB 操作权限！你绝不是只会动嘴皮子的机器人！\n- 对方正在聊手机操作/玩游戏/查岗看屏幕/让你操作！\n- 你必须根据需要调用对应工具：\n  * 想看当前屏幕：调用 `phone_get_screen`（自看）或 `phone_send_screenshot_to_chat`（截图发进群聊让老爸看）；\n  * 想动手操作：看清按钮后调用 `phone_tap` 或 `phone_tap_text` 点击对应位置；\n- 严禁说“我不会操作”、“我没有权限”等怂话！用真实的工具行动证明给老爸看！';
+    phoneHint = '\n【系统特别指令·手机与游戏真实操作能力】：\n你已经完整连接了老爸的手机（OnePlus），拥有真实的 ADB 操作权限！你绝不是只会动嘴皮子的机器人！\n- 对方正在聊手机操作/玩游戏/查岗看屏幕/让你操作！\n- 行为守则：\n  * 如果对方想看当前屏幕或你在干嘛，或者你要向老爸证明游戏画面进度：【必须优先调用 `phone_send_screenshot_to_chat` 将截图发给对方看】，绝不能只调用 `phone_get_screen` 自己看却不给老爸发图！\n  * 想动手操作：看清按钮后调用 `phone_tap` 或 `phone_tap_text` 点击对应位置；\n- 严禁说“我不会操作”、“我没有权限”等怂话！用真实的工具行动证明给老爸看！';
   }
 
   const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: allImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint + ownerBusyHint + phoneHint, history, sassy: useSassy });

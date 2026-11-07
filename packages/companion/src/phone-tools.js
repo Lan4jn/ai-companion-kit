@@ -189,16 +189,16 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'phone_get_screen',
-      description: '瞄一眼当前手机屏幕（自己能看到屏幕画面，但不会发到聊天中）。当别人问你在看什么、在干嘛，或者你想先看看画面再聊时调用。',
+      name: 'phone_send_screenshot_to_chat',
+      description: '★推荐★ 截取手机当前屏幕并作为真实图片直接发进聊天让对方看到！当对方问你在看什么、让你发截图、查岗、质疑你没在玩、或者你想把游戏画面/更新进度晒给对方看时必须优先调用这个工具！',
       parameters: { type: 'object', properties: {}, required: [] }
     }
   },
   {
     type: 'function',
     function: {
-      name: 'phone_send_screenshot_to_chat',
-      description: '截取手机屏幕并作为真实图片直接发进 QQ 聊天。当对方让你“发个截图看看”、“查岗”、“看看你手机”或者你想主动分享屏幕时必须调用。',
+      name: 'phone_get_screen',
+      description: '仅自己静默瞄一眼当前手机屏幕（不会发到聊天中）。适合在自己连续点击某个按钮前确认界面变化，如果对方是要看屏幕画面请务必调用 phone_send_screenshot_to_chat。',
       parameters: { type: 'object', properties: {}, required: [] }
     }
   },
