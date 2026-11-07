@@ -222,6 +222,9 @@ async function main() {
   /** @type {Map<string, NodeJS.Timeout>} 每个会话的合并定时器 */
   const pending = new Map();
 
+  /** @type {Map<string, number>} 记录每个会话/用户的活跃跟聊期（到期前用户的追加发言自动继承唤醒） */
+  const activeFollowupWindows = new Map();
+
   const bot = new OneBot({
     ...cfg.onebot,
     dataDir: cfg.dataDir || './data',
@@ -302,15 +305,23 @@ async function main() {
         }
       }
 
-      // 检查当前用户是否已有正在等待合并的窗口（处理“单@后面接着打字发出来”）
+      // 提取用户真实手打的有效文字（剥离【引用 ...】前缀和 [CQ:at,...] 艾特标签）
+      const userTypedText = String(msg.text || '')
+        .replace(/^【引用\s+[^】]+】\s*/s, '')
+        .replace(/\[CQ:at,[^\]]+\]/g, '')
+        .trim();
+
+      // 检查当前用户是否已有正在排队等待的合并窗口，或处于活跃对话跟聊期（15秒内追加发言无需再@）
       const batchKey = msg.isGroup ? `${msg.key}:${msg.userId}` : msg.key;
-      const isContinuation = pending.has(batchKey);
+      const isWaitingBatch = pending.has(batchKey);
+      const activeUntil = activeFollowupWindows.get(batchKey) || 0;
+      const isRecentFollowup = Date.now() < activeUntil;
+      const isContinuation = isWaitingBatch || isRecentFollowup;
 
       let verdict = waker.shouldWake(msg);
       if (!verdict.wake && isContinuation) {
-        // 如果该群友刚刚触发了唤醒（如纯@），我们正在等待他打字/发完整内容，
-        // 那么他在等待期内追加发送的后续文字（即使不带@）必须自动继承唤醒并合并！
-        verdict = { wake: true, reason: 'continuation' };
+        // 如果该群友正在等待合并窗口中，或 15 秒内刚刚唤醒过小鱼对话，其追加发言自动继承唤醒！
+        verdict = { wake: true, reason: isWaitingBatch ? 'batch-continuation' : 'active-followup' };
       }
 
       if (!verdict.wake) {
@@ -323,6 +334,9 @@ async function main() {
         }
         return;
       }
+
+      // 只要触发了唤醒，刷新该用户在该会话的 15 秒活跃跟聊窗口
+      activeFollowupWindows.set(batchKey, Date.now() + 15000);
 
       appendBridgeLog(cfg.dataDir, `[来信] 收到 [${msg.name}]：${msg.text.slice(0, 40)} (醒·${verdict.reason || 'owner'})`);
 
@@ -340,13 +354,13 @@ async function main() {
       waker.batch(msg, batchKey);
 
       // 智能动态等待窗口：
-      // 如果群聊中收到的是纯 @（没有正文文字），给对方留足打字/粘贴时间（4500ms）
-      // 如果已经有正文内容，或者是在继续追加，使用正常的合并窗口（群聊 2200ms，私聊 3000ms）
-      const cleanContent = String(msg.text || '').replace(/\[CQ:at,[^\]]+\]/g, '').trim();
-      const isPureAt = msg.isGroup && !cleanContent && (!Array.isArray(msg.images) || msg.images.length === 0);
+      // 如果用户当前实际手打的内容为空（例如纯 @，或者引用了别人的消息/图后只艾特了小鱼未打字），
+      // 说明对方很大概率正在输入问题或准备发后续文字，给足 4.5 秒等候时间；
+      // 如果已有实际正文输入，使用正常的紧凑合并窗口（群聊 2200ms，私聊 3000ms）
+      const isPureAtOrRefOnly = msg.isGroup && !userTypedText;
       let win;
       if (msg.isGroup) {
-        win = isPureAt ? 4500 : Math.min(cfg.wake.groupWindowMs || 2200, 2500);
+        win = isPureAtOrRefOnly ? 4500 : Math.min(cfg.wake.groupWindowMs || 2200, 2500);
       } else {
         win = cfg.wake.privateWindowMs;
       }
@@ -496,7 +510,11 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   let text = await expandVideoLink(rawBatchText);
 
   // 前文回溯补偿：处理“先发大段文字，紧接着发 @ 唤醒”的经典群聊习惯
-  const cleanRaw = String(rawBatchText || '').replace(/\[CQ:at,[^\]]+\]/g, '').replace(/.*?[：:]/g, '').trim();
+  const cleanRaw = String(rawBatchText || '')
+    .replace(/【引用\s+[^】]+】/gs, '')
+    .replace(/\[CQ:at,[^\]]+\]/g, '')
+    .replace(/.*?[：:]/g, '')
+    .trim();
   if (last.isGroup && (!cleanRaw || cleanRaw.length <= 4)) {
     const recentChatter = memory.recentGroupChatter ? memory.recentGroupChatter(key, 25) : [];
     const cutoff = Date.now() - 35000; // 35 秒内
@@ -506,7 +524,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       r.text &&
       r.text.trim() &&
       !r.text.startsWith('[@') &&
-      r.text.replace(/\[CQ:at,[^\]]+\]/g, '').trim().length > 4
+      r.text.replace(/^【引用\s+[^】]+】/gs, '').replace(/\[CQ:at,[^\]]+\]/g, '').trim().length > 4
     );
     if (prevMsg && prevMsg.text) {
       console.log(`   [前文回溯] 自动关联 ${last.name} 在 ${Math.round((Date.now() - prevMsg.t)/1000)}秒前发出的前文：“${prevMsg.text.slice(0, 40)}”`);
@@ -556,8 +574,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     const validRecent = (recentGroupImages.get(key) || []).filter((item) => item.time >= cutoff);
     const userImg = validRecent.slice().reverse().find((item) => item.userId === last.userId);
 
-    // 严禁单字粗暴匹配！必须是明确具体的看图词组（如“看看这张图”、“图里是啥”、“这截图”）
-    const hasExplicitImageRef = /(看(看)?(这张?|上面这?|发出来的?|那个?)?图|这(张|个)?(图|照片|截图)|图里|图片里|上面那张)/i.test(text);
+    // 严禁单字粗暴匹配！必须是明确具体的看图词组（如“看看这张图”、“图里是啥”、“这截图”、“这是哪里”）
+    const hasExplicitImageRef = /(看(看)?(这张?|上面这?|发出来的?|那个?)?图|这(张|个)?(图|照片|截图)|图里|图片里|上面那张|这是(哪|哪里|什么|谁|哪儿)|查一下(这|图|它)|查查(这|图|它))/i.test(text);
 
     // 1. 同一人在 45 秒内发了图，紧接着发文字：自然关联他自己的图
     // 2. 只有当明确带有“看图/这图里”这种指令时，才允许跨人看上一张图；老爸说话且未指代图片时绝不跨人塞图！
