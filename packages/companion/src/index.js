@@ -302,7 +302,17 @@ async function main() {
         }
       }
 
-      const verdict = waker.shouldWake(msg);
+      // 检查当前用户是否已有正在等待合并的窗口（处理“单@后面接着打字发出来”）
+      const batchKey = msg.isGroup ? `${msg.key}:${msg.userId}` : msg.key;
+      const isContinuation = pending.has(batchKey);
+
+      let verdict = waker.shouldWake(msg);
+      if (!verdict.wake && isContinuation) {
+        // 如果该群友刚刚触发了唤醒（如纯@），我们正在等待他打字/发完整内容，
+        // 那么他在等待期内追加发送的后续文字（即使不带@）必须自动继承唤醒并合并！
+        verdict = { wake: true, reason: 'continuation' };
+      }
+
       if (!verdict.wake) {
         if (msg.isGroup) {
           if (verdict.reason === 'topic-lock-ignore-unrelated') {
@@ -326,11 +336,23 @@ async function main() {
       console.log('[醒·' + (verdict.reason || 'owner') + '] ' + msg.name + '：' + msg.text.slice(0, 60));
 
       // 合并窗口：等人把话说完（群聊中按用户隔离，绝不把不同群友的消息揉在同一个 batch 里串戏）
-      const batchKey = msg.isGroup ? `${msg.key}:${msg.userId}` : msg.key;
-      const win = msg.isGroup ? Math.min(cfg.wake.groupWindowMs || 2500, 2500) : cfg.wake.privateWindowMs;
       clearTimeout(pending.get(batchKey));
       waker.batch(msg, batchKey);
+
+      // 智能动态等待窗口：
+      // 如果群聊中收到的是纯 @（没有正文文字），给对方留足打字/粘贴时间（4500ms）
+      // 如果已经有正文内容，或者是在继续追加，使用正常的合并窗口（群聊 2200ms，私聊 3000ms）
+      const cleanContent = String(msg.text || '').replace(/\[CQ:at,[^\]]+\]/g, '').trim();
+      const isPureAt = msg.isGroup && !cleanContent && (!Array.isArray(msg.images) || msg.images.length === 0);
+      let win;
+      if (msg.isGroup) {
+        win = isPureAt ? 4500 : Math.min(cfg.wake.groupWindowMs || 2200, 2500);
+      } else {
+        win = cfg.wake.privateWindowMs;
+      }
+
       pending.set(batchKey, setTimeout(() => {
+        pending.delete(batchKey);
         const items = waker.flush(batchKey);
         if (!items.length) return;
         handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard }, items, cfg)
@@ -471,7 +493,26 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const useSassy = sassyChance > 0 && Math.random() < sassyChance;
   if (relVerdict === 'ignore') { console.log('   [不理] 关系已凉，这条不回'); return; }
   const rawBatchText = Waker.joinBatch(items, cfg.ownerIds);
-  const text = await expandVideoLink(rawBatchText);
+  let text = await expandVideoLink(rawBatchText);
+
+  // 前文回溯补偿：处理“先发大段文字，紧接着发 @ 唤醒”的经典群聊习惯
+  const cleanRaw = String(rawBatchText || '').replace(/\[CQ:at,[^\]]+\]/g, '').replace(/.*?[：:]/g, '').trim();
+  if (last.isGroup && (!cleanRaw || cleanRaw.length <= 4)) {
+    const recentChatter = memory.recentGroupChatter ? memory.recentGroupChatter(key, 25) : [];
+    const cutoff = Date.now() - 35000; // 35 秒内
+    const prevMsg = recentChatter.slice().reverse().find(r => 
+      String(r.userId) === String(last.userId) &&
+      r.t >= cutoff &&
+      r.text &&
+      r.text.trim() &&
+      !r.text.startsWith('[@') &&
+      r.text.replace(/\[CQ:at,[^\]]+\]/g, '').trim().length > 4
+    );
+    if (prevMsg && prevMsg.text) {
+      console.log(`   [前文回溯] 自动关联 ${last.name} 在 ${Math.round((Date.now() - prevMsg.t)/1000)}秒前发出的前文：“${prevMsg.text.slice(0, 40)}”`);
+      text = `【前情提要：群友「${last.name}」刚刚在群里说了】：“${prevMsg.text}”\n（注：对方刚在群里说完上面这句话，紧接着艾特你，是在要求你针对上文内容做出回应或执行）\n\n${text}`;
+    }
+  }
 
   // 物理安全防线 1：输入预审（群友聊时政政策、官方通报、控评封口话题，小鱼主动潜水，不予理睬）
   if (!isOwnerTurn) {
