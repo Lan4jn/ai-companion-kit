@@ -305,17 +305,35 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'phone_swipe',
-      description: '在屏幕上滑动（可用于翻页、刷视频、下拉通知栏等）。',
+      description: '在屏幕上滑动（支持百分比或像素，用于翻页、刷视频、快速切换等）。如果是游戏里拖动棋子或装备请优先使用 phone_drag。',
       parameters: {
         type: 'object',
         properties: {
-          x1: { type: 'number', description: '起点 X' },
-          y1: { type: 'number', description: '起点 Y' },
-          x2: { type: 'number', description: '终点 X' },
-          y2: { type: 'number', description: '终点 Y' },
+          x1: { type: 'number', description: '起点 X（支持百分比 0~1 或像素值）' },
+          y1: { type: 'number', description: '起点 Y（支持百分比 0~1 或像素值）' },
+          x2: { type: 'number', description: '终点 X（支持百分比 0~1 或像素值）' },
+          y2: { type: 'number', description: '终点 Y（支持百分比 0~1 或像素值）' },
           ms: { type: 'number', description: '滑动耗时毫秒，默认 300' }
         },
         required: ['x1', 'y1', 'x2', 'y2']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'phone_drag',
+      description: '★游戏专用拖拽★ 长按抓起元素并拖动到目标位置松开。专门用于自走棋/云顶之弈拖动棋子上场/下场/卖出，或拖动装备给英雄！支持相对百分比（0~1的小数或0~100）：如从备战席拖到棋盘中央传 from_x: 0.35, from_y: 0.85, to_x: 0.5, to_y: 0.45。',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_x: { type: 'number', description: '起点横坐标（支持百分比 0~1 或像素值）' },
+          from_y: { type: 'number', description: '起点纵坐标（支持百分比 0~1 或像素值）' },
+          to_x: { type: 'number', description: '终点横坐标（支持百分比 0~1 或像素值）' },
+          to_y: { type: 'number', description: '终点纵坐标（支持百分比 0~1 或像素值）' },
+          duration_ms: { type: 'number', description: '拖动耗时毫秒，默认 650ms（长按抓起并平滑拖动）' }
+        },
+        required: ['from_x', 'from_y', 'to_x', 'to_y']
       }
     }
   },
@@ -1152,9 +1170,38 @@ export async function executePhoneTool(name, args = {}) {
       }
 
       case 'phone_swipe': {
-        const { x1, y1, x2, y2, ms = 300 } = args;
-        await shell(`input swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ${Math.round(y2)} ${Math.round(ms)}`);
-        return { status: 'success', message: `已滑动 (${x1}, ${y1}) -> (${x2}, ${y2})` };
+        const metrics = await getDisplayMetrics();
+        let { x1, y1, x2, y2, ms = 300 } = args;
+        const norm = (v, max) => {
+          let n = Number(v);
+          if (n > 0 && n <= 1) return Math.round(n * max);
+          if (n > 1 && n <= 100 && max > 200) return Math.round((n / 100) * max);
+          return Math.round(n);
+        };
+        const sx1 = norm(x1, metrics.width);
+        const sy1 = norm(y1, metrics.height);
+        const sx2 = norm(x2, metrics.width);
+        const sy2 = norm(y2, metrics.height);
+        await shell(`input swipe ${sx1} ${sy1} ${sx2} ${sy2} ${Math.round(ms)}`);
+        return { status: 'success', message: `已滑动 (${sx1}, ${sy1}) -> (${sx2}, ${sy2}) [耗时: ${ms}ms, 屏幕尺寸: ${metrics.width}x${metrics.height}]` };
+      }
+
+      case 'phone_drag': {
+        const metrics = await getDisplayMetrics();
+        let { from_x, from_y, to_x, to_y, duration_ms = 650 } = args;
+        const norm = (v, max) => {
+          let n = Number(v);
+          if (n > 0 && n <= 1) return Math.round(n * max);
+          if (n > 1 && n <= 100 && max > 200) return Math.round((n / 100) * max);
+          return Math.round(n);
+        };
+        const fx = norm(from_x, metrics.width);
+        const fy = norm(from_y, metrics.height);
+        const tx = norm(to_x, metrics.width);
+        const ty = norm(to_y, metrics.height);
+        const dur = Math.max(300, Math.min(3000, Math.round(duration_ms)));
+        await shell(`input swipe ${fx} ${fy} ${tx} ${ty} ${dur}`);
+        return { status: 'success', message: `已成功长按拖拽 (${fx}, ${fy}) -> (${tx}, ${ty}) [耗时: ${dur}ms, 屏幕尺寸: ${metrics.width}x${metrics.height}]` };
       }
 
       case 'phone_type_text': {
