@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-observer.js';
 import { getDouyinLivingStatus } from './douyin-living.js';
 import { DEV_PAGE, CHAT_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
+import { handlePanelRequest } from '../scripts/panel.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1180,6 +1181,12 @@ export function startVirtualRoomServer({
     } catch {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Bad Request: Invalid URL or Host header');
+      return;
+    }
+
+    // 0. 仿生心智总控与调节面板 (/panel)
+    if (url.pathname === '/panel' || url.pathname.startsWith('/panel/')) {
+      handlePanelRequest(req, res, { prefix: '/panel' });
       return;
     }
 

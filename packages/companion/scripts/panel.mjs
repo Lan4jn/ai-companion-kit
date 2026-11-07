@@ -1667,120 +1667,150 @@ if(String(location.search||'').includes('clearanim=1')){
 tick(); setInterval(tick,3000);
 </script></body></html>`;
 
-const server = http.createServer((req, res) => {
-  try { handleRequest(req, res); } catch (e) {
+export function handlePanelRequest(req, res, { prefix = '/panel' } = {}) {
+  try {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    let sub = url.pathname;
+    if (prefix && (sub === prefix || sub.startsWith(prefix + '/'))) {
+      sub = sub.slice(prefix.length) || '/';
+    } else if (prefix && sub.startsWith(prefix)) {
+      sub = sub.slice(prefix.length) || '/';
+    }
+    if (!sub || sub === '') {
+      res.writeHead(302, { Location: (prefix || '') + '/' });
+      res.end();
+      return;
+    }
+
+    if (sub === '/api/snapshot') {
+      let body = '{}';
+      try { body = JSON.stringify(snapshot()); } catch (e) { body = JSON.stringify({ error: String(e?.message || e) }); }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(body);
+      return;
+    }
+    if (sub === '/api/reset' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try { out = doReset(url.searchParams.get('target')); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/undo' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try { out = doUndo(url.searchParams.get('target')); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/tarot/reroll' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try {
+        const rec = tarotReroll((m) => { try { fs.appendFileSync(PANEL_LOG, new Date().toISOString() + ' ' + m + '\n'); } catch {} });
+        out = rec && rec.disabled ? { ok: false, error: '牌灵开关是关着的，先打开' } : { ok: true, name: rec?.name, orientation: rec?.orientation, title: rec?.title };
+      } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/set' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try { out = doSet(url.searchParams.get('kind'), url.searchParams); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/tarot' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try { out = setTarotEnabled(url.searchParams.get('enabled') === '1'); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/chat/clear' && req.method === 'POST') {
+      let out = { ok: false, error: 'unknown' };
+      try { out = doClearChat(); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
+      res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (sub === '/api/notebook') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ dir: NOTEBOOK, files: notebookList() }));
+      return;
+    }
+    if (sub === '/api/note') {
+      const got = noteRead(url.searchParams.get('p'));
+      res.writeHead(got.error ? 400 : 200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(got));
+      return;
+    }
+    if (sub.startsWith('/mbti/')) {
+      const name = sub.slice('/mbti/'.length);
+      if (!/^[EI][NS][TF][JP]\.png$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
+      fs.readFile(path.join(ASSETS, 'mbti-' + name), (e, buf) => {
+        if (e) { res.writeHead(404); res.end('no avatar'); return; }
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=600' });
+        res.end(buf);
+      });
+      return;
+    }
+    if (sub.startsWith('/tarot/')) {
+      const name = sub.slice('/tarot/'.length);
+      if (!/^\d{2}\.jpg$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
+      fs.readFile(path.join(ASSETS, 'tarot-' + name), (e, buf) => {
+        if (e) { res.writeHead(404); res.end('no card'); return; }
+        res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'max-age=600' });
+        res.end(buf);
+      });
+      return;
+    }
+    if (sub.startsWith('/fish/')) {
+      const name = sub.slice('/fish/'.length);
+      if (!/^[A-Z]{4}\.png$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
+      fs.readFile(path.join(ASSETS, 'fish-' + name), (e, buf) => {
+        if (e) { res.writeHead(404); res.end('no fish'); return; }
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=300' });
+        res.end(buf);
+      });
+      return;
+    }
+    if (sub === '/' || sub === '/index.html') {
+      let html = PAGE;
+      if (prefix) {
+        html = html
+          .replaceAll("'/api/", `'${prefix}/api/`)
+          .replaceAll('"/api/', `"${prefix}/api/`)
+          .replaceAll("'/tarot/", `'${prefix}/tarot/`)
+          .replaceAll('"/tarot/', `"${prefix}/tarot/`)
+          .replaceAll("'/mbti/", `'${prefix}/mbti/`)
+          .replaceAll('"/mbti/', `"${prefix}/mbti/`)
+          .replaceAll("'/fish/", `'${prefix}/fish/`)
+          .replaceAll('"/fish/', `"${prefix}/fish/`)
+          .replaceAll('src="/tarot/', `src="${prefix}/tarot/`)
+          .replaceAll('src="/mbti/', `src="${prefix}/mbti/`)
+          .replaceAll('src="/fish/', `src="${prefix}/fish/`);
+      }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(html);
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('只有 / 和 /api/snapshot');
+  } catch (e) {
     try { res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }); res.end('面板内部错误：' + (e?.message || e)); } catch {}
     try { fs.appendFileSync(PANEL_LOG, new Date().toISOString() + ' 请求出错 ' + req.url + ' :: ' + (e?.stack || e) + '\n'); } catch {}
   }
-});
-
-function handleRequest(req, res) {
-  const url = new URL(req.url, 'http://127.0.0.1');
-  if (url.pathname === '/api/snapshot') {
-    let body = '{}';
-    try { body = JSON.stringify(snapshot()); } catch (e) { body = JSON.stringify({ error: String(e?.message || e) }); }
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(body);
-    return;
-  }
-  if (url.pathname === '/api/reset' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try { out = doReset(url.searchParams.get('target')); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/undo' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try { out = doUndo(url.searchParams.get('target')); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/tarot/reroll' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try {
-      const rec = tarotReroll((m) => { try { fs.appendFileSync(PANEL_LOG, new Date().toISOString() + ' ' + m + '\n'); } catch {} });
-      out = rec && rec.disabled ? { ok: false, error: '牌灵开关是关着的，先打开' } : { ok: true, name: rec?.name, orientation: rec?.orientation, title: rec?.title };
-    } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/set' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try { out = doSet(url.searchParams.get('kind'), url.searchParams); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/tarot' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try { out = setTarotEnabled(url.searchParams.get('enabled') === '1'); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/chat/clear' && req.method === 'POST') {
-    let out = { ok: false, error: 'unknown' };
-    try { out = doClearChat(); } catch (e) { out = { ok: false, error: String(e?.message || e) }; }
-    res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(out));
-    return;
-  }
-  if (url.pathname === '/api/notebook') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ dir: NOTEBOOK, files: notebookList() }));
-    return;
-  }
-  if (url.pathname === '/api/note') {
-    const got = noteRead(url.searchParams.get('p'));
-    res.writeHead(got.error ? 400 : 200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(got));
-    return;
-  }
-  if (url.pathname.startsWith('/mbti/')) {
-    const name = url.pathname.slice('/mbti/'.length);
-    if (!/^[EI][NS][TF][JP]\.png$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
-    fs.readFile(path.join(ASSETS, 'mbti-' + name), (e, buf) => {
-      if (e) { res.writeHead(404); res.end('no avatar'); return; }
-      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=600' });
-      res.end(buf);
-    });
-    return;
-  }
-  if (url.pathname.startsWith('/tarot/')) {
-    const name = url.pathname.slice('/tarot/'.length);
-    if (!/^\d{2}\.jpg$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
-    fs.readFile(path.join(ASSETS, 'tarot-' + name), (e, buf) => {
-      if (e) { res.writeHead(404); res.end('no card'); return; }
-      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'max-age=600' });
-      res.end(buf);
-    });
-    return;
-  }
-  if (url.pathname.startsWith('/fish/')) {
-    const name = url.pathname.slice('/fish/'.length);
-    if (!/^[A-Z]{4}\.png$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
-    fs.readFile(path.join(ASSETS, 'fish-' + name), (e, buf) => {
-      if (e) { res.writeHead(404); res.end('no fish'); return; }
-      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'max-age=300' });
-      res.end(buf);
-    });
-    return;
-  }
-  if (url.pathname === '/' || url.pathname === '/index.html') {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(PAGE);
-    return;
-  }
-  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end('只有 / 和 /api/snapshot');
 }
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('[panel] http://0.0.0.0:' + PORT + ' (owner=' + (OWNER || '?') + ')');
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  const server = http.createServer((req, res) => {
+    handlePanelRequest(req, res, { prefix: '' });
+  });
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log('[panel] http://0.0.0.0:' + PORT + ' (owner=' + (OWNER || '?') + ')');
+  });
+}
 
 // 2026-11-04：面板之前会毫无声息地死掉（一个请求抛异常就整个进程没了，且没有任何日志）。
 // 现在兜住：记日志、继续跑，别再让「打不开」变成无从查起的事。
