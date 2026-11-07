@@ -1782,6 +1782,24 @@ export function startVirtualRoomServer({
       return;
     }
 
+    // 3.5 心智、牌灵与德行十轴 API
+    if (url.pathname === '/api/mind') {
+      try {
+        const { tarotSummary } = await import('./tarot-engine.js');
+        const { readVirtue } = await import('./virtue-engine.js');
+        const { readout } = await import('./mbti-engine.js');
+        const tarot = tarotSummary(effectiveDataDir);
+        const virtue = readVirtue(path.join(effectiveDataDir, 'virtue.json'));
+        const mbti = readout();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, tarot, virtue: virtue.axes, mbti }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+      }
+      return;
+    }
+
     // 4. 交互动作 API
     if (url.pathname === '/api/action' && req.method === 'POST') {
       // CSRF Origin check

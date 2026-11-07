@@ -41,6 +41,10 @@ import { initImageGen } from './image-gen.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
+import { tarotDailyTick, tarotPromptBlock, tarotSummary } from './tarot-engine.js';
+import { readVirtue, applyText as applyVirtueText, virtuePromptBlock } from './virtue-engine.js';
+import { createRespectGuard } from './respect-guard.js';
+import { classifyMessage } from './conversation-closure.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -140,6 +144,16 @@ async function main() {
     microCooldownMs: cfg.wake?.topicMicroCooldownMs ?? 10000,
     maxTurnsPerFocus: cfg.wake?.topicMaxTurnsPerFocus ?? 6,
   });
+  const respectGuard = createRespectGuard({
+    file: path.join(cfg.dataDir || './data', 'respect.json'),
+    ownerUin: cfg.ownerIds?.[0] || '578021239',
+    log: console.log,
+  });
+
+  // 初始化当日牌灵与德行十轴
+  tarotDailyTick(cfg.dataDir || './data', console.log);
+  readVirtue(path.join(cfg.dataDir || './data', 'virtue.json'));
+
   const waker = new Waker({
     names: cfg.names,
     keywords: cfg.keywords,
@@ -249,8 +263,27 @@ async function main() {
         }
       }
 
-      const verdict = waker.shouldWake(msg);
       const isOwner = cfg.ownerIds.includes(msg.userId);
+
+      // 尊重守卫检查：被拉黑者直接物理拦截，不再唤醒或回应
+      const respectVerdict = respectGuard.handleIncoming({
+        key: msg.key,
+        kind: msg.isGroup ? 'group' : 'private',
+        userId: msg.userId,
+        isOwner,
+        text: msg.text,
+        displayName: msg.name,
+      });
+      if (respectVerdict.blocked) {
+        return;
+      }
+
+      // 推动德行数轴（只由真实对话推动）
+      if (msg.text) {
+        applyVirtueText(msg.text, { isOwner, file: path.join(cfg.dataDir || './data', 'virtue.json') });
+      }
+
+      const verdict = waker.shouldWake(msg);
       if (!verdict.wake) {
         if (msg.isGroup) {
           if (verdict.reason === 'topic-lock-ignore-unrelated') {
@@ -279,7 +312,7 @@ async function main() {
       pending.set(batchKey, setTimeout(() => {
         const items = waker.flush(batchKey);
         if (!items.length) return;
-        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker }, items, cfg)
+        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard }, items, cfg)
           .catch((e) => console.error('[出错] ' + (e?.message || e)));
       }, win));
     },
@@ -392,12 +425,17 @@ async function main() {
 }
 
 /** 处理一轮（可能是合并后的多条） */
-export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker }, items, cfg) {
+export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
   setCurrentChat(key);
   const isOwnerTurn = cfg.ownerIds.includes(last.userId);
   const relVerdict = rel ? rel.verdict(last.userId, { isOwner: isOwnerTurn }) : 'normal';
+
+  // 心智内核：当日牌灵、德行十轴与尊重守卫
+  const tarotPrompt = tarotPromptBlock(cfg.dataDir || './data');
+  const virtuePrompt = virtuePromptBlock({ file: path.join(cfg.dataDir || './data', 'virtue.json') });
+  const respectPrompt = respectGuard ? respectGuard.promptLine(key) : '';
 
   // 人格卡：对老爸永远用温和版，其他人按概率随机上毒舌版。
   // 这一层是硬保证——不管配置怎么写、随机数怎么掷，老爸都不可能吃到毒舌卡。
@@ -511,6 +549,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (desirePrompt || '')
     + (webKnowledge ? `\n${webKnowledge}` : '')
     + (topicFocusPrompt || '')
+    + (tarotPrompt ? `\n${tarotPrompt}` : '')
+    + (virtuePrompt ? `\n${virtuePrompt}` : '')
+    + (respectPrompt ? `\n${respectPrompt}` : '')
     + (groupChatter ? `\n${groupChatter}` : '')
     + (() => {
         const line = rel ? rel.render(last.userId) : '';
@@ -706,6 +747,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   waker.wake(key);
   memory.touch(last.userId, { name: last.name });
+  if (respectGuard) {
+    respectGuard.clearNotice(key);
+  }
 }
 
 // 直接跑才启动；被 import 时不启动

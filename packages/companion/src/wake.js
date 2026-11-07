@@ -18,6 +18,8 @@
  * 除非再次命中条件，否则都当没看见。这就是群聊里"潜水"的实现。
  */
 
+import { classifyMessage } from './conversation-closure.js';
+
 /** 中文里"在问问题"的粗略特征 */
 const QUESTION_HINTS = /[?？]|怎么|为什么|为啥|如何|是不是|能不能|可不可以|有没有|谁|哪儿|哪里|何时|多少/;
 
@@ -186,6 +188,14 @@ export class Waker {
     if (c.poke && msg.isPoke) return { wake: true, reason: 'poke' };
     if (c.nameMention && directlyCalledName) {
       return { wake: true, reason: 'name:' + directlyCalledName };
+    }
+
+    // 2.5 拟真对话收尾过滤：群聊中未被直接呼叫时，对方单纯附和（“嗯/好/666/收到”）或纯标点绝对不插话
+    if (msg.isGroup && !directlyCalled) {
+      const closureType = classifyMessage(text);
+      if (closureType.kind === 'ack' || closureType.kind === 'silence') {
+        return { wake: false, reason: 'conversation-closure-ack' };
+      }
     }
 
     // 3. 关键词检查（使用清洗后的文本；潜水群聊不响应通用日常词，除非该群配置了专属 keywords）
