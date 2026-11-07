@@ -313,6 +313,76 @@ export function renderDiaryViewerHtml(dataDir) {
   }
   .btn-gen:hover { background: #2ea043; }
   .btn-gen:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-aunt {
+    background: #1f6feb;
+    color: #fff;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.2s;
+  }
+  .btn-aunt:hover { background: #388bfd; }
+  .modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+  }
+  .modal-box {
+    background: #161b22;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 90%;
+    max-width: 680px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 36px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .chat-row { display: flex; flex-direction: column; gap: 8px; }
+  .bubble-user {
+    align-self: flex-end;
+    background: #1f6feb;
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 12px 12px 2px 12px;
+    max-width: 82%;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .bubble-aunt {
+    align-self: flex-start;
+    background: #21262d;
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 12px 12px 12px 2px;
+    max-width: 82%;
+    font-size: 14px;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  .bubble-meta { font-size: 11px; opacity: 0.7; margin-top: 4px; }
   
   main {
     flex: 1;
@@ -420,6 +490,7 @@ export function renderDiaryViewerHtml(dataDir) {
   <div class="nav-links">
     <a href="/panel/">心智面板</a>
     <a href="/">2.5D居室</a>
+    <button class="btn-aunt" onclick="openAuntModal()">💌 找阿姨记录</button>
     <button class="btn-gen" id="btnGen" onclick="triggerWrite()">✍️ 让小鱼现在写一篇</button>
   </div>
 </header>
@@ -519,7 +590,46 @@ export function renderDiaryViewerHtml(dataDir) {
   if (currentName) {
     loadDiary(currentName);
   }
+
+  async function openAuntModal() {
+    document.getElementById('auntModal').style.display = 'flex';
+    const box = document.getElementById('auntChatBox');
+    box.innerHTML = '<div class="empty-state">正在读取小鱼与阿姨的信箱…</div>';
+    try {
+      const res = await fetch('/api/aunt/chat');
+      const data = await res.json();
+      const records = data.records || [];
+      if (!records.length) {
+        box.innerHTML = '<div class="empty-state">小鱼最近还没偷偷找阿姨打小报告呢~</div>';
+        return;
+      }
+      box.innerHTML = records.map(r => {
+        const timeStr = r.at ? new Date(r.at).toLocaleString('zh-CN', { hour12: false }) : '';
+        const userMsg = esc(r.text || r.me || '');
+        const replyMsg = esc(r.reply || '');
+        const sit = r.situation ? '<div class="bubble-meta">情境: ' + esc(r.situation) + '</div>' : '';
+        return '<div class="chat-row">' +
+          '<div class="bubble-user"><strong>🐟 小鱼:</strong><br>' + userMsg + sit + '<div class="bubble-meta">' + timeStr + '</div></div>' +
+          (replyMsg ? '<div class="bubble-aunt"><strong>👩‍🔧 阿姨 (Hermes):</strong><br>' + replyMsg + '</div>' : '') +
+          '</div>';
+      }).join('');
+    } catch (e) {
+      box.innerHTML = '<div class="empty-state">加载失败: ' + esc(String(e)) + '</div>';
+    }
+  }
+  function closeAuntModal() {
+    document.getElementById('auntModal').style.display = 'none';
+  }
 </script>
+<div class="modal-overlay" id="auntModal" onclick="if(event.target===this)closeAuntModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 style="font-size:16px;color:#fff;">💌 小鱼与阿姨的悄悄话信箱</h3>
+      <button style="background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;" onclick="closeAuntModal()">×</button>
+    </div>
+    <div class="modal-body" id="auntChatBox"></div>
+  </div>
+</div>
 </body>
 </html>`;
 }

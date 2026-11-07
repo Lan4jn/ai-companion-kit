@@ -1258,6 +1258,12 @@ export function startVirtualRoomServer({
       return;
     }
 
+    if (url.pathname === '/api/aunt/chat') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, records: listChat({ limit: 60 }) }));
+      return;
+    }
+
     // 1.12 小鱼的需求箱（开发者审批页）
     if (url.pathname === '/dev') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });

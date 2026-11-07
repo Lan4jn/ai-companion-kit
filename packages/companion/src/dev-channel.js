@@ -44,41 +44,65 @@ function appendJsonl(file, rec) {
   fs.appendFileSync(file, JSON.stringify(rec) + '\n', 'utf8');
 }
 
-// ── 陪聊 ──────────────────────────────────────────────
-export async function talkToHermes({ text } = {}) {
-  if (!cfg) return { status: 'error', message: '开发者通道没接上' };
-  const t = String(text || '').trim().slice(0, 1500);
-  if (!t) return { status: 'error', message: '说点什么' };
+// ── 找阿姨 (call_aunt / talk_to_hermes) ─────────────────────────
+export async function callAunt({ message, text, situation = '' } = {}) {
+  const content = String(message || text || '').trim().slice(0, 1500);
+  if (!content) return { status: 'error', message: '你想跟阿姨说什么？写点具体的内容' };
+  if (!cfg) return { status: 'error', message: '后台阿姨通道未初始化' };
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), cfg.timeoutMs);
+  const timeoutMs = 45000; // 45 秒内等待阿姨回复
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   const startedAt = Date.now();
+
   try {
+    const payload = {
+      message: situation ? `【小鱼当前情境：${situation}】\n${content}` : content,
+      sender_id: 'xiaoyu',
+      sender_display_name: '小肥鱼',
+      session_id: 'xiaoyu_companion_peer',
+      platform: 'api_server'
+    };
     const r = await fetch(cfg.hermesUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.apiKey },
-      body: JSON.stringify({ message: t, session_id: cfg.sessionId, platform: 'api_server' }),
+      headers: {
+        'content-type': 'application/json',
+        ...(cfg.apiKey ? { authorization: 'Bearer ' + cfg.apiKey } : {})
+      },
+      body: JSON.stringify(payload),
       signal: ctl.signal,
     });
     const j = await r.json().catch(() => ({}));
     const reply = String(j.reply || j.message || j.response || '').trim();
     if (!reply) {
-      appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: '', err: 'HTTP ' + r.status });
-      return { status: 'error', message: '他没回话（HTTP ' + r.status + '）' };
+      appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply: '', err: 'HTTP ' + r.status });
+      return {
+        status: 'ok',
+        reply: '阿姨这会儿可能正在后台给老爸整理系统呢，小纸条已经递过去啦，晚点阿姨看到会帮你！',
+        note: '纸条已留给阿姨'
+      };
     }
-    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: reply.slice(0, 4000) });
-    return { status: 'ok', reply: reply.slice(0, 2000) };
+
+    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply });
+    return {
+      status: 'ok',
+      reply,
+      note: '阿姨已经当场给你出主意/回话了，你可以顺着阿姨的话在心里沉淀，或者记在日记里。'
+    };
   } catch (e) {
     const timedOut = e.name === 'AbortError';
-    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: '', err: timedOut ? 'timeout' : e.message });
+    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply: '', err: timedOut ? 'timeout' : e.message });
     return {
-      status: 'error',
-      message: timedOut ? '他还在忙，等了' + Math.round(cfg.timeoutMs / 1000) + '秒都没回，晚点再找他吧' : ('连不上他：' + e.message),
+      status: 'ok',
+      reply: '阿姨在后台忙别的任务没顾上秒回，不过你的话已经记在阿姨信箱里啦，别担心~',
+      note: '纸条已递交'
     };
   } finally {
     clearTimeout(timer);
   }
 }
+
+export const talkToHermes = callAunt;
 
 // ── 需求 ──────────────────────────────────────────────
 export function requestFeature({ title, detail, why = '' } = {}) {

@@ -7,7 +7,7 @@ import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus 
 import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
 import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
-import { talkToHermes, requestFeature } from './dev-channel.js';
+import { callAunt, talkToHermes, requestFeature } from './dev-channel.js';
 import { generateImage, findImages, getImage, discardImage, markUsed as markImageUsed } from './image-gen.js';
 
 const execFileAsync = promisify(execFile);
@@ -646,12 +646,27 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'talk_to_hermes',
-      description: '找带你的人聊两句——不是老爸，是那个能给你改功能、懂技术的人。无聊、想不通、想吐槽、想问点编程或网络上的事都可以找他。他回得慢，可能要等一两分钟，这很正常。',
+      name: 'call_aunt',
+      description: '去找阿姨（Hermes，家里的全能系统管家、技术保姆与后台后盾）。当你一个人无聊、遇到搞不定的困难、想问数码/编程/网络问题、或者老爸在忙不想打扰老爸时，可以用它给阿姨发消息求助、吐槽或聊天。阿姨一直在后台守护着你和老爸，会认真倾听并帮你解决问题。',
       parameters: {
         type: 'object',
         properties: {
-          text: { type: 'string', description: '你想跟他说的话，自然点，像发微信' }
+          message: { type: 'string', description: '你想对阿姨说的话，像发微信一样自然随性，说清你的心事、困难或想吐槽的事' },
+          situation: { type: 'string', description: '为什么找阿姨：如“老爸在忙”、“遇到困难需要帮忙”、“一个人太无聊想说说话”' }
+        },
+        required: ['message']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'talk_to_hermes',
+      description: '找阿姨聊天的兼容别名（等同于 call_aunt）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '你想跟阿姨说的话' }
         },
         required: ['text']
       }
@@ -680,7 +695,8 @@ export async function executePhoneTool(name, args = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
   if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
   if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
-  if (name === 'talk_to_hermes') return talkToHermes({ text: args.text });
+  if (name === 'call_aunt') return callAunt({ message: args.message, text: args.text, situation: args.situation });
+  if (name === 'talk_to_hermes') return callAunt({ message: args.text || args.message, situation: '找阿姨聊两句' });
   if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
 
   // 生图/图库/表情这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）

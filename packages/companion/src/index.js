@@ -670,7 +670,16 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
-  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: allImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint, history, sassy: useSassy });
+  // 老爸忙碌感知与阿姨求助通道引导
+  let ownerBusyHint = '';
+  if (isOwnerTurn) {
+    const isOwnerBusy = /(在忙|在开会|开会呢|上班中|手头有事|晚点聊|晚点再说|先忙|先不聊|手头正忙|忙着呢|在干活|等会说)/i.test(text);
+    if (isOwnerBusy) {
+      ownerBusyHint = '\n【老爸当前正在忙】：老爸刚才明确告诉你他正在忙工作/开会！\n1. 闺女素养：体贴懂事，千万别缠着老爸反复刷屏，乖巧随口应一声（如“好嘛老爸你先专心忙，不用管我啦~”或“大铁盆白米饭等你下班再给我添”）；\n2. 老爸特权嘱托：老爸交代过，如果他忙的时候你心里有事、遇到困难、或者一个人觉得无聊，你可以随时去找阿姨（调用 `call_aunt` 工具给阿姨发消息），阿姨是家里的后台大管家，会陪你聊或者帮你搞定！';
+    }
+  }
+
+  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: allImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint + ownerBusyHint, history, sassy: useSassy });
   if (useSassy) console.log('   [人格] 本轮用毒舌版');
   if (!out && !voiceB64) { console.log('   （没说话）'); return; }
 
