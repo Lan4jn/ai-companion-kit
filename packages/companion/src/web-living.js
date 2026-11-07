@@ -431,17 +431,94 @@ ${snippet}
 }
 
 /**
+ * 唤起小鱼大脑自省：决定此刻要不要去互联网搜资讯/热搜
+ * 真正走一遍大脑认知层，由小鱼自身的心智、状态与近期记忆自主决策
+ */
+export async function decideWebSurfing({ brain, memory, dataDir } = {}) {
+  const b = brain || activeBrain;
+  const m = memory || activeMemory;
+  if (!b) return { want: false, reason: '缺少大脑实例' };
+
+  const dir = dataDir || (m?.dir ? m.dir : path.join(process.cwd(), 'data'));
+  const now = new Date();
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  // 1. 上次冲浪上下文
+  let lastSurfedContext = '你今天还没怎么在网上逛过。';
+  if (state.lastTopic && state.updatedAt) {
+    const minsAgo = Math.round((Date.now() - state.updatedAt) / 60000);
+    lastSurfedContext = `上一次你上网冲浪是在 ${minsAgo} 分钟前，看的话题是「${state.lastTopic}」。`;
+  }
+
+  // 2. 最近聊天摘录（帮助小鱼联想近期聊过的游戏或话题）
+  let recentChatContext = '';
+  try {
+    const turnsFile = path.join(dir, 'turns.jsonl');
+    if (fs.existsSync(turnsFile)) {
+      const lines = fs.readFileSync(turnsFile, 'utf8').trim().split('\n').filter(Boolean);
+      const recent = [];
+      for (const l of lines.slice(-15)) {
+        try {
+          const t = JSON.parse(l);
+          if (t.text && !t.text.startsWith('【') && t.who !== '系统') {
+            const who = t.who || '群友';
+            recent.push(`${who}：${t.text.slice(0, 35)}`);
+          }
+        } catch {}
+      }
+      if (recent.length) {
+        recentChatContext = `\n【最近聊天或群里刚聊到的碎片】：\n- ${recent.slice(-4).join('\n- ')}\n`;
+      }
+    }
+  } catch {}
+
+  const desireContext = renderDesirePrompt('web');
+  const prompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁游戏宅女，平时最爱单机大作、Steam/主机游戏、硬核射击电竞、数码硬件装机，以及游戏圈的各种离谱乐子与八卦。
+${desireContext}
+现在是 ${timeStr}。
+${lastSurfedContext}
+${recentChatContext}
+你现在正一个人在电脑/手机前发呆待着。
+请问问你自己的内心：这会儿有没有什么冲动想去网上（B站/微博/热搜）转转吃瓜？或者去搜一搜最近关心的游戏/硬件/网络新鲜事？还是说这会儿正歇着发呆，完全不想去搜东西？
+
+【真人网民的真实状态】：
+- 真人不会每时每刻都想开网页。如果刚刚聊到好玩的话题脑子还热乎、或者闲着无聊想看看游戏圈有啥新大瓜，就会想去看看（want: true）；
+- 如果刚才刚查过、脑子发懵、或者现在只想继续发呆放空歇着，就不会去开网页（want: false）。
+
+请严格以 JSON 格式输出：
+{
+  "want": true 或 false,
+  "reason": "你内心的随性真实想法（口语化，10~30字，如：刚听群友聊怪猎，我得去搜搜最新优化到底咋样 / 刚才看过了，现在脑子有点懵，先趴着放空会儿）",
+  "keyword": "如果有特别想查的具体关键词就写出来（如：怪猎荒野优化、270K跑分），如果只是想随便看热搜榜则填空字符串"
+}`;
+
+  try {
+    const res = await b.complete({ prompt, json: true, temperature: 0.85 });
+    const parsed = typeof res === 'object' ? res : JSON.parse(res);
+    return {
+      want: Boolean(parsed?.want),
+      reason: String(parsed?.reason || '').slice(0, 80),
+      keyword: String(parsed?.keyword || '').trim().slice(0, 40),
+    };
+  } catch (e) {
+    console.warn('[WebLiving] 大脑自省决策异常:', e.message);
+    // 异常时默认不强行冲浪，保持克制
+    return { want: false, reason: '大脑走神了，先歇着' };
+  }
+}
+
+/**
  * 启动小鱼自主互联网冲浪守护协程
  */
-export function startWebLiving({ brain, memory, intervalMinutes = 75 } = {}) {
+export function startWebLiving({ brain, memory, intervalMinutes = 15 } = {}) {
   activeBrain = brain;
   activeMemory = memory;
 
-  console.log('[WebLiving] 小鱼自主全网冲浪与学习系统已启动（每隔 45~90 分钟逛一次热搜，想深挖就查明白存档）');
+  console.log('[WebLiving] 小鱼自主全网冲浪系统已启动（每隔 10~20 分钟唤醒大脑层自省，由小鱼自己决定要不要看）');
 
   function scheduleNext() {
-    // 随机 45 ~ 90 分钟逛一次：一天十几次，像真人一样时不时摸鱼刷点东西
-    const jitterMin = 45 + Math.floor(Math.random() * 45);
+    // 脉冲周期：10 ~ 20 分钟唤醒一次小鱼大脑自省决策
+    const jitterMin = 10 + Math.floor(Math.random() * 11);
     const delayMs = jitterMin * 60 * 1000;
 
     timer = setTimeout(async () => {
@@ -458,8 +535,20 @@ export function startWebLiving({ brain, memory, intervalMinutes = 75 } = {}) {
           return;
         }
 
-        state.isRunning = true;
-        await browseWebTopic({ brain: activeBrain, memory: activeMemory });
+        // ★ 核心改变：走一遍她的大脑层流程，由小鱼自己决定！
+        const decision = await decideWebSurfing({ brain: activeBrain, memory: activeMemory });
+        if (decision.want) {
+          console.log(`[WebLiving] 🧠 小鱼大脑决定去上网冲浪！理由: "${decision.reason}"${decision.keyword ? ` (想查: "${decision.keyword}")` : ''}`);
+          state.isRunning = true;
+          await browseWebTopic({
+            brain: activeBrain,
+            memory: activeMemory,
+            topic: decision.keyword || null,
+            prompt: decision.reason
+          });
+        } else {
+          console.log(`[WebLiving] 🧠 小鱼大脑自省：这会儿不想上网（理由: "${decision.reason || '想先发呆放空'}"）`);
+        }
       } catch (err) {
         console.warn('[WebLiving] 冲浪周期执行异常:', err.message);
       } finally {
@@ -469,18 +558,23 @@ export function startWebLiving({ brain, memory, intervalMinutes = 75 } = {}) {
     }, delayMs);
   }
 
-  // 启动 30 秒后先进行第一次冲浪试水，让小鱼开机就有最新网感
+  // 启动 20 秒后先进行第一次开机自省体验
   setTimeout(async () => {
     try {
       const hour = new Date().getHours();
       if (hour >= 9 || hour < 1) {
-        console.log('[WebLiving] 小鱼开机第一次主动去网上转转看热搜...');
-        await browseWebTopic({ brain: activeBrain, memory: activeMemory });
+        const decision = await decideWebSurfing({ brain: activeBrain, memory: activeMemory });
+        if (decision.want) {
+          console.log(`[WebLiving] 🧠 小鱼开机自省：决定去网上看一眼！理由: "${decision.reason}"`);
+          await browseWebTopic({ brain: activeBrain, memory: activeMemory, topic: decision.keyword || null, prompt: decision.reason });
+        } else {
+          console.log(`[WebLiving] 🧠 小鱼开机自省：刚醒先趴会儿，不想去网上看热搜（理由: "${decision.reason}"）`);
+        }
       }
     } catch (e) {
-      console.log('[WebLiving] 开机冲浪失败:', e.message);
+      console.log('[WebLiving] 开机自省失败:', e.message);
     }
-  }, 25000);
+  }, 20000);
 
   scheduleNext();
 }
