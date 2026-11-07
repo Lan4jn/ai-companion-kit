@@ -596,8 +596,10 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const desirePrompt = renderDesirePrompt(currentEnv);
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
   const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
+  const cleanTargetText = String(text || '').replace(/^.*?（你的(?:爸爸|老爸|女儿|主人)）[：:]\s*/s, '').replace(/^.*?[：:]\s*/s, '').trim();
+  const targetDesc = cleanTargetText === '[图片]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
   const targetPrompt = last.isGroup
-    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）对你说的话：“${text}”。【沈鲸式网感与风格指令】：仔细对标前文活人群友“沈鲸”！直接亮态度吐槽，绝不做阅读理解复述长句。遇到离谱事可扣「？」起手吐槽；随手打字（2~12字）或输出一两句短金句（<=25字）；可配合情绪换行附带 [表情包: 情绪]！`
+    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）${targetDesc}。【沈鲸式网感与风格指令】：仔细对标前文活人群友“沈鲸”！直接亮态度吐槽，绝不做阅读理解复述长句。遇到离谱事可扣「？」起手吐槽；随手打字（2~12字）或输出一两句短金句（<=25字）；可配合情绪换行附带 [表情包: 情绪]！`
     : `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`;
   const isSpicyGroup = (key === 'group:1131460772' || (last.isGroup && String(last.groupId || '').includes('1131460772')));
   const myCard = last.myGroupCard || '';

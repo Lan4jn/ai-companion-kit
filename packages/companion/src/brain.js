@@ -466,11 +466,18 @@ export class Brain {
         if (validDescs.length > 0) {
           visualAnalyzed = true;
           const hint = validDescs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
-          const cleanText = String(text || '').replace(/\[CQ:at,[^\]]+\]/g, '').replace(/\[图片\]/g, '').trim();
+          const cleanText = String(text || '')
+            .replace(/^.*?（你的(?:爸爸|老爸|女儿|主人)）[：:]\s*/s, '')
+            .replace(/^.*?[：:]\s*/s, '')
+            .replace(/\[CQ:at,[^\]]+\]/g, '')
+            .replace(/\[图片\]/g, '')
+            .replace(/<faceType=[^>]+>/g, '')
+            .trim();
           const isPureStickerAt = !cleanText;
+          const isStickerIntent = isPureStickerAt || validItems.some((item) => item.isSticker) || /<faceType=/i.test(String(text || ''));
 
-          if (isPureStickerAt || hasSticker) {
-            userContent = `${String(text || '').trim()}\n\n【背景信息：对方发了表情包/梗图，视觉模型为你提炼出的真实含义如下】：\n${hint}\n【★核心聊天法则★】：\n1. 真正读出对方的意思：结合上面的解析，看清对方发这个表情包的核心态度（如：无语嫌弃、嘲弄反驳、挑衅、卖萌、或者在开你玩笑）。\n2. 像真人老群友/贴心女儿一样自然接话：根据对方在表情包里表达的真实态度、吐槽或图里文字，直接顺着接话、反驳、接梗或发针对性表情包！\n3. 严禁死板念经：绝对不要像识图机器一样生硬复述“你发了一张xxx上面写着xxx”，而是直接针对对方的这层情绪和态度说话（例如老爸发嫌弃表情包，你可以直接怼回去、撒娇抱怨或问老爸干嘛嫌弃你，绝不用点评图片本身）！`.trim();
+          if (isStickerIntent) {
+            userContent = `${String(text || '').trim()}\n\n【背景信息：对方发了表情包/动图/梗图，视觉模型为你提炼出的真实态度与画面如下】：\n${hint}\n【★核心聊天法则★】：\n1. 识别表情包态度：对方发这个动图/表情包纯粹是在对上一句话表达情绪反应（如：放肆狂笑、嘲弄、幸灾乐祸、嫌弃、无语或挑衅），绝不是在拿图问你问题！绝对严禁误以为对方在出题考你，绝对严禁说“你又拿图来问我”或“这都第几回了”！\n2. 像真人老群友/贴心女儿一样直接反击：针对对方表情包传达的情绪直接顺着怼回去、吐槽或接梗（例如老爸发仰头大笑/嘲笑表情包，你可以直接怼“笑什么笑”、“笑得嘴都合不拢了是吧”、“有什么好笑的 [表情包: 嫌弃]”、或扣「？」甩白眼）！\n3. 严禁死板念经：绝对不要像识图机器一样生硬复述“你发了一张黄色玩偶在笑”，必须直接顺着对方的这层情绪和态度说话！`.trim();
           } else {
             userContent = `${String(text || '').trim()}\n\n【背景信息：群友发了一张图，内容概括：${hint}】\n【★严禁直接评价图片★】：真人绝对不会像阅卷老师或AI识图工具一样，直接开口点评“这图怎么怎么样”、“这画面是把人拎走”、“你发的图是…”！绝对禁止对图片画面本身做任何描述、复述、分析或说明！图只是一个情境背景，你说话要完全聚焦在群友当下的发言或当时的话题上，像真人网民一样顺着情绪直接接话、吐槽或发表情包，绝不当看图说话机器人！`.trim();
           }
