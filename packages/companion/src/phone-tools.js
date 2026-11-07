@@ -25,11 +25,21 @@ try {
  * 自动寻找/解析当前活跃的 ADB 设备（优先 192.168.31.160:5557 模拟器/外部设备）
  */
 export async function getAdbTarget() {
-  if (CURRENT_SERIAL) return CURRENT_SERIAL;
   try {
     const { stdout } = await execFileAsync('adb', ['devices']);
     const lines = stdout.split(/\r?\n/).slice(1).filter(l => l.trim());
     const ready = lines.map(l => l.split(/\s+/)).filter(p => p[1] === 'device').map(p => p[0]);
+
+    // 如果指定的设备确实在线，优先使用
+    if (CURRENT_SERIAL && ready.includes(CURRENT_SERIAL)) {
+      return CURRENT_SERIAL;
+    }
+    // 优先老爸手机 192.168.31.205:5555
+    if (ready.includes('192.168.31.205:5555')) {
+      CURRENT_SERIAL = '192.168.31.205:5555';
+      return CURRENT_SERIAL;
+    }
+    // 其次 160 虚拟机
     if (ready.includes('192.168.31.160:5557')) {
       CURRENT_SERIAL = '192.168.31.160:5557';
       return CURRENT_SERIAL;
@@ -38,10 +48,10 @@ export async function getAdbTarget() {
       CURRENT_SERIAL = ready[0];
       return CURRENT_SERIAL;
     }
-    // 没找到任何设备时，尝试自动连接 192.168.31.160:5557
-    await execFileAsync('adb', ['connect', '192.168.31.160:5557'], { timeout: 5000 }).catch(() => {});
+    // 自动重连老爸手机
+    await execFileAsync('adb', ['connect', '192.168.31.205:5555'], { timeout: 3000 }).catch(() => {});
   } catch {}
-  return '192.168.31.160:5557';
+  return CURRENT_SERIAL || '192.168.31.205:5555';
 }
 
 /**

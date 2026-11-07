@@ -175,6 +175,18 @@ function decideNextImpulse() {
 async function stepAutonomousAction() {
   if (isUserInteracting) return 15000;
 
+  // 安全保护：如果当前接管的是老爸的日常真机（如 OnePlus / Xiaomi / OPPO 等非模拟器），
+  // 严禁在后台静默私自乱滑屏幕、按 HOME 键或切换 App，绝不能打扰老爸正常使用手机！
+  // 只有当老爸在群里明确指令或小鱼被唤醒调用 phone_* 工具时，才允许精确操作。
+  const target = await getAdbTarget();
+  if (target && !target.includes('160:')) {
+    const brand = (await silentAdb(['shell', 'getprop', 'ro.product.brand'])).trim().toLowerCase();
+    if (brand && !brand.includes('emulator') && !brand.includes('bignox') && !brand.includes('netease')) {
+      // 目标为老爸的实体真机，后台静默自主滑屏守护自动挂起
+      return 60000;
+    }
+  }
+
   const now = new Date();
   const hour = now.getHours();
 
