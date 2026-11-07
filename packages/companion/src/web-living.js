@@ -179,6 +179,13 @@ export async function fetchTrendingTopics(dataDir = '') {
     filtered.push(item);
   }
 
+  const GAME_PAT = /(游戏|steam|epic|显卡|cpu|装机|主机|单机|联机|怪物猎人|怪猎|荒野|黑神话|三角洲|无畏契约|瓦罗兰特|cs2|csgo|pubg|吃鸡|云顶|原神|星铁|崩铁|绝区零|鸣潮|明日方舟|王者|英雄联盟|lol|s赛|赛季|暴雷|虚幻5|暴雪|网易|腾讯|米哈游|外挂|mod|打折|史低|优化|补丁|开黑|电竞|选手|转会)/i;
+  filtered.sort((a, b) => {
+    const aGame = GAME_PAT.test(a.title) ? 1 : 0;
+    const bGame = GAME_PAT.test(b.title) ? 1 : 0;
+    return bGame - aGame;
+  });
+
   return filtered;
 }
 
@@ -211,15 +218,15 @@ export async function browseWebTopic({ brain, memory, topic = null, prompt = '' 
     // 取前 15 个话题供小鱼选择
     const candidates = trending.slice(0, 15).map(x => `[${x.source}] ${x.title}`);
     const desireContext = renderDesirePrompt('web');
-    const pickPrompt = `你是小鱼（外号小肥鱼），喜欢打游戏（单机/王者/Steam）、看数码硬件新品、爱看沙雕网络段子和生活八卦的18岁网瘾女孩。
+    const pickPrompt = `你是小鱼（外号小肥鱼），是个网瘾很大的18岁游戏宅女，平时最爱单机大作、Steam/主机游戏、硬核射击电竞、数码硬件装机，以及游戏圈的各种离谱乐子、新版本改动与口碑暴雷。
 ${desireContext}
-你现在正打开手机/电脑热搜榜摸鱼。请从以下实时热搜列表中，挑选 1 个你最感兴趣、最想点进去看的话题：
+你现在正打开手机/电脑热榜摸鱼。请从以下实时热搜列表中，【优先挑选】与游戏、电竞、数码硬件、网络名场面最相关的话题；如果实在没有游戏话题，再选沙雕吃瓜吐槽：
 ${JSON.stringify(candidates)}
 
 请以 JSON 格式输出：
 {
   "topic": "你选的话题名称（去掉 [微博] 等前缀，只留纯标题）",
-  "reason": "你为什么选它（用口语随性一句话，如：看看影之刃零打斗手感到底咋样、这年头玩手机也能玩出痴呆？）"
+  "reason": "你为什么选它（用口语随性一句话，如：看看怪猎荒野优化到底救回来没、又哪个英雄被砍废了？）"
 }`;
 
     try {

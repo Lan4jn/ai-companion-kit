@@ -24,9 +24,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const STATE = path.join(ROOT, 'data');
 const ASSETS = path.join(HERE, 'panel-assets');   // 16 只人格鱼
-// 大肥鱼的本子（qq_notebook 写的那份）
+// 大肥鱼的本子（小鱼的日记与惦记的事）
 const NOTEBOOK = process.env.SURFCORE_NOTEBOOK
-  || path.join(os.homedir(), 'Desktop', '大肥鱼的本子');
+  || path.join(STATE, 'notebook');
 const PORT = Number(process.argv[2]) || 3999;
 const OWNER = (() => {
   try {

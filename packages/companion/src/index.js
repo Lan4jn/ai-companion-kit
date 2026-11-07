@@ -45,6 +45,7 @@ import { tarotDailyTick, tarotPromptBlock, tarotSummary } from './tarot-engine.j
 import { readVirtue, applyText as applyVirtueText, virtuePromptBlock } from './virtue-engine.js';
 import { createRespectGuard } from './respect-guard.js';
 import { classifyMessage } from './conversation-closure.js';
+import { startDiaryScheduler } from './diary-system.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -366,8 +367,12 @@ async function main() {
     dataDir: cfg.dataDir,
     douyinLiving: { browseDouyinLive },
     getDouyinStatus: getDouyinLivingStatus,
+    brain,
   });
   setDouyinRoom(room);
+
+  // 启动小鱼每日随笔日记本系统（每晚自动撰写与 Web 端阅读）
+  startDiaryScheduler({ brain, memory, dataDir: cfg.dataDir });
 
   // 启动小鱼抖音自主生活系统（支持抓取真实推荐流、点赞评论关注、写日记、向老爸汇报）
   const dyCfg = cfg.douyin || {};

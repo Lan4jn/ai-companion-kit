@@ -24,6 +24,7 @@ import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-ob
 import { getDouyinLivingStatus } from './douyin-living.js';
 import { DEV_PAGE, CHAT_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
 import { handlePanelRequest } from '../scripts/panel.mjs';
+import { renderDiaryViewerHtml, listAllDiaries, generateDailyDiary } from './diary-system.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1043,9 +1044,11 @@ export function startVirtualRoomServer({
   transitionMs = 2000,
   douyinLiving = null,
   getDouyinStatus = null,
+  brain = null,
 } = {}) {
   const effectiveAssetsDir = assetsDir || DEFAULT_ASSETS_DIR;
   const effectiveDataDir = dataDir || DEFAULT_DATA_DIR;
+  const effectiveBrain = brain;
 
   let curState = {
     version: 1,
@@ -1212,6 +1215,46 @@ export function startVirtualRoomServer({
     if (url.pathname === '/monitor' || url.pathname === '/browser') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(MONITOR_HTML_TEMPLATE);
+      return;
+    }
+
+    // 1.11 小鱼随笔日记本独立阅读器页面 (/diary /notebook)
+    if (url.pathname === '/diary' || url.pathname === '/notebook') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(renderDiaryViewerHtml(effectiveDataDir));
+      return;
+    }
+
+    if (url.pathname === '/api/diary/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, diaries: listAllDiaries(effectiveDataDir) }));
+      return;
+    }
+
+    if (url.pathname === '/api/diary/read') {
+      const fileParam = url.searchParams.get('file') || '';
+      const safeName = path.basename(fileParam.replace(/\.md$/i, '')) + '.md';
+      const filePath = path.join(effectiveDataDir, 'notebook', '日记', safeName);
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: true, name: safeName, content }));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: '日记不存在' }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/diary/generate' && req.method === 'POST') {
+      try {
+        const result = await generateDailyDiary({ brain: effectiveBrain, dataDir: effectiveDataDir, force: true });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+      }
       return;
     }
 
