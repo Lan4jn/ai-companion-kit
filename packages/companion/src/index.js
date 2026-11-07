@@ -43,6 +43,7 @@ import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
 import { tarotDailyTick, tarotPromptBlock, tarotSummary } from './tarot-engine.js';
 import { readVirtue, applyText as applyVirtueText, virtuePromptBlock } from './virtue-engine.js';
+import { gameAutopilot } from './game-autopilot.js';
 import { createRespectGuard } from './respect-guard.js';
 import { classifyMessage } from './conversation-closure.js';
 import { startDiaryScheduler } from './diary-system.js';
@@ -482,6 +483,9 @@ async function main() {
     console.log('[主动] 没配 ownerIds，跳过');
   }
 
+  // 启动游戏前台自主托管代玩系统控制器
+  gameAutopilot.init({ brain, bot });
+
   console.log('在跑了。Ctrl+C 退出。\n');
 }
 
@@ -508,6 +512,22 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   if (relVerdict === 'ignore') { console.log('   [不理] 关系已凉，这条不回'); return; }
   const rawBatchText = Waker.joinBatch(items, cfg.ownerIds);
   let text = await expandVideoLink(rawBatchText);
+
+  // 游戏自主代玩托管指令快速拦截（老爸专属）
+  if (isOwnerTurn) {
+    const cleanCmd = String(cleanRaw || text || '').trim();
+    if (/^(停|别玩了|我自己来|退出托管|停止托管|别打了|停下|退出代打)/i.test(cleanCmd)) {
+      if (gameAutopilot.isActive()) {
+        gameAutopilot.stop('老爸要求停下');
+        await bot.send(key, '好嘞老爸！代玩托管已停下，你来接手！');
+        return;
+      }
+    } else if (/(帮我打|帮我玩|你来玩|这把你玩|开启托管|开启代打|帮我代打|交给你了)/i.test(cleanCmd)) {
+      const startRes = await gameAutopilot.start({ sessionKey: key, ownerId: last.userId });
+      await bot.send(key, startRes.message);
+      return;
+    }
+  }
 
   // 前文回溯补偿：处理“先发大段文字，紧接着发 @ 唤醒”的经典群聊习惯
   const cleanRaw = String(rawBatchText || '')
