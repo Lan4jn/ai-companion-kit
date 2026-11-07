@@ -77,8 +77,8 @@ const EDGE_VOICES = {
   gentle: 'zh-CN-XiaoxiaoNeural',
 };
 const EDGE_RATES = {
-  cute: '+8%',
-  gentle: '-3%',
+  cute: '+0%',
+  gentle: '-8%',
 };
 
 export const TTS_STYLES = Object.keys(DOUBAO_VOICES);
@@ -161,10 +161,11 @@ async function synthesizeDoubao(text, style, cfg, emotion = '') {
     }
   }
 
+  const speedRatio = Number(cfg?.tts?.speedRatio || 0.9);
   const reqParams = {
     text: actualText,
     speaker,
-    audio_params: { format: 'mp3', sample_rate: 24000, bit_rate: 64000 }
+    audio_params: { format: 'mp3', sample_rate: 24000, bit_rate: 64000, speed_ratio: speedRatio }
   };
 
   // 确保 contextTexts 绝不为空！否则火山引擎会退化成没有感情的死板念稿

@@ -19,9 +19,10 @@ import { PHONE_TOOLS, executePhoneTool } from './phone-tools.js';
 import { loopGuard } from './loop-guard.js';
 import { LEGAL_TOOLS, executeLegalTool } from './legal-tools.js';
 import { SEARCH_TOOLS, executeSearchTool } from './search-tools.js';
+import { TDAI_TOOLS, executeTdaiTool, syncTurnToTdai } from './tdai-tools.js';
 import { cleanAllToolArtifacts, parseDsmlToolCalls } from './safety.js';
 
-const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS];
+const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS];
 
 async function toDataUrl(url) {
   if (!url) return null;
@@ -113,11 +114,12 @@ async function shrinkDataUrl(dataUrl) {
 
 export class Brain {
   constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, vision = null, visionFallback = null, videoVision = null, mainVision = false,
-    recall = null, dataDir = './data' }) {
+    llmFallbacks = [], recall = null, dataDir = './data' }) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.model = model;
     this.timeoutMs = timeoutMs;
+    this.llmFallbacks = Array.isArray(llmFallbacks) ? llmFallbacks : [];
     this.vision = vision && vision.apiKey && vision.baseUrl && vision.model ? vision : null;
     this.visionFallback = visionFallback && visionFallback.apiKey && visionFallback.baseUrl && visionFallback.model ? visionFallback : null;
     // 主模型自己就能看图时，别再多绕一道「图→文字→判断」，细节会在转述里丢掉
@@ -422,26 +424,26 @@ export class Brain {
         const descs = (await Promise.all(dataUrls.map((d) => this.describeImage(d)))).filter(Boolean);
         if (descs.length > 0) {
           const hint = descs.map((d, i) => `第${i + 1}张图：${d}`).join('\n');
-          userContent = `${String(text || '').trim()}\n\n【对方发了${descs.length}张图，画面核心内容已提炼如下。真人老群友看图法则：只挑图中最亮眼或最有槽点的一个细节随口吐一句（最多1~2个短句），绝对禁止报备形状尺寸，绝对禁止面面俱到地把图里所有细节挨个点评一遍！越精简越真实】\n${hint}`.trim();
+          userContent = `${String(text || '').trim()}\n\n【背景信息：群友发了一张图，内容概括：${hint}】\n【★严禁直接评价图片★】：真人绝对不会像阅卷老师或AI识图工具一样，直接开口点评“这图怎么怎么样”、“这画面是把人拎走”、“你发的图是…”！绝对禁止对图片画面本身做任何描述、复述、分析或说明！图只是一个情境背景，你说话要完全聚焦在群友当下的发言或当时的话题上，像真人网民一样顺着情绪直接接话、吐槽或发表情包，绝不当看图说话机器人！`.trim();
         } else {
-          userContent = `${String(text || '[图片]').trim()}\n\n（图片没加载出来，你根本没看到画面内容。禁止编造任何画面细节、禁止假装看懂了——只能老实说没看清或打不开，让对方说一句）`;
+          userContent = `${String(text || '').trim() || '？'}\n\n（注：群友发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
         }
       } else if (dataUrls.length > 0) {
         const parts = [{ type: 'text', text: String(text || '[图片]') }];
         for (const d of dataUrls) parts.push({ type: 'image_url', image_url: { url: d } });
         userContent = parts;
       } else {
-        userContent = `${String(text || '[图片]').trim()}\n\n（图片没加载出来，你根本没看到画面内容。禁止编造任何画面细节、禁止假装看懂了——只能老实说没看清或打不开，让对方说一句）`;
+        userContent = `${String(text || '').trim() || '？'}\n\n（注：群友发了一张图或动图表情，但视觉暂未解析。严禁像机器人一样报幕“图打不开”、“图糊了”、“没认出来”！真人不会对打不开图反复解释。如果是纯图，你可以直接扣个「？」或者甩一个疑惑/吃瓜表情包 [表情包: 问号] 顶回去；如果带了文字，就只针对对方的文字回答）`;
       }
     }
 
-    // 表情包不是照片：真人看到表情包绝不评价或描述画面！
-    // 如果带了文字，就只针对文字回答；如果是纯表情包斗图，要么甩表情包，要么回问号/冷淡短句。
+    // 表情包处理法则：表情包只是聊天调节氛围的工具，绝对不能当成阅读理解题来复述或点评内容！
     if (stickers > 0) {
       const base = typeof userContent === 'string' ? userContent : String(text || '');
-      const tail = base.trim()
-        ? `（注：对方附带发了表情包。严禁评价、点评、分析或描述任何表情包本身！100% 只针对对方说的话接茬）`
-        : `（注：对方发了纯表情包斗图。严禁对表情包说三道四进行文字点评！真人要么直接回表情包 [表情包: 情绪]，要么扣个「？」或冷笑，绝不废话评价表情包）`;
+      const isPureStickerAt = !text || !text.replace(/\[CQ:at,[^\]]+\]/g, '').trim();
+      const tail = isPureStickerAt
+        ? `（注：对方在单独/带@发纯表情包。★核心原则★：严禁复述表情包里的任何文字或画面细节！你应该判断对方发这个表情包的【意图/情绪】是什么——是在找茬、挑衅、卖萌、无语、嘲讽还是打招呼？你的回应应该是：直接甩一个针对性的表情包 [表情包: 情绪] 顶回去，或者扣个「？」/随手甩一句情绪反馈，绝不复述画面！）`
+        : `（注：对方说话时附带了表情包。表情包仅仅是对方说话时调节氛围的工具！严禁复述、引用、点评或描述表情包内容！100% 只针对对方说的实际文字接茬对话，完全无视表情包的画面文字）`;
       userContent = base ? `${base}\n${tail}` : tail;
     }
     messages.push({ role: 'user', content: userContent });
@@ -455,38 +457,90 @@ export class Brain {
     let lastJson = null;
 
     for (let round = 0; round < 3; round++) {
-      const reqPayload = {
-        model: this.model,
-        messages,
-        temperature: 1.1,
-        stream: false,
-      };
-      if (enableTools && round < 2) {
-        reqPayload.tools = ALL_TOOLS;
-        reqPayload.tool_choice = 'auto';
+      // 构造三层降级提供商列表：[0] 主提供商 (opencode) -> [1] Gemini -> [2] ARK
+      const providers = [
+        { name: 'opencode-go', baseUrl: this.baseUrl, apiKey: this.apiKey, model: this.model },
+        ...this.llmFallbacks
+      ];
+
+      let lastError = null;
+      let successChoice = null;
+      let successMsg = null;
+      let successJson = null;
+
+      for (let pIdx = 0; pIdx < providers.length; pIdx++) {
+        const prov = providers[pIdx];
+        if (!prov.baseUrl || !prov.apiKey) continue;
+
+        const reqPayload = {
+          model: prov.model,
+          messages,
+          temperature: 1.1,
+          stream: false,
+        };
+        if (enableTools && round < 2) {
+          reqPayload.tools = ALL_TOOLS;
+          reqPayload.tool_choice = 'auto';
+        }
+
+        const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + prov.apiKey };
+        if (String(prov.baseUrl).includes('opencode.ai')) {
+          hdrs['x-opencode-session'] = 'xiaoyu-main-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        }
+
+        const maxAttempts = pIdx === 0 ? 3 : 2;
+        let provSuccess = false;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            const timeoutMs = attempt === 0 ? 25000 : 35000;
+            const res = await fetch(prov.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+              method: 'POST',
+              headers: hdrs,
+              body: JSON.stringify(reqPayload),
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+            const raw = await res.text();
+            if (!res.ok) throw new Error(`[${prov.name || prov.model}] 模型返回 ${res.status}：${raw.slice(0, 300)}`);
+
+            let json;
+            try { json = JSON.parse(raw); } catch { throw new Error(`[${prov.name || prov.model}] 模型返回不是 JSON：${raw.slice(0, 200)}`); }
+            const choice = json.choices?.[0];
+            const msg = choice?.message;
+            if (!msg) throw new Error(`[${prov.name || prov.model}] 未返回 message`);
+
+            successJson = json;
+            successMsg = msg;
+            successChoice = choice;
+            lastJson = json;
+            lastMsg = msg;
+            lastError = null;
+            provSuccess = true;
+            if (pIdx > 0) {
+              console.log(`[Brain] 降级通道 [${prov.name || prov.model}] 成功响应`);
+            }
+            break;
+          } catch (e) {
+            lastError = e;
+            const is429 = String(e.message).includes('429') || String(e.message).includes('capacity') || String(e.message).includes('overloaded');
+            if (attempt < maxAttempts - 1) {
+              const delayMs = is429 ? (attempt === 0 ? 3500 : 5000) : 1500;
+              console.warn(`[Brain] [${prov.name || prov.model}] 第 ${attempt + 1} 次请求异常(${e.message})，${delayMs}ms 后重试...`);
+              await new Promise(r => setTimeout(r, delayMs));
+            } else {
+              console.warn(`[Brain] [${prov.name || prov.model}] 达到最大重试次数，尝试降级到下一个通道...`);
+            }
+          }
+        }
+
+        if (provSuccess) break;
       }
 
-      // opencode 网关不给会话头会直接 400 MissingSessionID
-      const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey };
-      if (String(this.baseUrl).includes('opencode.ai')) {
-        hdrs['x-opencode-session'] = 'xiaoyu-main-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-      }
-      const res = await fetch(this.baseUrl + '/chat/completions', {
-        method: 'POST',
-        headers: hdrs,
-        body: JSON.stringify(reqPayload),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      const raw = await res.text();
-      if (!res.ok) throw new Error('模型返回 ' + res.status + '：' + raw.slice(0, 300));
+      if (!successMsg) throw lastError;
 
-      let json;
-      try { json = JSON.parse(raw); } catch { throw new Error('模型返回不是 JSON：' + raw.slice(0, 200)); }
-      const choice = json.choices?.[0];
-      const msg = choice?.message;
-      lastJson = json;
-      lastMsg = msg;
-      let content = String(msg?.content || '').trim();
+      const choice = successChoice;
+      const msg = successMsg;
+      let content = String(msg?.content || msg?.reasoning_content || '').trim();
 
       // 提取工具调用：支持标准 tool_calls 与 DeepSeek DSML 文本格式
       let toolCalls = (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) ? [...msg.tool_calls] : [];
@@ -518,6 +572,8 @@ export class Brain {
             execRes = await executeSearchTool(tc.function.name, args);
           } else if (tc.function.name === 'legal_lookup') {
             execRes = await executeLegalTool(tc.function.name, args);
+          } else if (tc.function.name === 'tdai_search_memories') {
+            execRes = await executeTdaiTool(tc.function.name, args);
           } else {
             execRes = await executePhoneTool(tc.function.name, args);
           }
@@ -615,6 +671,7 @@ export class Brain {
     if (record) {
       this.memory.remember(userId, { name: userName, topic: (typeof text === 'string' ? text : '').slice(0, 40) + ' → ' + out.slice(0, 40) });
       this.memory.logTurn({ where: key, who: userName || userId, text, reply: out });
+      syncTurnToTdai({ where: key, who: userName || userId, text, reply: out });
     }
     return { text: out, voiceB64: voiceB64ToSend, reasoning: lastMsg?.reasoning_content, raw: lastJson };
   }

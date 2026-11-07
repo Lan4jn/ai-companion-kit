@@ -36,10 +36,16 @@ export class Waker {
     this.ownerIds = (opts.ownerIds || []).map(String);
     this.probability = opts.probability ?? 0.05;
     this.batchWindowMs = opts.batchWindowMs ?? 3000;
+    /** @type {import('./topic-focus.js').TopicFocusTracker|null} */
+    this.topicTracker = opts.topicTracker || null;
     /** @type {Map<string, object>} 每个会话的唤醒配置 */
     this.configs = new Map();
     /** @type {Map<string, object>} 待合并的消息缓冲 */
     this.buffers = new Map();
+  }
+
+  setTopicTracker(tracker) {
+    this.topicTracker = tracker;
   }
 
   /** 给某个会话设置唤醒配置 */
@@ -141,6 +147,19 @@ export class Waker {
     const { hitName: directlyCalledName, cleaned: cleanedText } = this.findDirectNameCall(text, msg);
     const directlyCalled = Boolean(msg.isAtMe || msg.isQuoteMe || msg.isPoke || directlyCalledName);
 
+    // 0. 话题专注锁定检查 (Topic Focus Tracker):
+    // 如果该群当前正处于 3 分钟话题专注锁定中：
+    if (msg.isGroup && this.topicTracker) {
+      const lockVerdict = this.topicTracker.checkMessage(msg, isOwner, directlyCalled);
+      if (lockVerdict.inLock) {
+        if (lockVerdict.wake) {
+          return { wake: true, reason: lockVerdict.reason, topic: lockVerdict.topic };
+        } else {
+          return { wake: false, reason: lockVerdict.reason, topic: lockVerdict.topic };
+        }
+      }
+    }
+
     // 1. 主人（老爸）说话判定：
     // 私聊中每条必醒；群聊中若开启了 ownerMustCall，没叫小鱼时当背景潜水；
     // 若未开启 ownerMustCall（如熟人小群），老爸说话时小鱼可主动搭腔，但在发言冷却期内且未被明确呼叫时保持礼貌倾听
@@ -188,6 +207,14 @@ export class Waker {
 
     // 6. 随缘低频冒头（受 probability 与 cooldownMs 双重约束）
     if (Number(c.probability) > 0 && Math.random() < Number(c.probability)) {
+      if (this.topicTracker && msg.isGroup) {
+        const intInfo = this.topicTracker.evaluateInterest(msg);
+        if (intInfo.isInteresting) {
+          return { wake: true, reason: 'topic-interest:' + intInfo.topic, topicInfo: intInfo };
+        }
+        // 如果是无聊的纯数字/打卡/单字无意义消息，随缘冒头也放弃，保持真实活人感
+        return { wake: false, reason: 'uninteresting-skip' };
+      }
       return { wake: true, reason: 'probability' };
     }
 

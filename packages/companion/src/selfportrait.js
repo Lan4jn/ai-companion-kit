@@ -139,7 +139,31 @@ export class SelfPortrait {
       if (match) return match;
     }
     if (/生气|气鼓鼓|噘嘴|笨鱼|气人|不理你|嘟嘴/.test(t)) {
-      const match = imgs.find(f => f.includes('pout'));
+      const pouts = imgs.filter(f => f.includes('pout'));
+      if (pouts.length) return pouts[Math.floor(Math.random() * pouts.length)];
+    }
+    if (/阳台|天气|阳光|晴天|早安|晨光|微风|外面/.test(t)) {
+      const match = imgs.find(f => f.includes('sunshine')) || imgs.find(f => f.includes('balcony'));
+      if (match) return match;
+    }
+    if (/发呆|无聊|榻榻米|房间|喝茶|坐着|居家|休闲/.test(t)) {
+      const match = imgs.find(f => f.includes('tatami'));
+      if (match) return match;
+    }
+    if (/奶茶|咖啡|喝水|杯子|店|出去玩|逛街/.test(t)) {
+      const match = imgs.find(f => f.includes('cafe'));
+      if (match) return match;
+    }
+    if (/书桌|桌子|趴着|学习|写字|看书/.test(t)) {
+      const match = imgs.find(f => f.includes('desk'));
+      if (match) return match;
+    }
+    if (/沙发|抱枕|玩偶|抱抱|窝着/.test(t)) {
+      const match = imgs.find(f => f.includes('sofa'));
+      if (match) return match;
+    }
+    if (/女仆|漂亮|好看|正经|打扮|出门|自拍|可爱|新衣服/.test(t)) {
+      const match = imgs.find(f => f.includes('maid-selfie'));
       if (match) return match;
     }
 

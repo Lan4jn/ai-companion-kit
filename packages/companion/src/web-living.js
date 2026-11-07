@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { executeSearchTool } from './search-tools.js';
 import { checkInput, checkOutput } from './safety.js';
+import { renderDesirePrompt } from './desire-engine.js';
 
 let activeBrain = null;
 let activeMemory = null;
@@ -209,7 +210,9 @@ export async function browseWebTopic({ brain, memory, topic = null, prompt = '' 
 
     // 取前 15 个话题供小鱼选择
     const candidates = trending.slice(0, 15).map(x => `[${x.source}] ${x.title}`);
+    const desireContext = renderDesirePrompt('web');
     const pickPrompt = `你是小鱼（外号小肥鱼），喜欢打游戏（单机/王者/Steam）、看数码硬件新品、爱看沙雕网络段子和生活八卦的18岁网瘾女孩。
+${desireContext}
 你现在正打开手机/电脑热搜榜摸鱼。请从以下实时热搜列表中，挑选 1 个你最感兴趣、最想点进去看的话题：
 ${JSON.stringify(candidates)}
 

@@ -24,6 +24,7 @@ import { SelfPortrait } from './selfportrait.js';
 import { Brain } from './brain.js';
 import { Humanizer } from './humanize.js';
 import { Waker } from './wake.js';
+import { TopicFocusTracker } from './topic-focus.js';
 import { OneBot } from './transport-onebot.js';
 import { startPhoneLiving, getPhoneLivingStatus, setVideoBrain } from './phone-living.js';
 import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living.js';
@@ -35,6 +36,7 @@ import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } fr
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
 import { initGrowth, observeIncoming, observeOwn, renderGrowth } from './growth.js';
+import { initDesireEngine, renderDesirePrompt } from './desire-engine.js';
 import { initImageGen } from './image-gen.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
@@ -91,6 +93,7 @@ export function loadConfig(explicitPath) {
 // ── 主程序 ────────────────────────────────────────────────────
 // 群聊最近图片短期时空记忆环：记录群聊最近几分钟发过的图片，解决群友先发图、后发文字提问漏图的问题
 const recentGroupImages = new Map();
+const lastStickerSendTime = new Map(); // 记录每个会话上次发送表情包的时间，做频率与冷却控制
 
 async function main() {
   const cfgIdx = process.argv.indexOf('--config');
@@ -119,7 +122,7 @@ async function main() {
   if (process.argv.includes('--check')) { console.log('检查完毕。'); return; }
   if (!cfg.apiKey) console.log('⚠️ 没配 apiKey，模型调用会失败\n');
 
-  const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, mainVision: cfg.mainVision, vision: cfg.vision, visionFallback: cfg.visionFallback, videoVision: cfg.videoVision,
+  const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, llmFallbacks: cfg.llmFallbacks, mainVision: cfg.mainVision, vision: cfg.vision, visionFallback: cfg.visionFallback, videoVision: cfg.videoVision,
     recall: recallKnowledge, role, memory, dataDir: cfg.dataDir });
   const human = new Humanizer(cfg.humanize);
 
@@ -131,12 +134,19 @@ async function main() {
   });
   selfPortrait.ensure().catch(() => {});
   const rel = new Relationship({ dir: cfg.dataDir || './data', enabled: cfg.relationship?.enabled !== false });
+  const topicTracker = new TopicFocusTracker({
+    focusWindowMs: cfg.wake?.topicFocusWindowMs ?? 180000,
+    idleTimeoutMs: cfg.wake?.topicIdleTimeoutMs ?? 60000,
+    microCooldownMs: cfg.wake?.topicMicroCooldownMs ?? 10000,
+    maxTurnsPerFocus: cfg.wake?.topicMaxTurnsPerFocus ?? 6,
+  });
   const waker = new Waker({
     names: cfg.names,
     keywords: cfg.keywords,
     ownerIds: cfg.ownerIds,
     probability: cfg.wake.probability,
     batchWindowMs: cfg.wake.groupWindowMs,
+    topicTracker,
   });
 
   // 启动时预先载入配置好的群聊策略
@@ -169,6 +179,7 @@ async function main() {
 
   // 成长记忆：群友对她的批评、表扬、特殊事件 → 自我认知
   initGrowth({ dataDir: cfg.dataDir || './data', cfg: cfg.growth, brain });
+  initDesireEngine(cfg.dataDir || './data');
 
   // 生图：画出来、存本地、建索引，发不发由她自己判断
   // 余额告急时怎么喊人：bot 还没建，先用闭包占位，建好后自动接上
@@ -241,7 +252,13 @@ async function main() {
       const verdict = waker.shouldWake(msg);
       const isOwner = cfg.ownerIds.includes(msg.userId);
       if (!verdict.wake) {
-        if (msg.isGroup) console.log('[潜水听] ' + msg.name + '：' + msg.text.slice(0, 40));
+        if (msg.isGroup) {
+          if (verdict.reason === 'topic-lock-ignore-unrelated') {
+            console.log(`[潜水听·专注中无视无关] ${msg.name}：${msg.text.slice(0, 35)}（锁定：${verdict.topic || '话题'}）`);
+          } else {
+            console.log('[潜水听] ' + msg.name + '：' + msg.text.slice(0, 40));
+          }
+        }
         return;
       }
 
@@ -262,7 +279,7 @@ async function main() {
       pending.set(batchKey, setTimeout(() => {
         const items = waker.flush(batchKey);
         if (!items.length) return;
-        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner }, items, cfg)
+        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker }, items, cfg)
           .catch((e) => console.error('[出错] ' + (e?.message || e)));
       }, win));
     },
@@ -375,7 +392,7 @@ async function main() {
 }
 
 /** 处理一轮（可能是合并后的多条） */
-export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner }, items, cfg) {
+export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
   setCurrentChat(key);
@@ -449,6 +466,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     : (memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : '');
   const learnedInsights = chatterLearner ? chatterLearner.renderInsights() : '';
   const growthInsight = renderGrowth();
+  const currentEnv = isOwnerTurn && !last.isGroup ? 'dm_owner' : (last.isGroup ? 'group' : 'idle');
+  const desirePrompt = renderDesirePrompt(currentEnv);
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
   const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
   const targetPrompt = last.isGroup
@@ -462,6 +481,13 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const shareCardGuide = last.isGroup
     ? '\n【关于群友分享的小程序/视频卡片/音乐链接】：群消息中如果出现形如“[群友分享了卡片/小程序: 《xxx》]”，这只是群友在群里随手丢的链接或卡片，绝不是对方在针对你说话、提问或艾特你！即使卡片标题有问号或词句，也绝对不是在跟你对话。老群友法则：大部分时候无视即可；如果正好聊到相关话题或内容确实好玩，可以随口评价一句内容本身，但绝对禁止误以为是对方在审问你或跟你对话。'
     : '';
+
+  const topicFocus = (last.isGroup && topicTracker) ? topicTracker.getFocus(key) : null;
+  let topicFocusPrompt = '';
+  if (topicFocus) {
+    const remainingSec = Math.max(1, Math.round((topicFocus.expiresAt - Date.now()) / 1000));
+    topicFocusPrompt = `\n【当前群聊话题专注进行中（锁定剩余：${remainingSec}秒）】：你当前正和群友专心热聊话题：“${topicFocus.topic}”！\n- 核心法则：请紧扣这个话题顺着群友的话茬接话、吐槽或亮观点，绝不跑题！\n- 风格要求：极简随性短句（1~10字，老群友风格，可带吐槽或灵魂「？」），绝不做长篇大论。`;
+  }
 
   const situation = (last.isGroup
     ? (isSpicyGroup
@@ -482,7 +508,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (living ? `\n【你此刻真实的手机动态】：${living}。如果老爸或群友问你在干嘛或发截图，你可以顺着这个状态自然回应或截图。` : '')
     + (learnedInsights ? `\n${learnedInsights}` : '')
     + (growthInsight || '')
+    + (desirePrompt || '')
     + (webKnowledge ? `\n${webKnowledge}` : '')
+    + (topicFocusPrompt || '')
     + (groupChatter ? `\n${groupChatter}` : '')
     + (() => {
         const line = rel ? rel.render(last.userId) : '';
@@ -597,13 +625,29 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
+  // 1、首要保障：老爸私聊时，即便遇到偶发降级或网络波动，直接通知老爸，绝不静默丢消息
+  if (isOwnerTurn && !out) {
+    out = '唔……老爸！刚上游网关卡了一下，小鱼收到你的消息啦！';
+  }
+
   // 没有语音或语音发送失败时，才发送常规打字文本
   if (!voiceSentSuccess && out) {
-    // 动态解析 [表情包: tag] 或 [表情包]，从表情库里抽取配图
+    // 动态解析 [表情包: tag] 或 [表情包]，从表情库里抽取配图（增加频率限制与 3 分钟冷却，杜绝频繁发表情包）
     let resolvedOut = out;
     const stickerRegex = /\[表情包(?::\s*([^\]]+))?\]/g;
     let match;
+    const now = Date.now();
+    const lastStTime = lastStickerSendTime.get(key) || 0;
+    // 表情包严格冷却：同一个会话至少间隔 120 秒（2分钟），且即使过了冷却也有 65% 概率保持克制（纯文字回复），除非是纯表情包反击
+    const isPureStickerBattle = (stickerCount > 0 && (!text || !text.replace(/\[CQ:at,[^\]]+\]/g, '').trim()));
+    const allowSticker = isPureStickerBattle || (now - lastStTime > 120000 && Math.random() < 0.35);
+
     while ((match = stickerRegex.exec(out)) !== null) {
+      if (!allowSticker) {
+        // 不符合频率或处于冷却期时，直接剥离表情包占位符，保持纯文字输出
+        resolvedOut = resolvedOut.replace(match[0], '');
+        continue;
+      }
       try {
         const tag = (match[1] || '').trim();
         const st = pickSticker({ tag });
@@ -611,6 +655,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
           const b64 = await readStickerBase64(st);
           if (b64) {
             resolvedOut = resolvedOut.replace(match[0], `\n[CQ:image,file=base64://${b64}]\n`);
+            lastStickerSendTime.set(key, now);
           } else {
             resolvedOut = resolvedOut.replace(match[0], '');
           }
@@ -643,6 +688,19 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       try {
         setRoomState(null, { message: cleanOut.slice(0, 80), recentInput: text.slice(0, 20) });
       } catch {}
+    }
+  }
+
+  // 群聊 3 分钟话题专注锁定流转：发言成功后，更新锁定状态或启动新话题锁定
+  const spokeInGroup = (voiceSentSuccess || Boolean(!voiceSentSuccess && out)) && last.isGroup;
+  if (spokeInGroup && topicTracker) {
+    if (topicFocus) {
+      topicTracker.recordBotReply(key);
+    } else {
+      const intInfo = topicTracker.evaluateInterest(last);
+      if (intInfo.isInteresting) {
+        topicTracker.startFocus(key, intInfo, last);
+      }
     }
   }
 

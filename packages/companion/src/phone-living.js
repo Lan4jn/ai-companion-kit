@@ -206,21 +206,21 @@ async function stepAutonomousAction() {
     const nextImpulse = decideNextImpulse();
 
     if (nextImpulse === 'afk') {
-      console.log(`[PhoneLiving] 小鱼把手机一丢，去喝水吃零食了（离开手机休息）`);
+      console.log(`[PhoneLiving] 小鱼把手机一丢，去捧大铁盆吃大白饭/发呆了（离开手机休息）`);
       await silentShell('input keyevent HOME');
       state.currentApp = 'afk';
-      state.lastAction = '放下手机，去倒水摸鱼吃零食了';
+      state.lastAction = '放下手机，去端着大铁盆吃大白米饭发呆了';
       const afkStories = [
-        '刚刚去接了杯水，手机扔桌上呢',
-        '在桌前一边吃零食一边发呆，手机搁在手边',
+        '刚刚端着大铁盆刨饭呢，手机扔桌上没顾上回',
+        '在桌前一边吃大白米饭一边发呆，手机搁在手边',
         '站起来伸了个懒腰去阳台透透气，手机丢桌上',
-        '眼睛看酸了，放下手机揉眼睛休息会儿'
+        '眼睛看酸了，放下手机揉揉眼睛放空会儿'
       ];
       state.moodStory = afkStories[Math.floor(Math.random() * afkStories.length)];
-      state.recentSummary = '把手机放一旁离开去干别的事了';
+      state.recentSummary = '把手机放一旁去干饭/发呆了';
       state.lastActionTime = new Date();
       // 离线 8 ~ 25 分钟（真实人类离开手机的自然时长！）
-      boundMemory?.logDiary({ category: '生活', activity: '离开手机休息', details: '放下手机去倒水吃零食了', mood: state.moodStory });
+      boundMemory?.logDiary({ category: '生活', activity: '离开手机休息', details: '放下手机端大铁盆吃大白饭去了', mood: state.moodStory });
       return (8 * 60 + Math.floor(Math.random() * 17 * 60)) * 1000;
     }
 

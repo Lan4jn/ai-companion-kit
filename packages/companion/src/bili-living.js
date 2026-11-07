@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { postDanmaku, giveCoin, canAffordCoin, draftDanmaku, checkGrowth, recordGrowth } from './bili-grow.js';
 import { browserWatch, browserComment } from './bili-browser.js';
 import { checkVideo, checkOutput, SAFETY_RULES } from './safety.js';
+import { renderDesirePrompt } from './desire-engine.js';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -1423,11 +1424,12 @@ async function summarizeForDiary(brain, seen) {
 /** 让她写一条像真人观众的短评 */
 async function draftComment(brain, v, seen, { todayCount = 0, ownerName = 'Mew', ownerProfile = '' } = {}) {
   try {
+    const desireContext = renderDesirePrompt('bilibili');
     const out = await brain.reply({
       key: '__bili_comment__',
       userId: '__bili_comment__',
       userName: '自己',
-      text: `你刚看完B站这个视频。\n\n标题：${v.title}\nUP：${v.up}\n内容：${seen.slice(0, 2000)}\n\n` +
+      text: `${desireContext ? desireContext + '\n\n' : ''}你刚看完B站这个视频。\n\n标题：${v.title}\nUP：${v.up}\n内容：${seen.slice(0, 2000)}\n\n` +
         (ownerProfile ? `【关于老爸（B站昵称 @${ownerName}）的事】：\n${ownerProfile.slice(0, 500)}\n\n` : '') +
         `先问自己一句：这个视频或评论区有没有让你【非说不可】？\n\n` +
         `注意区分：\n` +

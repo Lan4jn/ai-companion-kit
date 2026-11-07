@@ -144,7 +144,7 @@ async function callProvider({ prompt, size, quality, providerName }) {
         if (!dataLine) continue;
         let d;
         try { d = JSON.parse(dataLine.slice(6)); } catch { continue; }
-        if (d.type === 'response.output_item.done') {
+        if (d.type === 'response.output_item.done' || d.type === 'response.image_generation_call.completed') {
           const item = d.item || {};
           if (typeof item.result === 'string' && item.result.length > 100) b64 = item.result;
           else if (item.image_url) b64 = `URL:${item.image_url}`;
@@ -225,14 +225,44 @@ async function warnIfBroke(providerName) {
   try { notifyFn(msg); } catch (e) { console.log('[ImageGen] 余额提醒发不出去：' + e.message); }
 }
 
-/** 画一张并存进图库（内部实现，可能要几分钟） */
+/** 画一张并存进图库（内部实现，支持优先主驱动失败后自动降级兜底驱动） */
 async function doGenerate({ prompt, tags = '', size, quality, kind, provider } = {}) {
   const text = String(prompt || '').trim();
 
-  await warnIfBroke(provider);
-  const { buffer, ext } = await callProvider({ prompt: text, size, quality, providerName: provider });
-  if (!buffer?.length) throw new Error('图片数据为空');
+  // 严格三级优先级链：Gemini -> GPT -> ARK
+  const primaryName = provider || cfg.default;
+  const fallbackList = [];
+  if (!provider) {
+    // 默认降级链路：1. Gemini (首选) -> 2. GPT (备选) -> 3. ARK (最终兜底)
+    const priorityOrder = ['gemini', 'openai', 'openai-hd', 'ark', 'ark-pro'];
+    for (const fb of priorityOrder) {
+      if (fb !== primaryName && cfg.providers?.[fb]?.apiKey) fallbackList.push(fb);
+    }
+  }
 
+  const tryList = [primaryName, ...fallbackList];
+  let lastErr = null;
+  let successRes = null;
+  let usedProvider = primaryName;
+
+  for (const prov of tryList) {
+    try {
+      await warnIfBroke(prov);
+      const res = await callProvider({ prompt: text, size, quality, providerName: prov });
+      if (res && res.buffer?.length) {
+        successRes = res;
+        usedProvider = prov;
+        break;
+      }
+    } catch (e) {
+      console.warn(`[ImageGen] 驱动 ${prov} 生图失败 (${e.message})，${tryList.indexOf(prov) < tryList.length - 1 ? '尝试降级到下一个驱动...' : '全部驱动失败'}`);
+      lastErr = e;
+    }
+  }
+
+  if (!successRes) throw (lastErr || new Error('所有生图驱动均失败'));
+
+  const { buffer, ext } = successRes;
   // hash 带上 prompt：同一张图配不同描述也算两条，不会被 ON CONFLICT 吃掉
   const hash = crypto.createHash('sha1').update(buffer).update(text).digest('hex').slice(0, 16);
   const month = new Date().toISOString().slice(0, 7);
@@ -241,7 +271,7 @@ async function doGenerate({ prompt, tags = '', size, quality, kind, provider } =
   const file = path.join(dir, `${hash}.${ext}`);
   if (!fs.existsSync(file)) fs.writeFileSync(file, buffer);
 
-  const p = pickProvider(provider) || {};
+  const p = pickProvider(usedProvider) || {};
   const info = db.prepare(`
     INSERT INTO images (path, prompt, tags, kind, provider, model, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -249,7 +279,7 @@ async function doGenerate({ prompt, tags = '', size, quality, kind, provider } =
   `).run(path.relative(root, file), text, String(tags || ''), String(kind || 'illustration'), p.name || '', p.model || '', Date.now());
 
   const row = db.prepare('SELECT * FROM images WHERE path = ?').get(path.relative(root, file));
-  console.log(`[ImageGen] 画好了 #${row.id}：${text.slice(0, 40)} → ${path.relative(root, file)}`);
+  console.log(`[ImageGen] 画好了 #${row.id}（驱动: ${usedProvider}）：${text.slice(0, 40)} → ${path.relative(root, file)}`);
   return row;
 }
 

@@ -15,6 +15,7 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { registerActivePage, unregisterActivePage, saveSnapshot } from './browser-observer.js';
 import { checkOutput } from './safety.js';
+import { renderDesirePrompt } from './desire-engine.js';
 
 const CHROME_PATH = '/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome';
 
@@ -27,8 +28,8 @@ let timer = null;
 // 抖音风控比 B 站严得多，评论必须低频，点赞可以常点，关注极少。
 let douyinOpts = {
   likeChance: 0.7,
-  commentChance: 0.2,
-  commentDailyMax: 3,
+  commentChance: 0.65,
+  commentDailyMax: 15,
   followChance: 0.12,
 };
 
@@ -294,7 +295,7 @@ export async function watchAndInteractDouyinVideo(targetUrl, { doLike = true, co
             // Draft.js 里 Enter 往往只是换行、不提交；退一步点发送按钮
             if (left.length > 0) {
               const clicked = await page.evaluate(() => {
-                const sel = '[data-e2e="comment-submit"], .comment-submit, [class*="comment-submit"], [class*="submit-btn"]';
+                const sel = '[data-e2e="comment-submit"], .comment-submit, [class*="comment-submit"], [class*="submit-btn"], .commentInput-right-ct span:last-child svg, .commentInput-right-ct span:last-child';
                 const btn = document.querySelector(sel);
                 if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
                 btn.click();
@@ -625,12 +626,13 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
     let commentGenerator = null;
     if (wantComment && activeBrain) {
       commentGenerator = async (info) => {
+        const desireCtx = renderDesirePrompt('douyin');
         const r = await activeBrain.reply({
           key: 'internal:douyin-comment',
           userId: 'system',
           userName: '系统',
-          text: `【你在抖音刷到一条视频，想留一句评论】\n标题：《${info.title}》\n作者：${info.author}\n热评：${(info.topComments || []).slice(0, 3).join('；') || '暂无'}\n\n请写一句符合你性格的真实网友短评（8~20字，口语化、像老群友随口一句，可有梗）。严禁脏话、引战、阴阳性别/地域/职业，严禁谈政治。只输出这句话本身，不要引号和解释。`,
-          situation: '你在刷抖音，看到一个想评论的视频。',
+          text: `【你在抖音刷到一条视频，想留一句评论】\n${desireCtx}\n标题：《${info.title}》\n作者：${info.author}\n热评：${(info.topComments || []).slice(0, 3).join('；') || '暂无'}\n\n请写一句符合你性格的真实网友短评（8~20字，口语化、像老群友随口一句，可有梗）。严禁脏话、引战、阴阳性别/地域/职业，严禁谈政治。只输出这句话本身，不要引号和解释。`,
+          situation: '你在刷抖音，看到一个想评论的视频。' + (desireCtx ? `\n${desireCtx}` : ''),
         });
         return String(r?.text || '').replace(/^["“”']|["“”']$/g, '').trim();
       };

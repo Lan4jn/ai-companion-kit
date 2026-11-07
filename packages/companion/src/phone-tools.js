@@ -845,11 +845,17 @@ export async function executePhoneTool(name, args = {}) {
         }
       }
       case 'send_sticker': {
+        const now = Date.now();
+        const lastStTime = this.brain?.lastStickerTime || 0;
+        if (now - lastStTime < 120000) {
+          return { status: 'error', message: '刚发过表情包，冷却中，先纯打字接话，不要发表情包。' };
+        }
         const st = pickSticker({ tag: String(args.tag || '').trim() });
         if (!st) return { status: 'error', message: '表情库还是空的，先攒点再说' };
         const b64 = await readStickerBase64(st);
         if (!b64) return { status: 'error', message: '表情文件读不出来' };
         markUsed(st.id);
+        if (this.brain) this.brain.lastStickerTime = now;
         return {
           status: 'success',
           cq_image: `[CQ:image,file=base64://${b64}]`,
