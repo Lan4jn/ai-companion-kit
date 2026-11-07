@@ -513,6 +513,13 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const rawBatchText = Waker.joinBatch(items, cfg.ownerIds);
   let text = await expandVideoLink(rawBatchText);
 
+  // 清洗引用与@前缀，供指令判断与前文回溯使用
+  const cleanRaw = String(rawBatchText || '')
+    .replace(/【引用\s+[^】]+】/gs, '')
+    .replace(/\[CQ:at,[^\]]+\]/g, '')
+    .replace(/.*?[：:]/g, '')
+    .trim();
+
   // 游戏自主代玩托管指令快速拦截（老爸专属）
   if (isOwnerTurn) {
     const cleanCmd = String(cleanRaw || text || '').trim();
@@ -522,7 +529,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
         await bot.send(key, '好嘞老爸！代玩托管已停下，你来接手！');
         return;
       }
-    } else if (/(帮我打|帮我玩|你来玩|这把你玩|开启托管|开启代打|帮我代打|交给你了)/i.test(cleanCmd)) {
+    } else if (/(帮我打|帮我玩|你来玩|这把你玩|开启托管|开启代打|帮我代打|交给你了|交给你|整个游戏交给你|玩游戏|代玩|你来打|你玩吧)/i.test(cleanCmd)) {
       const startRes = await gameAutopilot.start({ sessionKey: key, ownerId: last.userId });
       await bot.send(key, startRes.message);
       return;
@@ -530,11 +537,6 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   }
 
   // 前文回溯补偿：处理“先发大段文字，紧接着发 @ 唤醒”的经典群聊习惯
-  const cleanRaw = String(rawBatchText || '')
-    .replace(/【引用\s+[^】]+】/gs, '')
-    .replace(/\[CQ:at,[^\]]+\]/g, '')
-    .replace(/.*?[：:]/g, '')
-    .trim();
   if (last.isGroup && (!cleanRaw || cleanRaw.length <= 4)) {
     const recentChatter = memory.recentGroupChatter ? memory.recentGroupChatter(key, 25) : [];
     const cutoff = Date.now() - 35000; // 35 秒内

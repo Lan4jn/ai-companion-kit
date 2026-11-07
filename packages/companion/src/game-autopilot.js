@@ -174,8 +174,10 @@ export class GameAutopilot {
           tools: true
         });
 
-        // 如果模型生成了有趣吐槽且不是纯空回复，且距上次通知超过 3 轮，发给老爸
-        if (res?.text && (this.roundCount - this.lastNotifyRound >= 4)) {
+        // 如果模型生成了有趣吐槽或截图，且距上次通知超过 2 轮（或首轮/含截图），发给老爸
+        const hasImage = res?.text && res.text.includes('[CQ:image');
+        const shouldNotify = res?.text && (this.roundCount === 1 || hasImage || (this.roundCount - this.lastNotifyRound >= 3));
+        if (shouldNotify) {
           const clean = res.text.replace(/【[^】]+】/g, '').trim();
           if (clean && this.bot && this.sessionKey) {
             this.bot.send(this.sessionKey, clean).catch(() => {});
