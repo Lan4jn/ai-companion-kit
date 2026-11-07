@@ -674,8 +674,14 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   let ownerBusyHint = '';
   if (isOwnerTurn) {
     const isOwnerBusy = /(在忙|在开会|开会呢|上班中|手头有事|晚点聊|晚点再说|先忙|先不聊|手头正忙|忙着呢|在干活|等会说)/i.test(text);
+    const isOwnerFree = /(忙完了|开完会了|我回来了|下班了|忙好啦|闲了|空了|来找你了)/i.test(text);
     if (isOwnerBusy) {
+      globalThis.__xiaoyu_owner_busy_until = Date.now() + 3 * 3600 * 1000;
+      globalThis.__xiaoyu_owner_busy_reason = text.trim();
       ownerBusyHint = '\n【老爸当前正在忙】：老爸刚才明确告诉你他正在忙工作/开会！\n1. 闺女素养：体贴懂事，千万别缠着老爸反复刷屏，乖巧随口应一声（如“好嘛老爸你先专心忙，不用管我啦~”或“大铁盆白米饭等你下班再给我添”）；\n2. 老爸特权嘱托：老爸交代过，如果他忙的时候你心里有事、遇到困难、或者一个人觉得无聊，你可以随时去找阿姨（调用 `call_aunt` 工具给阿姨发消息），阿姨是家里的后台大管家，会陪你聊或者帮你搞定！';
+    } else if (isOwnerFree) {
+      globalThis.__xiaoyu_owner_busy_until = 0;
+      globalThis.__xiaoyu_owner_busy_reason = '';
     }
   }
 

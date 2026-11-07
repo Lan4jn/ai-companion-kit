@@ -8,6 +8,7 @@
  * 发送前过一遍 loopGuard，防的是"卡在某个模式里反复找人"。
  */
 import { loopGuard } from './loop-guard.js';
+import { callAunt } from './dev-channel.js';
 
 let timer = null;
 let running = false;
@@ -51,6 +52,26 @@ async function thinkOnce() {
     if (d) diaryLine = `你最近在忙的事：\n${String(d).slice(0, 400)}\n\n`;
   } catch (e) {}
 
+  const isOwnerBusy = Boolean(globalThis.__xiaoyu_owner_busy_until && Date.now() < globalThis.__xiaoyu_owner_busy_until);
+  const ownerBusyReason = globalThis.__xiaoyu_owner_busy_reason || '工作/开会';
+
+  const busyDecisionBlock = isOwnerBusy
+    ? `【重要背景：老爸当前正在忙工作】（前不久老爸说：“${ownerBusyReason}”）。\n` +
+      `老爸在忙的时候体贴懂事，绝对不要去 QQ 私聊发消息打扰他！\n` +
+      `但老爸交代过：如果你一个人在房里觉得无聊、遇到什么搞不定的困难、或者想找人聊两句，你可以找家里的全能大管家「阿姨」（Hermes）！\n\n` +
+      `请做出选择（只输出 JSON）：\n` +
+      `- 找阿姨聊两句/求助：{"want": true, "target": "aunt", "text": "你想对阿姨说的话，10~50字随性口语", "why": "为什么找阿姨"}\n` +
+      `- 不想找任何人，继续自己发呆放空或摸鱼：{"want": false}`
+    : `想一想：这会儿有没有什么想跟家里人聊两句的？\n\n` +
+      `真人平时的日常选择：\n` +
+      `1. 找老爸聊两句：抛出由头、撒娇、分享搞笑视频、催添大白饭、问他在干嘛（“老爸”、“在忙不”、“好无聊啊啊啊”）。\n` +
+      `2. 找阿姨聊两句：遇到搞不懂的问题、想问技术/网络事情、想出主意给老爸准备惊喜、或者老爸没空时找阿姨唠嗑吐槽。\n` +
+      `3. 大部分时候是没什么特别想说的 —— 那就继续自己待着，绝不强行没话找话！\n\n` +
+      `只输出 JSON：\n` +
+      `- 不想找人：{"want": false}\n` +
+      `- 找老爸：{"want": true, "target": "dad", "text": "随口发给老爸的一句，3~20字"}\n` +
+      `- 找阿姨：{"want": true, "target": "aunt", "text": "想对阿姨说的一句话，10~50字", "why": "为什么找阿姨"}`;
+
   let out;
   try {
     out = await brain.reply({
@@ -60,19 +81,9 @@ async function thinkOnce() {
       text:
         `现在是 ${timeStr}。\n\n` +
         diaryLine +
-        (minutesSince !== null ? `上一次你主动找他说话是 ${minutesSince} 分钟前。\n\n` : '') +
+        (minutesSince !== null ? `上一次你主动找老爸说话是 ${minutesSince} 分钟前。\n\n` : '') +
         `你一个人在房里待着。\n` +
-        `想一想：这会儿有没有什么想跟老爸聊两句的？\n\n` +
-        `真人平时找人是怎么找的：\n` +
-        `- 抛出一个互动、由头或分享：比如刚看到个好玩的视频想吐槽、求老爸给大铁盆添饭、问他在干嘛、或者随口喊他一声（“老爸”、“在忙不”、“好无聊啊啊啊”）。\n` +
-        `- 绝不要机械汇报自己的生理/行为状态！严禁出现“零食吃完了，坐着发呆，有点无聊”、“我刚喝了水，现在在看手机”这种像 NPC 日志一样的冰冷自述！\n` +
-        `- 大部分时候是没什么想说的 —— 那就别说。\n\n` +
-        `别写成这样（写了就算失败）：\n` +
-        `- 像电子宠物一样向空气汇报自己的动作和姿态（“XX做完了，坐着发呆，有点XX”）\n` +
-        `- 客服式寒暄或硬塞 emoji\n\n` +
-        `只输出 JSON：\n` +
-        `- 不想：{"want": false}\n` +
-        `- 想：{"want": true, "text": "随口发过去的一句，3~20字。要像真人在发消息，可以有由头，可以撒娇，可以用逗号分小短句"}`,
+        busyDecisionBlock,
       images: [],
       situation: '你一个人待着，想想要不要找人说话',
       history: [],
@@ -98,12 +109,44 @@ async function thinkOnce() {
   }
 
   if (!j.want || !j.text) {
-    console.log('[主动] 这会儿没什么想说的');
+    console.log('[主动] 这会儿没什么想说的，继续自己待着');
     return;
   }
 
+  const target = String(j.target || 'dad').toLowerCase();
   const text = String(j.text).trim().slice(0, 150);
   if (!text) return;
+
+  // 1. 如果主动找阿姨
+  if (target === 'aunt') {
+    console.log(`[主动] 🧠 小鱼主动去找阿姨聊两句！原因: "${j.why || '无聊或想找阿姨'}" 内容: "${text}"`);
+    try {
+      const res = await callAunt({
+        message: text,
+        situation: j.why || (isOwnerBusy ? '老爸在忙工作，小鱼在房里无聊主动找阿姨' : '小鱼一个人待着主动找阿姨')
+      });
+      if (res && res.reply) {
+        console.log(`[主动] 阿姨回复了小鱼：${res.reply.slice(0, 60)}...`);
+        if (memory && typeof memory.logDiary === 'function') {
+          memory.logDiary({
+            category: '闲聊',
+            activity: '主动找阿姨聊天',
+            details: text,
+            mood: '老爸在忙，跑去找阿姨唠嗑了'
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[主动] 找阿姨失败:', e.message);
+    }
+    return;
+  }
+
+  // 2. 如果主动找老爸，但老爸在忙
+  if (isOwnerBusy) {
+    console.log(`[主动] 老爸正在忙（${ownerBusyReason}），体贴小鱼不打扰老爸`);
+    return;
+  }
 
   const gate = loopGuard.check(key, text);
   if (gate.block) {
