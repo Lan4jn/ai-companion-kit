@@ -120,6 +120,7 @@ export class Brain {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.llmFallbacks = Array.isArray(llmFallbacks) ? llmFallbacks : [];
+    this.providerCooldowns = new Map();
     this.vision = vision && vision.apiKey && vision.baseUrl && vision.model ? vision : null;
     this.visionFallback = visionFallback && visionFallback.apiKey && visionFallback.baseUrl && visionFallback.model ? visionFallback : null;
     // 主模型自己就能看图时，别再多绕一道「图→文字→判断」，细节会在转述里丢掉
@@ -129,6 +130,21 @@ export class Brain {
     this.role = role || new Role({ cardPath: 'role.md' });
     this.memory = memory || new Memory({ dir: './data' });
     this.dataDir = dataDir;
+  }
+
+  isProviderCooling(name) {
+    if (!name) return false;
+    const until = this.providerCooldowns.get(name);
+    if (!until) return false;
+    if (Date.now() < until) return true;
+    this.providerCooldowns.delete(name);
+    return false;
+  }
+
+  setProviderCooldown(name, ms = 60000) {
+    if (!name) return;
+    this.providerCooldowns.set(name, Date.now() + ms);
+    console.warn(`[Brain] 通道 [${name}] 触发熔断冷却，暂停使用 ${(ms / 1000).toFixed(0)} 秒`);
   }
 
   /**
@@ -488,6 +504,7 @@ export class Brain {
     let out = '';
     let lastMsg = null;
     let lastJson = null;
+    let activeProvIdx = -1;
 
     for (let round = 0; round < 3; round++) {
       // 构造三层降级提供商列表：[0] 主提供商 (opencode) -> [1] Gemini -> [2] ARK
@@ -501,9 +518,26 @@ export class Brain {
       let successMsg = null;
       let successJson = null;
 
-      for (let pIdx = 0; pIdx < providers.length; pIdx++) {
+      // 如果上一轮已经成功确定了健康的通道，后续工具轮次优先从该通道开始，避免重蹈前面通道挂起的耗时
+      const provIndices = [];
+      if (round > 0 && activeProvIdx >= 0 && activeProvIdx < providers.length) {
+        provIndices.push(activeProvIdx);
+        for (let i = 0; i < providers.length; i++) {
+          if (i !== activeProvIdx) provIndices.push(i);
+        }
+      } else {
+        for (let i = 0; i < providers.length; i++) provIndices.push(i);
+      }
+
+      for (const pIdx of provIndices) {
         const prov = providers[pIdx];
         if (!prov.baseUrl || !prov.apiKey) continue;
+
+        // 熔断过滤：非最后一个保底通道且在冷却期内，快速跳过，避免重复被挂起
+        if (this.isProviderCooling(prov.name) && pIdx < providers.length - 1) {
+          console.log(`[Brain] 通道 [${prov.name}] 仍处于熔断冷却中，快速跳过...`);
+          continue;
+        }
 
         const reqPayload = {
           model: prov.model,
@@ -521,12 +555,13 @@ export class Brain {
           hdrs['x-opencode-session'] = 'xiaoyu-main-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
         }
 
-        const maxAttempts = pIdx === 0 ? 3 : 2;
+        const maxAttempts = 2;
         let provSuccess = false;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           try {
-            const timeoutMs = attempt === 0 ? 25000 : 35000;
+            // 首试 15 秒足够，重试 22 秒
+            const timeoutMs = attempt === 0 ? 15000 : 22000;
             const res = await fetch(prov.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
               method: 'POST',
               headers: hdrs,
@@ -549,6 +584,7 @@ export class Brain {
             lastMsg = msg;
             lastError = null;
             provSuccess = true;
+            activeProvIdx = pIdx;
             if (pIdx > 0) {
               console.log(`[Brain] 降级通道 [${prov.name || prov.model}] 成功响应`);
             }
@@ -556,11 +592,19 @@ export class Brain {
           } catch (e) {
             lastError = e;
             const is429 = String(e.message).includes('429') || String(e.message).includes('capacity') || String(e.message).includes('overloaded');
+            if (is429) {
+              // 429 / overloaded 明确说明容量不足或排队，立即进入 45 秒熔断并快速降级，不长时间睡眠阻碍用户体验
+              this.setProviderCooldown(prov.name, 45000);
+              console.warn(`[Brain] [${prov.name || prov.model}] 上游容量不足/过载(429)，快速熔断并降级到下一通道...`);
+              break;
+            }
             if (attempt < maxAttempts - 1) {
-              const delayMs = is429 ? (attempt === 0 ? 3500 : 5000) : 1500;
+              const delayMs = 1200;
               console.warn(`[Brain] [${prov.name || prov.model}] 第 ${attempt + 1} 次请求异常(${e.message})，${delayMs}ms 后重试...`);
               await new Promise(r => setTimeout(r, delayMs));
             } else {
+              // 超时或其它错误达到最大重试次数，熔断冷却 60 秒
+              this.setProviderCooldown(prov.name, 60000);
               console.warn(`[Brain] [${prov.name || prov.model}] 达到最大重试次数，尝试降级到下一个通道...`);
             }
           }
