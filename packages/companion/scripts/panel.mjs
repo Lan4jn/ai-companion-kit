@@ -48,10 +48,50 @@ function bridgeAlive() {
 
 function moodSnapshot() {
   const j = readJson('mood.json');
-  if (!j?.byKey) return null;
+  let byKey = j?.byKey;
+  if (!byKey || typeof byKey !== 'object') {
+    const sess = readJson('session_moods.json') || {};
+    const moodKeyToTier = {
+      furious: 0, angry: 1, pout: 2, irritable: 1,
+      flat: 3, sleepy: 3, tired: 3, bored: 3,
+      good: 4, content: 4,
+      happy: 5, excited: 6
+    };
+    byKey = {
+      default: {
+        tier: 3,
+        cause: '今日基准心境：平静',
+        sinceAt: Date.now(),
+        updatedAt: Date.now(),
+        specials: []
+      }
+    };
+    if (j && typeof j === 'object') {
+      const daily = Object.values(j).find((v) => v && v.key && v.label);
+      if (daily) {
+        byKey.default.tier = moodKeyToTier[daily.key] ?? 3;
+        byKey.default.cause = `今日心境基线：${daily.label}`;
+        byKey.default.sinceAt = daily.at || Date.now();
+      }
+    }
+    const ownerUid = String(OWNER || '578021239').replace(/[^\d]/g, '');
+    for (const [sKey, sVal] of Object.entries(sess)) {
+      if (!sVal) continue;
+      const t = moodKeyToTier[sVal.key] ?? 3;
+      const isOwner = sKey.includes(ownerUid);
+      const k = isOwner ? `person:${ownerUid}` : sKey;
+      byKey[k] = {
+        tier: t,
+        cause: sVal.reason || sVal.label || sVal.key || '',
+        sinceAt: sVal.updatedAt || Date.now(),
+        updatedAt: sVal.updatedAt || Date.now(),
+        specials: t !== 3 ? [{ id: sVal.key === 'pout' ? '委屈' : '开心', cause: sVal.reason || '', strength: sVal.intensity || 1, leftMin: 60, ageMin: 0, sinceAt: sVal.updatedAt || Date.now() }] : []
+      };
+    }
+  }
   const now = Date.now();
   const pick = (key) => {
-    const m = j.byKey[key];
+    const m = byKey[key];
     if (!m) return null;
     const specials = (Array.isArray(m.specials) && m.specials.length ? m.specials : (m.special ? [m.special] : []))
       .map((s) => ({
@@ -76,7 +116,7 @@ function moodSnapshot() {
     };
   };
   const owner = pick(`person:${OWNER}`) || pick('default');
-  const others = Object.keys(j.byKey)
+  const others = Object.keys(byKey)
     .filter((k) => k !== `person:${OWNER}` && k !== 'default')
     .map((k) => ({ key: k, ...pick(k) }))
     .filter((x) => x.tier !== 3 || x.specials.length)
@@ -217,7 +257,11 @@ function noteRead(rel) {
  */
 function reasoningSnapshot() {
   try {
-    const lines = fs.readFileSync(path.join(STATE, 'bridge.log'), 'utf8').trim().split(/\r?\n/).slice(-800);
+    const file = path.join(STATE, 'bridge.log');
+    if (!fs.existsSync(file)) {
+      return { last: null, pushes: [], event: null, goal: null, llmCount: 0, ruleCount: 0 };
+    }
+    const lines = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).slice(-800);
     const pushes = [];
     let event = null, goal = null, ruleCount = 0, llmCount = 0;
     for (const line of lines) {
@@ -397,6 +441,9 @@ function doSet(kind, params) {
     const has = (k) => Object.prototype.hasOwnProperty.call(j.byKey, k);
     const ownerKey = 'person:' + String(OWNER || '');
     const target = (want && has(want)) ? want : (has(ownerKey) ? ownerKey : 'default');
+    if (!j.byKey[target]) {
+      j.byKey[target] = { tier: 3, cause: '', sinceAt: now, specials: [] };
+    }
     const keys = [target];
     let changed = 0;
     for (const k of keys) {
@@ -414,6 +461,25 @@ function doSet(kind, params) {
     }
     j.updatedAt = now;
     fs.writeFileSync(file, JSON.stringify(j, null, 2), 'utf8');
+
+    // 同步到小鱼的 session_moods.json，让私聊实时生效
+    try {
+      const sessFile = path.join(STATE, 'session_moods.json');
+      let sess = {};
+      try { sess = JSON.parse(fs.readFileSync(sessFile, 'utf8')); } catch {}
+      const tierToKey = { 0: 'irritable', 1: 'pout', 2: 'pout', 3: 'flat', 4: 'good', 5: 'happy', 6: 'happy' };
+      const ownerUid = String(OWNER || '578021239');
+      const sessKey = 'private:' + ownerUid;
+      sess[sessKey] = {
+        key: tierToKey[val] || 'flat',
+        reason: '面板手动调节为「' + TIER_NAMES[val] + '」',
+        intensity: val >= 5 || val <= 1 ? 2 : 1,
+        updatedAt: now,
+        turnsSinceUpdate: 0
+      };
+      fs.writeFileSync(sessFile, JSON.stringify(sess, null, 2), 'utf8');
+    } catch {}
+
     return { ok: true, changed, to: val };
   }
   return { ok: false, error: 'kind 只能是 virtue / mood' };

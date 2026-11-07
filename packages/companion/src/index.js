@@ -48,6 +48,15 @@ import { classifyMessage } from './conversation-closure.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+export function appendBridgeLog(dataDir, line) {
+  try {
+    const f = path.join(dataDir || './data', 'bridge.log');
+    const now = new Date();
+    const timeStr = [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+    fs.appendFileSync(f, `${timeStr} [bridge] ${line}\n`, 'utf8');
+  } catch {}
+}
+
 // ── 配置 ──────────────────────────────────────────────────────
 export function loadConfig(explicitPath) {
   const file = explicitPath || path.join(__dirname, '..', 'config.json');
@@ -151,8 +160,12 @@ async function main() {
   });
 
   // 初始化当日牌灵与德行十轴
-  tarotDailyTick(cfg.dataDir || './data', console.log);
+  tarotDailyTick(cfg.dataDir || './data', (m) => {
+    console.log(m);
+    appendBridgeLog(cfg.dataDir, m);
+  });
   readVirtue(path.join(cfg.dataDir || './data', 'virtue.json'));
+  appendBridgeLog(cfg.dataDir, `小鱼伴侣服务启动完成 (模型: ${cfg.model})`);
 
   const waker = new Waker({
     names: cfg.names,
@@ -280,7 +293,12 @@ async function main() {
 
       // 推动德行数轴（只由真实对话推动）
       if (msg.text) {
-        applyVirtueText(msg.text, { isOwner, file: path.join(cfg.dataDir || './data', 'virtue.json') });
+        const vRes = applyVirtueText(msg.text, { isOwner, file: path.join(cfg.dataDir || './data', 'virtue.json') });
+        if (vRes?.changed?.length) {
+          for (const ch of vRes.changed) {
+            appendBridgeLog(cfg.dataDir, `[德行] (规则) ${ch.name} ${ch.from}→${ch.to}｜${ch.why}`);
+          }
+        }
       }
 
       const verdict = waker.shouldWake(msg);
@@ -294,6 +312,8 @@ async function main() {
         }
         return;
       }
+
+      appendBridgeLog(cfg.dataDir, `[来信] 收到 [${msg.name}]：${msg.text.slice(0, 40)} (醒·${verdict.reason || 'owner'})`);
 
       // 关系账本：只有"冲她来的话"才记账，群友互相掐架不算
       rel.observe(msg.userId, msg.text || '', { isOwner });
@@ -726,6 +746,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
         },
       });
       console.log('   发出 ' + r.sent + ' 条：' + r.parts.map((p) => p.slice(0, 50)).join(' | '));
+      appendBridgeLog(cfg.dataDir, `[回复] 发出 ${r.sent} 条：${cleanOut.slice(0, 60)}`);
       try {
         setRoomState(null, { message: cleanOut.slice(0, 80), recentInput: text.slice(0, 20) });
       } catch {}
