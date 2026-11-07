@@ -21,7 +21,7 @@ function readStatus() {
 
 function daemonRunning() {
   try {
-    execSync('pgrep -f "node src/douyin-qr-daemon.js" > /dev/null 2>&1');
+    execSync('pgrep -f "[d]ouyin-qr-daemon.js" > /dev/null 2>&1');
     return true;
   } catch {
     return false;
