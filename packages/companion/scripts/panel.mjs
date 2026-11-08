@@ -730,14 +730,31 @@ function chatSnapshot() {
           .map((l) => { try { return JSON.parse(l); } catch { return null; } })
           .filter(Boolean);
         for (const t of raw) {
-          if (!t || !t.where || (!t.where.startsWith('private') && !t.where.includes('578021239'))) continue;
+          if (!t || !t.where) continue;
+          const isDadQQ = t.where === 'private:578021239' || t.where === 'user:578021239' || t.where.includes('578021239');
+          const isDadBili = t.where === 'private:bili:53374723' || (t.where.startsWith('private:bili:') && t.where.includes('53374723'));
+          if (!isDadQQ && !isDadBili) continue;
+
           const time = Number(t.t) || Date.now();
-          if (t.text) {
-            let clean = t.text.replace(/^[^\s：:]+[（(][^）)]+[）)][：:]\s*/, '').replace(/^[^\s：:]+[：:]\s*/, '').trim();
-            rows.push({ dir: 'in', text: clean || t.text, at: time });
-          }
-          if (t.reply) {
-            rows.push({ dir: 'out', text: t.reply, at: time + 600 });
+          const channel = isDadBili ? 'bili' : 'qq';
+          const isXiaoyu = t.who === '小鱼' || t.who === '自己' || t.who === 'self';
+
+          if (isXiaoyu) {
+            // 小鱼主动发给老爸的消息（如主动私聊、B站分享二创等） -> 小鱼发送（左侧）
+            if (t.text) {
+              let clean = t.text.replace(/^[^\s：:]+[（(][^）)]+[）)][：:]\s*/, '').replace(/^[^\s：:]+[：:]\s*/, '').trim();
+              rows.push({ dir: 'out', text: clean || t.text, at: time, channel });
+            }
+          } else {
+            // 老爸发来的消息 -> 老爸发言（右侧）
+            if (t.text) {
+              let clean = t.text.replace(/^[^\s：:]+[（(][^）)]+[）)][：:]\s*/, '').replace(/^[^\s：:]+[：:]\s*/, '').trim();
+              rows.push({ dir: 'in', text: clean || t.text, at: time, channel });
+            }
+            // 小鱼对老爸的回复 -> 小鱼发言（左侧）
+            if (t.reply) {
+              rows.push({ dir: 'out', text: t.reply, at: time + 600, channel });
+            }
           }
         }
       }
@@ -1457,7 +1474,7 @@ function bindChatInput(){
 function renderChat(c){
   if(CHAT_CLEARING) return;
   const box=el('chat'); if(!box) return;
-  const head='<div class="phonewrap"><div class="phone"><div class="pbar"><b>大肥鱼</b><span>QQ私聊</span><i class="dotlive"></i></div>';
+  const head='<div class="phonewrap"><div class="phone"><div class="pbar"><b>大肥鱼</b><span>私聊 · 真实收发</span><i class="dotlive"></i></div>';
   const foot='<div class="pinput"><input id="chatInput" placeholder="给小鱼发消息（回车发送）..." autocomplete="off"><button id="chatSendBtn">发送</button></div></div></div>';
   if(!c||!c.rows.length){ box.innerHTML=head+'<div class="screen" id="chatScreen"><div class="empty" style="padding:14px">还没有聊天记录</div></div>'+foot; bindChatInput(); return; }
   const rows=c.rows;
@@ -1465,8 +1482,9 @@ function renderChat(c){
   const atBottom = scr ? (scr.scrollHeight - scr.scrollTop - scr.clientHeight < 40) : true;
   const bubbles = rows.map(r=>{
     const fish = r.dir==='out';
-    return '<div class="msg '+(fish?'fish':'me')+'"><div class="b">'+esc(r.text)+'</div>'
-      +'<span class="t">'+chatTime(r.at)+'</span></div>';
+    const tag = r.channel === 'bili' ? '<span class="ch-tag bili" style="display:inline-block;font-size:10px;padding:1px 5px;margin-right:5px;border-radius:3px;background:rgba(251,114,153,.2);color:#fb7299;vertical-align:middle;font-weight:600">B站私信</span>' : '';
+    return '<div class="msg '+(fish?'fish':'me')+'"><div class="b">'+tag+esc(r.text)+'</div>'
+      +'<span class="t">'+(r.channel === 'bili' ? 'B站 · ' : '')+chatTime(r.at)+'</span></div>';
   }).join('');
   if(!scr){
     box.innerHTML=head+'<div class="screen" id="chatScreen">'+bubbles+'</div>'+foot;
