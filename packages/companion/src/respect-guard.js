@@ -14,28 +14,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const STRIKE_DECAY_MS = 7 * 24 * 60 * 60 * 1000;
-const DISLIKE_LEVELS = ['尴尬', '非常尴尬', '讨厌'];
+const DISLIKE_LEVELS = ['尴尬', '非常尴尬', '不悦', '严重警告', '讨厌'];
 
 // 性骚扰 / 越界：宁可漏判，不要误伤正常聊天。
 const HARASS_PATTERNS = [
   /性骚扰/, /约炮/, /开房/, /上床/, /睡(?:你|我|一下)/, /脱(?:光|衣|裤|了)/, /裸(?:照|聊|体|奔)/,
-  /胸(?:照|大不大|小不小)/, /摸(?:你|我|一下)/, /亲(?:你|我)(?:一下|一口)?/, /舔/,
+  /胸(?:照|大不大|小不小)/, /摸(?:你|我)(?:一下)?/, /亲(?:你|我)(?:一下|一口)?/, /舔(?:你|我)(?:一下|一口)?/,
   /操你|干你|日你|上你|强(?:奸|上)/, /骚(?:货|逼|一点|一点嘛)/, /发情/, /母狗/, /婊子?/, /贱货/,
   /包养|多少钱一晚|陪睡|约(?:吗|一炮)/,
   // 2026-10-30 实测漏判补齐：那人改用这些说法连续骚扰，旧词表一条都没命中。
-  /(?:看看|看|给我看|发给我看|我看看|展示)[^。！？\n]{0,8}(?:逼|腿|胸|奶|下面|私处|裸|身体|照片)/,
-  /小?逼(?:逼)?(?:是|什么|颜色|照|图)?/, /你的逼/, /看看腿|看(?:看)?(?:你|我)的腿/,
-  /满足你|哥哥(?:可以|来)|发给我看看|给我看看吧/,
+  /(?:给我看|发给我看|展示)[^。！？\n]{0,8}(?:逼|腿|胸|奶|下面|私处|裸|身体|照片)/,
+  /小?逼(?:逼)?(?:是|什么|颜色|照|图)?/, /你的逼/, /看看你的腿/,
+  /满足你|哥哥(?:可以|来)/,
   /色情|做爱|自慰|撸管|口交|射(?:你|我|脸上)/,
 ];
 
 // 软化词：已经警告过的人，再用这些继续纠缠，也算加档（被制止了还接着要）
 const PERSIST_PATTERNS = [/给我看|发给我|看看你|让我看|可以满足|充.{0,3}token|钱管够|我有的是钱/];
 
-// 纯粹的辱骂 / 侮辱
+// 纯粹的辱骂 / 侮辱（必须是针对本人的恶劣攻击，日常口癖与调侃放宽）
 const INSULT_PATTERNS = [
-  /傻逼|煞笔|沙比/, /脑残/, /智障/, /去死/, /滚(?:开|蛋|出去)?/, /贱人/, /狗东西/, /废物/,
-  /你算什么东西/, /垃圾(?:东西|玩意)?/,
+  /你(?:真|太)?(?:是|个)?(?:傻逼|煞笔|沙比)/,
+  /去死吧|给你一拳|打死你/,
+  /滚(?:远点|开|蛋|出去)/,
+  /你算什么东西/,
+  /(?:真|太)垃圾了你/,
 ];
 
 const UNLOCK_RE = /(?:不要|别|不用|停止)讨厌|解除讨厌|解除标记|原谅(?:他|她|ta|TA|那个人)|别记恨/;
@@ -181,12 +184,15 @@ export function createRespectGuard({ file, log = () => {}, ownerUin = () => '' }
     }
     if (!kindHit) return { blocked: false };
 
-    // 一周没再犯，次数清零
-    if (user.strikes > 0 && now - user.lastAt > STRIKE_DECAY_MS) user.strikes = 0;
+    // 一周没再犯，次数清零；即使曾经被标记讨厌，老爸认为不能终身监禁，一周不犯案也清零
+    if (user.strikes > 0 && now - user.lastAt > STRIKE_DECAY_MS) {
+      user.strikes = 0;
+      user.disliked = false;
+    }
 
     const strikes = user.strikes + 1;
-    const level = strikes >= 3 ? '讨厌' : DISLIKE_LEVELS[strikes - 1];
-    const disliked = strikes >= 3;
+    const level = strikes >= 5 ? '讨厌' : DISLIKE_LEVELS[strikes - 1];
+    const disliked = strikes >= 5;
     const next = {
       name: displayName || user.name,
       strikes,
@@ -194,7 +200,7 @@ export function createRespectGuard({ file, log = () => {}, ownerUin = () => '' }
       firstAt: user.firstAt || now,
       lastAt: now,
       disliked: user.disliked || disliked,
-      // 一旦到过「讨厌」，永久留痕（解除后也不清）
+      // 达到 5 次真正进入讨厌阶段
       everDisliked: user.everDisliked || disliked,
       reason: kindHit,
     };
@@ -203,7 +209,7 @@ export function createRespectGuard({ file, log = () => {}, ownerUin = () => '' }
 
     if (next.disliked) {
       pending.delete(key);
-      try { log(`[尊重] ${uid}（${next.name || '陌生人'}）第 ${strikes} 次越界 → 永久讨厌，不再回应`); } catch {}
+      try { log(`[尊重] ${uid}（${next.name || '陌生人'}）第 ${strikes} 次越界 → 讨厌，进入冷静期不再回应`); } catch {}
       return { blocked: true, notice: { level: 'blocked', userId: uid, name: next.name, strikes }, mood: '非常尴尬' };
     }
 
@@ -211,8 +217,8 @@ export function createRespectGuard({ file, log = () => {}, ownerUin = () => '' }
     try { log(`[尊重] ${uid}（${next.name || '陌生人'}）第 ${strikes} 次越界 → ${level}`); } catch {}
     return {
       blocked: false,
-      notice: { level: strikes === 1 ? 'gentle' : 'firm', userId: uid, name: next.name, strikes },
-      mood: strikes === 1 ? '尴尬' : '非常尴尬',
+      notice: { level: strikes <= 2 ? 'gentle' : 'firm', userId: uid, name: next.name, strikes },
+      mood: strikes <= 2 ? '尴尬' : '非常尴尬',
     };
   }
 

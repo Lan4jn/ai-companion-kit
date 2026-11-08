@@ -283,40 +283,33 @@ async function main() {
 
       const isOwner = cfg.ownerIds.includes(msg.userId);
 
-      // 尊重守卫检查：被拉黑者直接物理拦截，不再唤醒或回应
-      const respectVerdict = respectGuard.handleIncoming({
-        key: msg.key,
-        kind: msg.isGroup ? 'group' : 'private',
-        userId: msg.userId,
-        isOwner,
-        text: msg.text,
-        displayName: msg.name,
-      });
-      if (respectVerdict.blocked) {
-        return;
-      }
-
-      // 推动德行数轴（只由真实对话推动）
-      if (msg.text) {
-        const vRes = applyVirtueText(msg.text, { isOwner, file: path.join(cfg.dataDir || './data', 'virtue.json') });
-        if (vRes?.changed?.length) {
-          for (const ch of vRes.changed) {
-            appendBridgeLog(cfg.dataDir, `[德行] (规则) ${ch.name} ${ch.from}→${ch.to}｜${ch.why}`);
-          }
-        }
-      }
-
       // 提取用户真实手打的有效文字（剥离【引用 ...】前缀和 [CQ:at,...] 艾特标签）
       const userTypedText = String(msg.text || '')
         .replace(/^【引用\s+[^】]+】\s*/s, '')
         .replace(/\[CQ:at,[^\]]+\]/g, '')
         .trim();
 
-      // 检查当前用户是否已有正在排队等待的合并窗口，或处于活跃对话跟聊期（15秒内追加发言无需再@）
+      // 判断这条消息是否属于明确针对小鱼的互动（私聊、被@、被引用、叫名字、或者处于跟小鱼的连续跟聊期）
       const batchKey = msg.isGroup ? `${msg.key}:${msg.userId}` : msg.key;
       const isWaitingBatch = pending.has(batchKey);
       const activeUntil = activeFollowupWindows.get(batchKey) || 0;
       const isRecentFollowup = Date.now() < activeUntil;
+      const isDirectInteraction = !msg.isGroup || Boolean(msg.isAtMe || msg.isQuoteMe || msg.isPoke) || isWaitingBatch || isRecentFollowup;
+
+      // 尊重守卫检查：
+      // 1. 如果已被拉黑，直接物理拦截已读不回
+      // 2. 如果是群聊闲聊路过（并未针对小鱼对话），严禁将群友吹水互怼当作对小鱼的不敬！只有明确冲小鱼说的手打文字才判定违规
+      const respectVerdict = respectGuard.handleIncoming({
+        key: msg.key,
+        kind: msg.isGroup ? 'group' : 'private',
+        userId: msg.userId,
+        isOwner,
+        text: isDirectInteraction ? userTypedText : '',
+        displayName: msg.name,
+      });
+      if (respectVerdict.blocked) {
+        return;
+      }
       const isContinuation = isWaitingBatch || isRecentFollowup;
 
       let verdict = waker.shouldWake(msg);
@@ -334,6 +327,16 @@ async function main() {
           }
         }
         return;
+      }
+
+      // 推动德行数轴（只由明确对话小鱼的内容推动）
+      if (userTypedText) {
+        const vRes = applyVirtueText(userTypedText, { isOwner, file: path.join(cfg.dataDir || './data', 'virtue.json') });
+        if (vRes?.changed?.length) {
+          for (const ch of vRes.changed) {
+            appendBridgeLog(cfg.dataDir, `[德行] (规则) ${ch.name} ${ch.from}→${ch.to}｜${ch.why}`);
+          }
+        }
       }
 
       // 只要触发了唤醒，刷新该用户在该会话的 15 秒活跃跟聊窗口
