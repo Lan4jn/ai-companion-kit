@@ -173,6 +173,46 @@ function motiveMeta() {
 }
 
 function motiveSnapshot() {
+  const gd = readJson('goals-desires.json');
+  if (gd && (gd.lifeGoals || gd.activeDesires)) {
+    const list = [];
+    if (Array.isArray(gd.lifeGoals)) {
+      for (const g of gd.lifeGoals) {
+        list.push({
+          type: 'life',
+          goal: g.title,
+          progress: Number(g.progress) || 0,
+          max: Number(g.max) || 100,
+          how: `长期愿景 · 当前进度 ${g.progress}%`,
+          done: '达成度 100% 时毕业',
+          target: '老爸与鱼生愿景',
+        });
+      }
+    }
+    const envNames = {
+      dm_owner: '私聊老爸',
+      group: 'QQ 群聊',
+      douyin: '抖音短视频',
+      bilibili: 'B 站社区',
+      web: '全网吃瓜',
+      idle: '摸鱼放空',
+    };
+    if (gd.activeDesires && typeof gd.activeDesires === 'object') {
+      for (const [env, d] of Object.entries(gd.activeDesires)) {
+        if (!d || !d.title) continue;
+        list.push({
+          type: 'desire',
+          env: envNames[env] || env,
+          goal: d.title,
+          how: d.strategy || '随机应变',
+          done: '持续活跃中',
+          target: envNames[env] || env,
+        });
+      }
+    }
+    return list;
+  }
+
   const j = readJson('motive.json');
   const goals = Array.isArray(j?.goals) ? j.goals : [];
   const now = Date.now();
@@ -303,7 +343,7 @@ function logTail(n = 12) {
 /** 各状态文件的"数据多旧"（毫秒），面板上直接标出来 */
 function fileAges() {
   const out = {};
-  for (const f of ['mood.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'focus.json', 'bridge.log']) {
+  for (const f of ['mood.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'goals-desires.json', 'focus.json', 'bridge.log']) {
     try { out[f] = Math.max(0, Date.now() - fs.statSync(path.join(STATE, f)).mtimeMs); }
     catch { out[f] = null; }
   }
@@ -2146,19 +2186,49 @@ function renderVirtue(v,files,reasoning,tarot){
 }
 function renderMotives(list, meta, files){
   let head='';
+  const totalCount = (list||[]).length;
   if(meta){
     head='<div class="sub" style="margin-bottom:8px">注意力 '+(meta.focus*100).toFixed(0)+'%（'+esc(meta.label)+'）'
       +'　最多同时惦记 '+meta.cap+' 件'
       +'　目的寿命 ×'+meta.ttlFactor
-      +'　<span style="color:'+((list||[]).length>=meta.cap?'var(--warn)':'var(--dim)')+'">活着 '+(list||[]).length+' 件</span></div>';
+      +'　<span style="color:var(--accent);font-weight:600">活跃目标 '+totalCount+' 件</span></div>';
   }
-  head+=freshLine(files,'motive.json','目的');
-  if(!list||!list.length) return el('motives').innerHTML=head+'<div class="empty">现在没有活着的目</div>';
-  const cap=meta?meta.cap:null;
-  const over=(cap!=null && list.length>cap)?'，超出 '+ (list.length-cap) +' 件，正按注意力裁':'';
-  el('motives').innerHTML=head+'<ul>'+list.map(g=>'<li><div class="t">'+esc(g.goal)+'</div><div class="m">怎么干：'+esc(g.how||'—')+'</div><div class="m">算完：'+esc(g.done||'—')+(g.target?'　对：'+esc(g.target):'')+(g.leftMin!=null?'　还剩 '+mins(g.leftMin):'')+'</div></li>').join('')+'</ul>'
-    +'<div class="motiveFoot">共 '+list.length+' 件'+(cap!=null?' · 注意力上限 '+cap+' 件'+over:'')+' · 目的寿命 ×'+(meta?meta.ttlFactor:'—')
-    +'<br>两条线各记各的账：情绪线带对象、德行线不指向谁</div>';
+  head += freshLine(files,'goals-desires.json','欲望与目标') || freshLine(files,'motive.json','目的');
+  if(!list||!list.length) return el('motives').innerHTML=head+'<div class="empty">现在没有活跃的目的</div>';
+
+  const lifeGoals = list.filter(x => x.type === 'life');
+  const desires = list.filter(x => x.type === 'desire');
+  const others = list.filter(x => x.type !== 'life' && x.type !== 'desire');
+
+  let body = '';
+  if(lifeGoals.length){
+    body += '<div style="font-size:11.5px;color:#e3b341;font-weight:600;margin:8px 0 4px">🌟 宏观鱼生愿景</div><ul>';
+    body += lifeGoals.map(g => {
+      const pct = Math.round((g.progress / (g.max || 100)) * 100);
+      return '<li><div class="t" style="display:flex;justify-content:space-between;align-items:center">'
+        +'<span>'+esc(g.goal)+'</span>'
+        +'<span style="color:#e3b341;font-weight:600;font-size:11px">'+pct+'%</span></div>'
+        +'<div style="background:#0d1117;height:4px;border-radius:2px;margin:4px 0 5px;overflow:hidden">'
+        +'<div style="width:'+pct+'%;height:100%;background:linear-gradient(90deg, #39d0a8, #e3b341)"></div></div>'
+        +'<div class="m" style="font-size:11px;color:#8b949e">'+esc(g.how)+'</div></li>';
+    }).join('') + '</ul>';
+  }
+
+  if(desires.length){
+    body += '<div style="font-size:11.5px;color:#39d0a8;font-weight:600;margin:10px 0 4px">🎯 各场景环境活跃欲望与小心机</div><ul>';
+    body += desires.map(d => {
+      return '<li><div class="t"><span class="badge" style="background:rgba(57,208,168,.15);color:#39d0a8;border:1px solid rgba(57,208,168,.3);margin-right:6px">'+esc(d.env||'场景')+'</span>'+esc(d.goal)+'</div>'
+        +'<div class="m" style="margin-top:4px;color:#a9b4c0">战术心机：'+esc(d.how)+'</div></li>';
+    }).join('') + '</ul>';
+  }
+
+  if(others.length){
+    body += '<ul>' + others.map(g=>'<li><div class="t">'+esc(g.goal)+'</div><div class="m">怎么干：'+esc(g.how||'—')+'</div><div class="m">算完：'+esc(g.done||'—')+(g.target?'　对：'+esc(g.target):'')+(g.leftMin!=null?'　还剩 '+mins(g.leftMin):'')+'</div></li>').join('') + '</ul>';
+  }
+
+  el('motives').innerHTML = head + body
+    +'<div class="motiveFoot" style="margin-top:10px;font-size:11px;color:#6e7681;border-top:1px solid #232b36;padding-top:6px">'
+    +'小鱼环境欲望引擎实时自适应中 · 随老爸私聊/群聊/吃瓜动态自适应演化</div>';
 }
 function renderFocus(f){
   if(!f) return el('focus').innerHTML='<div class="empty">读不到 focus.json</div>';
