@@ -76,8 +76,16 @@ function segsToText(segs, depth = 0, selfId = '', nameCache = null) {
         }
         break;
       }
-      case 'image':
-        out.push('[图片]');
+      case 'image': {
+        const isSticker = Number(s.data?.sub_type ?? s.data?.subType ?? 0) === 1 ||
+                          String(s.data?.file || '').toLowerCase().includes('.gif') ||
+                          Boolean(s.data?.is_animated) ||
+                          Number(s.data?.face_type ?? s.data?.faceType ?? 0) > 0;
+        out.push(isSticker ? '[表情包]' : '[图片]');
+        break;
+      }
+      case 'mface':
+        out.push('[表情包]');
         break;
       case 'face':
         out.push('[表情]');

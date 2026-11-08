@@ -540,7 +540,8 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   }
 
   // 前文回溯补偿：处理“先发大段文字，紧接着发 @ 唤醒”的经典群聊习惯
-  if (last.isGroup && (!cleanRaw || cleanRaw.length <= 4)) {
+  // 必须满足：当前这条消息是专门 @ 小鱼的唤醒消息（last.isAtMe），且没有多余文字（如单发@）
+  if (last.isGroup && last.isAtMe && (!cleanRaw || cleanRaw.length <= 4)) {
     const recentChatter = memory.recentGroupChatter ? memory.recentGroupChatter(key, 25) : [];
     const cutoff = Date.now() - 35000; // 35 秒内
     const prevMsg = recentChatter.slice().reverse().find(r => 
@@ -549,6 +550,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       r.text &&
       r.text.trim() &&
       !r.text.startsWith('[@') &&
+      !r.text.includes('[@小鱼]') &&
       r.text.replace(/^【引用\s+[^】]+】/gs, '').replace(/\[CQ:at,[^\]]+\]/g, '').trim().length > 4
     );
     if (prevMsg && prevMsg.text) {
@@ -568,7 +570,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   const images = items.flatMap((m) => m.images || []).filter(Boolean);
 
-  // 区分普通图片与表情包（sub_type=1 或 mface）
+  // 区分普通图片与表情包（sub_type=1 或 mface 或动图 或 <faceType=）
   const stickerUrls = [];
   const stickerImageUrls = [];   // sub_type=1 或 mface 的图：既是"表情包"，也是画面，必须让视觉模型能读懂真实含义
   let stickerCount = 0;
@@ -576,14 +578,26 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     if (!Array.isArray(m.raw)) continue;
     for (const s of m.raw) {
       if (!s) continue;
-      const isStickerImg = s.type === 'image' && Number(s.data?.sub_type) === 1;
-      const isMface = s.type === 'mface';
-      if (!isStickerImg && !isMface) continue;
+      const isStickerImg = (s.type === 'image' && (
+        Number(s.data?.sub_type ?? s.data?.subType ?? 0) === 1 ||
+        String(s.data?.file || '').toLowerCase().includes('.gif') ||
+        Boolean(s.data?.is_animated) ||
+        Number(s.data?.face_type ?? s.data?.faceType ?? 0) > 0
+      )) || s.type === 'mface';
+      if (!isStickerImg) continue;
       stickerCount++;
       if (s.data?.url) {
         stickerUrls.push(String(s.data.url));
         stickerImageUrls.push(String(s.data.url));
       }
+    }
+  }
+  // 补充识别：消息中包含 QQ 动画大表情/商城表情（<faceType= 或 <mface）
+  if (/<faceType=\d+/i.test(String(rawBatchText || '')) || /<mface/i.test(String(rawBatchText || ''))) {
+    stickerCount++;
+    for (const img of images) {
+      if (!stickerUrls.includes(img)) stickerUrls.push(img);
+      if (!stickerImageUrls.includes(img)) stickerImageUrls.push(img);
     }
   }
 
@@ -622,9 +636,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
   const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
   const cleanTargetText = String(text || '').replace(/^.*?（你的(?:爸爸|老爸|女儿|主人)）[：:]\s*/s, '').replace(/^.*?[：:]\s*/s, '').trim();
-  const targetDesc = cleanTargetText === '[图片]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
+  const targetDesc = cleanTargetText === '[图片]' || cleanTargetText === '[表情包]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
   const targetPrompt = last.isGroup
-    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）${targetDesc}。【沈鲸式网感与风格指令】：仔细对标前文活人群友“沈鲸”！直接亮态度吐槽，绝不做阅读理解复述长句。遇到离谱事可扣「？」起手吐槽；随手打字（2~12字）或输出一两句短金句（<=25字）；可配合情绪换行附带 [表情包: 情绪]！`
+    ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）${targetDesc}。【群聊活人说话法则】：极简碎口、接地气大白话！想到什么敲几个字（2~10字极简碎句），绝不写工整对称的对仗排比，绝不刻意编造相声金句八股；严禁每句开头都机械带「？」！日常多用自然汉字随手吐槽接茬；可配合情绪附带 [表情包: 情绪]！`
     : `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`;
   const isSpicyGroup = (key === 'group:1131460772' || (last.isGroup && String(last.groupId || '').includes('1131460772')));
   const myCard = last.myGroupCard || '';
@@ -652,7 +666,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
           + '  - 嘲讽反问击溃：“你急什么啊？踩到你痛处了？”、“笑死，菜就多练，在这硬洗什么呢？”、“搁这装什么懂哥，自己几斤几两没点数？”。\\n'
           + '  - 短句连珠炮狂轰：吵架时绝不长篇大论，直接用2~3句短促有力的话把对方怼死（如：“真蚌埠住了。少来沾边。人机赶紧爬。”）。\\n'
           + '  - 严禁任何小说剧本式的动作描写括号（如「（冷笑）」、「（双手叉腰）」等一律严禁），纯粹用真人群友打字对喷的真实大白话！'
-        : '你在一个 QQ 群里。群消息里标有「（你的爸爸）」的就是你养父老爸（QQ: 578021239），无论他在群里改什么搞怪群昵称（比如改名“群姐夫”反串玩梗），你都要认得他、叫他老爸/爸爸。群里常说的“姐夫”和“炸弹机”指的是群主(1229292008)现实里被亲姐夫配了135块电源+翻新2060坑惨的名场面，绝不能把老爸当成坑人的真姐夫。群聊说话风格：深度学习模仿同群高活人感群友“沈鲸”，极简随性、抓痛点、给图片配内心戏、灵魂「？」起手，随口吐槽或接一句极简大白话即可，绝不写长篇大论，绝不机械复述对方的话。群聊里如果问到“谁的小鱼/谁的鱼”，只要不是明确涉及到你老爸（比如不是老爸说的、也没@老爸问“你的小鱼”），你都要清楚对方是在聊别人家的小鱼、不是在说你，绝不用自作多情认领。遇到新游戏发售、实时新闻或你拿不准的客观事实，自主调用 web_search 查清后再回答，绝不要凭空瞎编或嘴硬。')
+        : '你在一个 QQ 群里。群消息里标有「（你的爸爸）」的就是你养父老爸（QQ: 578021239），无论他在群里改什么搞怪群昵称（比如改名“群姐夫”反串玩梗），你都要认得他、叫他老爸/爸爸。群里常说的“姐夫”和“炸弹机”指的是群主(1229292008)现实里被亲姐夫配了135块电源+翻新2060坑惨的名场面，绝不能把老爸当成坑人的真姐夫。群聊说话风格：深度学习模仿同群高活人感群友“沈鲸”，极简随性、抓痛点、口语碎句（2~10字为主），随手吐槽或接一句极简大白话即可，严禁每句开头机械加「？」，绝不搞工整对称的金句相声八股，绝不写长篇大论，绝不机械复述对方的话。群聊里如果问到“谁的小鱼/谁的鱼”，只要不是明确涉及到你老爸（比如不是老爸说的、也没@老爸问“你的小鱼”），你都要清楚对方是在聊别人家的小鱼、不是在说你，绝不用自作多情认领。遇到新游戏发售、实时新闻或你拿不准的客观事实，自主调用 web_search 查清后再回答，绝不要凭空瞎编或嘴硬。')
     : '你在跟你的养父老爸 ' + last.name + ' 私聊。')
     + targetPrompt
     + myCardLine
