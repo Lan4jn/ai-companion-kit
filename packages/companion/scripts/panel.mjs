@@ -40,6 +40,13 @@ const readJson = (name) => {
   try { return JSON.parse(fs.readFileSync(path.join(STATE, name), 'utf8').replace(/^\uFEFF/, '')); }
   catch { return null; }
 };
+const readJsonl = (name) => {
+  try {
+    return fs.readFileSync(path.join(STATE, name), 'utf8')
+      .trim().split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+};
 const MIN = 60000;
 
 function bridgeAlive() {
@@ -259,27 +266,148 @@ function motiveSnapshot() {
 }
 
 function focusSnapshot() {
-  const j = readJson('focus.json');
-  if (!j) return null;
+  const j = readJson('focus.json') || {};
   const now = Date.now();
+  const act = readJson('current-activity.json');
+  let platform = j.platform || 'QQ / 虚拟居室';
+  let current = j.current || '在线陪伴与生活';
+  let sinceMin = j.sinceAt ? Math.round((now - Number(j.sinceAt)) / MIN) : null;
+  let errand = j.errand ? {
+    what: String(j.errand.what || j.errand.goal || ''),
+    ageMin: j.errand.touchAt ? Math.round((now - Number(j.errand.touchAt)) / MIN) : null,
+  } : null;
+
+  if (act && act.at && (now - act.at < 3600 * 1000)) {
+    if (act.type === 'bili') {
+      platform = 'Bilibili / 浏览器';
+      current = `看视频《${act.title}》（UP主: ${act.up}）`;
+      errand = {
+        what: `摸鱼观看中（进度 ${act.watched}s / ${act.duration}s）`,
+        ageMin: Math.round((now - act.at) / MIN),
+      };
+    } else if (act.type === 'douyin') {
+      platform = '抖音 / 手机短视频';
+      current = '刷热门短视频与生活动态';
+      errand = {
+        what: '巡逻评论区与潜水互动',
+        ageMin: Math.round((now - act.at) / MIN),
+      };
+    }
+  }
+
   return {
-    platform: String(j.platform || ''),
-    current: j.current || '',
-    sinceMin: j.sinceAt ? Math.round((now - Number(j.sinceAt)) / MIN) : null,
-    errand: j.errand ? {
-      what: String(j.errand.what || j.errand.goal || ''),
-      ageMin: j.errand.touchAt ? Math.round((now - Number(j.errand.touchAt)) / MIN) : null,
-    } : null,
+    platform,
+    current,
+    sinceMin,
+    errand,
   };
 }
 
 function intentSnapshot() {
+  const now = Date.now();
+  const out = [];
+
+  // 1. 群聊延迟发送队列（真正的待办发言意图）
+  const outbox = readJson('outbox.json');
+  if (Array.isArray(outbox?.pending)) {
+    for (const item of outbox.pending) {
+      if (!item) continue;
+      out.push({
+        badge: '队列待发',
+        badgeColor: '#e3b341',
+        text: `“${item.text || ''}”`,
+        target: `准备发往群 ${item.gid || ''}`,
+        at: item.queuedAt || now,
+      });
+    }
+  }
+
+  // 2. 当前活动衍生出的即时生活意图
+  const act = readJson('current-activity.json');
+  if (act && act.at && (now - act.at < 3600 * 1000)) {
+    if (act.type === 'bili') {
+      out.push({
+        badge: '生活意图',
+        badgeColor: '#58a6ff',
+        text: `把《${act.title}》看完并随手发条弹幕`,
+        target: `B站 · UP: ${act.up}`,
+        at: act.at,
+      });
+    } else if (act.type === 'douyin') {
+      out.push({
+        badge: '生活意图',
+        badgeColor: '#d2a8ff',
+        text: '在抖音评论区抓一条离谱神评',
+        target: '抖音短视频推荐流',
+        at: act.at,
+      });
+    }
+  }
+
+  // 3. 提给老爸审批的新功能需求待办
+  const reqs = readJsonl('dev-requests.jsonl');
+  const merged = new Map();
+  for (const rec of reqs) {
+    if (!rec.id) continue;
+    const prev = merged.get(rec.id);
+    if (!prev) merged.set(rec.id, { ...rec });
+    else merged.set(rec.id, { ...prev, ...rec, title: rec.title || prev.title, detail: rec.detail || prev.detail, status: rec.status || prev.status });
+  }
+  const pendingReqs = [...merged.values()].filter((r) => r.status === 'pending');
+  for (const r of pendingReqs.slice(-2)) {
+    out.push({
+      badge: '心愿待审批',
+      badgeColor: '#d2a8ff',
+      text: `${r.title}（${r.detail || r.why || ''}）`,
+      target: '等待老爸审批中',
+      at: r.at || now,
+    });
+  }
+
+  // 4. 读取持久化的 intents.json（如果用户或系统写入过）
   const j = readJson('intents.json');
   const list = Array.isArray(j) ? j : (Array.isArray(j?.intents) ? j.intents : []);
-  return list.filter((x) => x && !x.doneAt && !x.canceledAt).slice(-5).map((x) => ({
-    text: String(x.say || x.text || x.why || x.kind || ''),
-    target: String(x.targetKey || x.target || ''),
-  }));
+  for (const x of list.filter((x) => x && !x.doneAt && !x.canceledAt)) {
+    const txt = String(x.say || x.text || x.why || x.kind || '');
+    if (!txt || out.some((it) => it.text.slice(0, 8) === txt.slice(0, 8))) continue;
+    out.push({
+      badge: x.badge || '心智意图',
+      badgeColor: x.badgeColor || '#39d0a8',
+      text: txt,
+      target: String(x.targetKey || x.target || ''),
+      at: x.at || now,
+    });
+  }
+
+  // 5. 如果此时仍然不足，从 goals-desires.json 的 activeDesires 提取即时场景意图补齐
+  if (out.length < 5) {
+    const gd = readJson('goals-desires.json');
+    const envNames = {
+      dm_owner: { name: '私聊老爸', badge: '私聊意图', color: '#e3b341' },
+      group: { name: 'QQ 群聊', badge: '群聊意图', color: '#39d0a8' },
+      bilibili: { name: 'B 站社区', badge: 'B站意图', color: '#58a6ff' },
+      douyin: { name: '抖音互动', badge: '抖音意图', color: '#d2a8ff' },
+      web: { name: '全网吃瓜', badge: '吃瓜意图', color: '#f0883e' },
+      idle: { name: '摸鱼放空', badge: '摸鱼意图', color: '#8b949e' },
+    };
+    if (gd?.activeDesires) {
+      for (const [k, d] of Object.entries(gd.activeDesires)) {
+        if (!d || !d.title) continue;
+        if (out.some((it) => it.text.slice(0, 8) === d.title.slice(0, 8))) continue;
+        const meta = envNames[k] || { name: k, badge: '情境意图', color: '#39d0a8' };
+        out.push({
+          badge: meta.badge,
+          badgeColor: meta.color,
+          text: d.title,
+          target: meta.name + (d.strategy ? ` · 策略：${d.strategy}` : ''),
+          at: now,
+        });
+        if (out.length >= 6) break;
+      }
+    }
+  }
+
+  return out.slice(0, 6);
 }
 
 function notebookList() {
@@ -373,7 +501,7 @@ function logTail(n = 12) {
 /** 各状态文件的"数据多旧"（毫秒），面板上直接标出来 */
 function fileAges() {
   const out = {};
-  for (const f of ['mood.json', 'session_moods.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'goals-desires.json', 'focus.json', 'bridge.log']) {
+  for (const f of ['mood.json', 'session_moods.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'goals-desires.json', 'focus.json', 'intents.json', 'outbox.json', 'current-activity.json', 'bridge.log']) {
     try { out[f] = Math.max(0, Date.now() - fs.statSync(path.join(STATE, f)).mtimeMs); }
     catch { out[f] = null; }
   }
@@ -1114,8 +1242,8 @@ const PAGE = String.raw`<!doctype html>
       <div class="sub" id="mbtiSub" style="margin-top:10px"></div>
       <ul class="prio" id="prio" style="margin-top:6px"></ul>
     </section>
-    <section class="card"><h2>注意力（focus）</h2><div id="focus"></div></section>
-    <section class="card"><h2>待办的意图</h2><div id="intents"></div></section>
+    <section class="card"><h2>注意力（focus）<span class="tsub">真实生活 · 动作中</span></h2><div id="focus"></div></section>
+    <section class="card"><h2>待办的意图<span class="tsub">队列发送 · 场景动作 · 待办心智</span></h2><div id="intents"></div></section>
     <section class="card nb"><h2>大肥鱼的本子<span class="nb-count" id="nbCount"></span></h2><div id="notebook"></div></section>
   </div>
   <div class="col">
@@ -2260,15 +2388,23 @@ function renderMotives(list, meta, files){
     +'<div class="motiveFoot" style="margin-top:10px;font-size:11px;color:#6e7681;border-top:1px solid #232b36;padding-top:6px">'
     +'小鱼环境欲望引擎实时自适应中 · 随老爸私聊/群聊/吃瓜动态自适应演化</div>';
 }
-function renderFocus(f){
-  if(!f) return el('focus').innerHTML='<div class="empty">读不到 focus.json</div>';
-  let h='<div class="big">'+esc(f.platform||'—')+'</div><div class="sub">'+esc(String(f.current||'空闲'))+(f.sinceMin!=null?'　已经 '+mins(f.sinceMin):'')+'</div>';
-  if(f.errand) h+='<div class="chips"><span class="chip">办事中：'+esc(f.errand.what||'—')+(f.errand.ageMin!=null?'<em>'+f.errand.ageMin+' 分钟没动</em>':'')+'</span></div>';
+function renderFocus(f, files){
+  if(!f) return el('focus').innerHTML='<div class="empty">读不到注意力数据</div>';
+  let h='<div class="big" style="color:var(--accent)">'+esc(f.platform||'—')+'</div><div class="sub">'+esc(String(f.current||'空闲'))+(f.sinceMin!=null?'　持续 '+mins(f.sinceMin):'')+'</div>';
+  if(f.errand) h+='<div class="chips" style="margin-top:6px"><span class="chip" style="background:rgba(57,208,168,.12);border:1px solid rgba(57,208,168,.3);color:#39d0a8">⚡ 当前进行中：'+esc(f.errand.what||'—')+(f.errand.ageMin!=null?'<em>（'+f.errand.ageMin+' 分钟前）</em>':'')+'</span></div>';
+  h += freshLine(files,'current-activity.json','实时行为') || freshLine(files,'focus.json','注意力');
   el('focus').innerHTML=h;
 }
-function renderIntents(list){
-  if(!list||!list.length) return el('intents').innerHTML='<div class="empty">没有待办意图</div>';
-  el('intents').innerHTML='<ul>'+list.map(x=>'<li><div class="t">'+esc(x.text||'(无话)')+'</div><div class="m">'+esc(x.target||'')+'</div></li>').join('')+'</ul>';
+function renderIntents(list, files){
+  let h = freshLine(files,'intents.json','待办意图') || freshLine(files,'outbox.json','待发队列');
+  if(!list||!list.length) return el('intents').innerHTML=h+'<div class="empty">当前没有待办意图</div>';
+  h += '<ul style="list-style:none;padding:0;margin:0">'+list.map(x=> {
+    const badge = x.badge ? '<span class="badge" style="background:'+(x.badgeColor||'rgba(57,208,168,.15)')+'22;color:'+(x.badgeColor||'#39d0a8')+';border:1px solid '+(x.badgeColor||'#39d0a8')+'44;margin-right:6px;font-size:11px;padding:1px 5px;border-radius:4px">'+esc(x.badge)+'</span>' : '';
+    return '<li style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.05)"><div class="t" style="font-size:12px;line-height:1.45">'+badge+esc(x.text||'(无话)')+'</div>'
+      +(x.target?'<div class="m" style="margin-top:3px;font-size:11px;color:#8b949e">📍 场景/目标：'+esc(x.target)+'</div>':'')+'</li>';
+  }).join('')+'</ul>'
+  +'<div style="margin-top:8px;font-size:11px;color:#6e7681;border-top:1px solid #232b36;padding-top:6px">小鱼心智与活动意图队列 · 随真实行为与聊天推进</div>';
+  el('intents').innerHTML=h;
 }
 function paintToggle(){
   const c=el('chatCard'), b=el('chatToggle'); if(!c||!b) return;
@@ -2329,7 +2465,7 @@ async function tick(){
     el('upd').textContent='更新 '+new Date(d.now).toLocaleTimeString('zh-CN',{hour12:false});
     el('fresh').textContent='数据：心情 '+ago(freshOf(d.files,'mood.json'))+' · 德行 '+ago(freshOf(d.files,'virtue.json'))+' · 行为 '+ago(freshOf(d.files,'mbti-behavior.jsonl'));
     renderMBTI(d.mbti); renderMood(d.mood, d.files); renderVirtue(d.virtue, d.files, d.reasoning, d.tarot); renderTarot(d.tarot); renderLearn(d.lessons); renderChat(d.chat);
-    renderMotives(d.motives, d.motiveMeta, d.files); renderFocus(d.focus); renderIntents(d.intents);
+    renderMotives(d.motives, d.motiveMeta, d.files); renderFocus(d.focus, d.files); renderIntents(d.intents, d.files);
     renderReasoning(d.reasoning); renderNotebook(d.notebook); renderRelations(d.relationships);
     el('logs').textContent=(d.logs||[]).join('\n');
     breathCards(d);
