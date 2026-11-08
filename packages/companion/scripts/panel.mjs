@@ -509,21 +509,169 @@ function doClearChat() {
 }
 
 // 自主学习：读经验库，算「学到多少 / 什么时候学的 / 最近几天节奏」
-// 实时聊天：读桥接写下的 chat-tail.jsonl（收发各一行）
+// 实时聊天：读桥接写下的 chat-tail.jsonl（收发各一行），没有时从 turns.jsonl 回填
 function chatSnapshot() {
   let rows = [];
+  const file = path.join(STATE, 'chat-tail.jsonl');
   try {
-    rows = fs.readFileSync(path.join(STATE, 'chat-tail.jsonl'), 'utf8')
-      .split('\n').filter(Boolean)
-      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean);
+    if (fs.existsSync(file)) {
+      rows = fs.readFileSync(file, 'utf8')
+        .split('\n').filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+    }
   } catch { rows = []; }
+
+  // 如果没有独立的 chat-tail.jsonl，从共享对话流水 turns.jsonl 中提取老爸私聊记录
+  if (!rows.length) {
+    try {
+      const turnsFile = path.join(STATE, 'turns.jsonl');
+      if (fs.existsSync(turnsFile)) {
+        const raw = fs.readFileSync(turnsFile, 'utf8')
+          .split('\n').filter(Boolean)
+          .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean);
+        for (const t of raw) {
+          if (!t || !t.where || (!t.where.startsWith('private') && !t.where.includes('578021239'))) continue;
+          const time = Number(t.t) || Date.now();
+          if (t.text) {
+            let clean = t.text.replace(/^[^\s：:]+[（(][^）)]+[）)][：:]\s*/, '').replace(/^[^\s：:]+[：:]\s*/, '').trim();
+            rows.push({ dir: 'in', text: clean || t.text, at: time });
+          }
+          if (t.reply) {
+            rows.push({ dir: 'out', text: t.reply, at: time + 600 });
+          }
+        }
+      }
+    } catch {}
+  }
+
   const tail = rows.slice(-40);
   return {
     rows: tail,
     total: rows.length,
     lastAt: tail.length ? Number(tail[tail.length - 1].at) || 0 : 0,
     lastDir: tail.length ? String(tail[tail.length - 1].dir || '') : '',
+  };
+}
+
+function relationshipSnapshot() {
+  const people = readJson('people.json') || {};
+  const respect = readJson('respect.json') || { users: {} };
+  const ownerUin = '578021239';
+
+  const nodes = [];
+  const links = [];
+
+  // 1. 中心节点：小肥鱼
+  nodes.push({
+    id: 'self',
+    name: '小肥鱼',
+    role: 'AI 伴侣',
+    tier: 'self',
+    interactions: 9999,
+    isSelf: true,
+  });
+
+  // 2. 老爸（养父）
+  const ownerPerson = people[ownerUin] || {};
+  nodes.push({
+    id: ownerUin,
+    name: ownerPerson.name || '老爸 (真是咩咩又罗罗)',
+    role: '老爸 · 养父',
+    tier: 'family',
+    interactions: Math.max(ownerPerson.interactions || 0, 2281),
+    topics: (ownerPerson.topics || []).slice(-3),
+    affinity: 100,
+    isOwner: true,
+  });
+  links.push({
+    source: 'self',
+    target: ownerUin,
+    type: 'family',
+    label: '最亲密的养父 (唯一特权)',
+    value: 10,
+  });
+
+  // 3. 处理 respect.json（讨厌/警告）
+  const dislikedMap = {};
+  for (const [uid, u] of Object.entries(respect.users || {})) {
+    if (uid === ownerUin) continue;
+    dislikedMap[uid] = u;
+  }
+
+  // 4. 从 people.json 中挑选互动频繁的群友
+  const entries = Object.entries(people)
+    .filter(([uid]) => uid !== ownerUin && uid !== '123456')
+    .map(([uid, p]) => {
+      const resp = dislikedMap[uid];
+      return {
+        id: uid,
+        name: p.name || uid,
+        interactions: Number(p.interactions) || 0,
+        topics: (p.topics || []).slice(-3),
+        facts: (p.facts || []).slice(-3),
+        lastSeenAt: p.lastSeenAt || 0,
+        respect: resp || null,
+      };
+    })
+    .sort((a, b) => b.interactions - a.interactions);
+
+  // 取常聊群友前 16 名，加上所有黑名单人员（确保拉黑的人全景在图上可见）
+  const includedIds = new Set();
+  const topFriends = entries.slice(0, 16);
+  for (const f of topFriends) includedIds.add(f.id);
+
+  for (const [uid, u] of Object.entries(dislikedMap)) {
+    if (!includedIds.has(uid) && u.disliked) {
+      const p = people[uid] || {};
+      topFriends.push({
+        id: uid,
+        name: u.name || p.name || uid,
+        interactions: p.interactions || 0,
+        topics: (p.topics || []).slice(-2),
+        facts: (p.facts || []).slice(-2),
+        lastSeenAt: p.lastSeenAt || 0,
+        respect: u,
+      });
+      includedIds.add(uid);
+    }
+  }
+
+  for (const item of topFriends) {
+    const isDisliked = item.respect?.disliked || item.respect?.strikes >= 3;
+    const isWarning = !isDisliked && item.respect && item.respect.strikes > 0;
+    const tier = isDisliked ? 'disliked' : (isWarning ? 'warning' : 'friend');
+    
+    nodes.push({
+      id: item.id,
+      name: item.name,
+      role: isDisliked ? `讨厌 · 已拉黑(${item.respect.reason === 'harass' ? '骚扰' : '辱骂'})` : (isWarning ? `警告中(${item.respect.strikes}次越界)` : '常聊群友'),
+      tier,
+      interactions: item.interactions,
+      topics: item.topics,
+      strikes: item.respect?.strikes || 0,
+      reason: item.respect?.reason || '',
+      disliked: Boolean(isDisliked),
+    });
+
+    links.push({
+      source: 'self',
+      target: item.id,
+      type: tier,
+      label: isDisliked ? '已拉黑/冷落' : (isWarning ? '警戒中' : `互动 ${item.interactions} 次`),
+      value: isDisliked ? 2 : Math.min(8, Math.max(3, Math.round(Math.log10(item.interactions + 1) * 3))),
+    });
+  }
+
+  return {
+    nodes,
+    links,
+    summary: {
+      totalTracked: Object.keys(people).length,
+      dislikedCount: Object.values(respect.users || {}).filter(u => u.disliked).length,
+      warningCount: Object.values(respect.users || {}).filter(u => !u.disliked && u.strikes > 0).length,
+    }
   };
 }
 
@@ -578,6 +726,7 @@ function snapshot() {
     tarot: readJson('tarot.json'),
     lessons: lessonSnapshot(),
     chat: chatSnapshot(),
+    relationships: relationshipSnapshot(),
     notebook: notebookList(),
     logs: logTail(12),
   };
@@ -733,6 +882,28 @@ const PAGE = String.raw`<!doctype html>
   .phone .pbar .dotlive{width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:auto}
   .phone .screen{flex:1;min-height:380px;overflow:auto;padding:10px 10px 14px;background:radial-gradient(120% 60% at 50% 100%, #0d1f1b 0%, #0a0e13 62%), #0a0e13}
   .phone .screen::-webkit-scrollbar{width:6px}
+  .phone .pinput{display:flex;gap:6px;padding:8px 10px;background:#11161d;border-top:1px solid #1c242f}
+  .phone .pinput input{flex:1;background:#0a0e13;border:1px solid #1c242f;color:#e6edf3;padding:6px 10px;border-radius:12px;font-size:12px;outline:none}
+  .phone .pinput input:focus{border-color:var(--accent)}
+  .phone .pinput button{background:var(--accent);color:#070a0e;border:none;padding:0 12px;border-radius:12px;font-weight:600;font-size:11.5px;cursor:pointer}
+  .phone .pinput button:hover{filter:brightness(1.1)}
+  /* 人际关系图谱 */
+  .relcard{grid-column:1 / -1;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
+  .rel-legend{position:absolute;bottom:10px;left:12px;display:flex;gap:12px;font-size:11px;color:var(--dim);background:rgba(13,17,23,.85);padding:4px 10px;border-radius:6px;pointer-events:none}
+  .rel-legend span{display:flex;align-items:center;gap:5px}
+  .rel-legend i{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .rel-btn{background:transparent;border:1px solid var(--line);color:var(--dim);padding:3px 10px;border-radius:6px;font-size:11.5px;cursor:pointer;transition:.15s}
+  .rel-btn.active,.rel-btn:hover{background:#212833;color:var(--txt);border-color:var(--accent)}
+  .rel-detail b{color:var(--txt);font-size:13.5px}
+  .rel-detail .badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;margin-bottom:4px}
+  .badge.family{background:rgba(227,179,65,.15);color:#e3b341;border:1px solid rgba(227,179,65,.3)}
+  .badge.friend{background:rgba(57,208,168,.15);color:#39d0a8;border:1px solid rgba(57,208,168,.3)}
+  .badge.warning{background:rgba(240,163,94,.15);color:#f0a35e;border:1px solid rgba(240,163,94,.3)}
+  .badge.disliked{background:rgba(240,97,109,.15);color:#f0616d;border:1px solid rgba(240,97,109,.3)}
+  .rel-detail .topics{max-height:160px;overflow-y:auto;color:#a9b4c0;font-size:11px;display:flex;flex-direction:column;gap:5px}
+  .rel-detail .topics div{background:#1a222d;padding:6px 8px;border-radius:5px;line-height:1.4}
+  .rel-unblock-btn{background:#f0616d;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600;margin-top:8px}
+  .rel-unblock-btn:hover{filter:brightness(1.15)}
   .msg{display:flex;margin:7px 0;align-items:flex-end}
   .msg .b{max-width:74%;padding:7px 11px;border-radius:14px;font-size:12.5px;line-height:1.5;
           white-space:pre-wrap;word-break:break-word}
@@ -893,6 +1064,32 @@ const PAGE = String.raw`<!doctype html>
       <section class="card compact"><h2>目的 / 想干的事</h2><div id="motives"></div></section>
       <section class="card"><h2>实时推理（规则表 + 推理层）</h2><div id="reasoning"></div></section>
     </div>
+    <section class="card relcard" id="relCard">
+      <h2 style="display:flex;align-items:center;gap:8px">
+        人际关系网络图谱
+        <span class="tsub">社交圈 · 养父与常聊群友 · 实时状态</span>
+        <div class="rel-filter" id="relFilter" style="margin-left:auto;display:flex;gap:4px">
+          <button class="rel-btn active" data-filter="all">全部</button>
+          <button class="rel-btn" data-filter="family">老爸</button>
+          <button class="rel-btn" data-filter="friend">常聊好友</button>
+          <button class="rel-btn" data-filter="warning">警戒中</button>
+          <button class="rel-btn" data-filter="disliked">讨厌名单</button>
+        </div>
+      </h2>
+      <div class="rel-body" style="display:flex;gap:12px;position:relative">
+        <div style="flex:1;position:relative">
+          <canvas id="relCanvas" style="width:100%;height:380px;background:#0d1117;border-radius:8px;border:1px solid #232b36;cursor:grab;display:block"></canvas>
+          <div id="relLegend" class="rel-legend">
+            <span><i style="background:#e3b341"></i> 老爸 (养父)</span>
+            <span><i style="background:#39d0a8"></i> 常聊好友</span>
+            <span><i style="background:#f0a35e"></i> 警戒中</span>
+            <span><i style="background:#f0616d"></i> 讨厌 (已拉黑)</span>
+          </div>
+        </div>
+        <div id="relDetail" class="rel-detail" style="width:280px;background:#131820;border:1px solid #232b36;border-radius:8px;padding:12px;display:none;flex-direction:column;gap:8px;font-size:12px;line-height:1.5">
+        </div>
+      </div>
+    </section>
     <section class="card"><h2>桥接日志</h2><pre id="logs"></pre></section>
   </div>
 </main>
@@ -1032,11 +1229,39 @@ async function clearChat(){
     setTimeout(()=>s2.classList.remove('fadein'), 700); }
 }
 
+function bindChatInput(){
+  const inp=el('chatInput');
+  const btn=el('chatSendBtn');
+  if(!inp||inp.dataset.bound) return;
+  inp.dataset.bound='1';
+  const doSend=async()=>{
+    const txt=(inp.value||'').trim();
+    if(!txt) return;
+    inp.value='';
+    const scr=el('chatScreen');
+    if(scr){
+      scr.innerHTML+='<div class="msg me"><div class="b">'+esc(txt)+'</div><span class="t">'+chatTime(Date.now())+'</span></div>';
+      scr.scrollTop=scr.scrollHeight;
+    }
+    try{
+      const res=await panelPost('/api/chat/send?text='+encodeURIComponent(txt));
+      if(res&&res.reply&&scr){
+        scr.innerHTML+='<div class="msg fish"><div class="b">'+esc(res.reply)+'</div><span class="t">'+chatTime(Date.now())+'</span></div>';
+        scr.scrollTop=scr.scrollHeight;
+      }
+    }catch(e){}
+    setTimeout(tick, 1000);
+  };
+  inp.addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSend(); });
+  if(btn) btn.addEventListener('click', doSend);
+}
+
 function renderChat(c){
   if(CHAT_CLEARING) return;
   const box=el('chat'); if(!box) return;
-  const head='<div class="phonewrap"><div class="phone"><div class="pbar"><b>大肥鱼</b><span>QQ</span><i class="dotlive"></i></div>';
-  if(!c||!c.rows.length){ box.innerHTML=head+'<div class="screen" id="chatScreen"><div class="empty" style="padding:14px">还没有聊天记录</div></div></div></div>'; return; }
+  const head='<div class="phonewrap"><div class="phone"><div class="pbar"><b>大肥鱼</b><span>QQ私聊</span><i class="dotlive"></i></div>';
+  const foot='<div class="pinput"><input id="chatInput" placeholder="给小鱼发消息（回车发送）..." autocomplete="off"><button id="chatSendBtn">发送</button></div></div></div>';
+  if(!c||!c.rows.length){ box.innerHTML=head+'<div class="screen" id="chatScreen"><div class="empty" style="padding:14px">还没有聊天记录</div></div>'+foot; bindChatInput(); return; }
   const rows=c.rows;
   const scr=el('chatScreen');
   const atBottom = scr ? (scr.scrollHeight - scr.scrollTop - scr.clientHeight < 40) : true;
@@ -1045,10 +1270,303 @@ function renderChat(c){
     return '<div class="msg '+(fish?'fish':'me')+'"><div class="b">'+esc(r.text)+'</div>'
       +'<span class="t">'+chatTime(r.at)+'</span></div>';
   }).join('');
-  if(!scr) box.innerHTML=head+'<div class="screen" id="chatScreen">'+bubbles+'</div></div></div>';
-  else scr.innerHTML=bubbles;
+  if(!scr){
+    box.innerHTML=head+'<div class="screen" id="chatScreen">'+bubbles+'</div>'+foot;
+    bindChatInput();
+  } else {
+    scr.innerHTML=bubbles;
+  }
   const s2=el('chatScreen'); if(atBottom&&s2) s2.scrollTop=s2.scrollHeight;
   if(c.lastAt) CHAT_LAST_AT=c.lastAt;
+}
+
+// ── 人际关系图谱 (Canvas 交互星系网络) ──
+let REL_DATA = null;
+let REL_FILTER = 'all';
+let REL_SELECTED = null;
+let REL_DRAG_NODE = null;
+let REL_HOVER_NODE = null;
+let REL_INITED = false;
+
+async function unblockUser(uid){
+  if(!confirm('确定要原谅该用户并解除拉黑吗？')) return;
+  try{
+    const res=await panelPost('/api/respect/unblock?uid='+encodeURIComponent(uid));
+    if(res&&res.ok){
+      alert('已解除对 '+res.name+' 的拉黑！');
+      tick();
+    }else{
+      alert('解除失败：'+(res?.error||'未知错误'));
+    }
+  }catch(e){ alert('请求失败：'+e.message); }
+}
+
+function renderRelations(rel){
+  if(!rel||!rel.nodes) return;
+  REL_DATA = rel;
+  const cvs = el('relCanvas');
+  if(!cvs) return;
+  if(!REL_INITED){
+    REL_INITED = true;
+    initRelEvents(cvs);
+  }
+  layoutAndDrawRel(cvs);
+}
+
+function initRelEvents(cvs){
+  const filterBox = el('relFilter');
+  if(filterBox){
+    filterBox.addEventListener('click', (e)=>{
+      const btn = e.target.closest('.rel-btn');
+      if(!btn) return;
+      filterBox.querySelectorAll('.rel-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      REL_FILTER = btn.dataset.filter || 'all';
+      layoutAndDrawRel(cvs);
+    });
+  }
+
+  cvs.addEventListener('mousemove', (e)=>{
+    const rect = cvs.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if(REL_DRAG_NODE){
+      REL_DRAG_NODE.x = x;
+      REL_DRAG_NODE.y = y;
+      drawRelGraph(cvs);
+      return;
+    }
+    const found = findNodeAt(x, y);
+    if(found !== REL_HOVER_NODE){
+      REL_HOVER_NODE = found;
+      cvs.style.cursor = found ? 'pointer' : 'grab';
+      drawRelGraph(cvs);
+    }
+  });
+
+  cvs.addEventListener('mousedown', (e)=>{
+    const rect = cvs.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const found = findNodeAt(x, y);
+    if(found){
+      REL_DRAG_NODE = found;
+      REL_SELECTED = found;
+      showRelDetail(found);
+      drawRelGraph(cvs);
+    }
+  });
+
+  window.addEventListener('mouseup', ()=>{ REL_DRAG_NODE = null; });
+}
+
+function findNodeAt(x, y){
+  if(!REL_DATA||!REL_DATA.nodes) return null;
+  for(let i=REL_DATA.nodes.length-1; i>=0; i--){
+    const n = REL_DATA.nodes[i];
+    if(n.x == null) continue;
+    const dx = x - n.x;
+    const dy = y - n.y;
+    if(dx*dx + dy*dy <= (n.r + 6)*(n.r + 6)) return n;
+  }
+  return null;
+}
+
+function showRelDetail(n){
+  const box = el('relDetail');
+  if(!box) return;
+  box.style.display = 'flex';
+  const badgeClass = n.tier || 'friend';
+  let badgeTxt = n.role || '好友';
+  let html = '<div><b>'+esc(n.name)+'</b> <span style="font-size:11px;color:#8b949e">('+esc(n.id)+')</span></div>';
+  html += '<div><span class="badge '+badgeClass+'">'+esc(badgeTxt)+'</span></div>';
+  html += '<div style="color:#8b949e">互动统计：<span style="color:#e6edf3">'+(n.interactions||0)+' 次真实对话</span></div>';
+  if(n.topics && n.topics.length){
+    html += '<div style="margin-top:4px;color:#8b949e;font-size:11px">最近话题记录：</div><div class="topics">';
+    for(const top of n.topics){
+      html += '<div>'+esc(top)+'</div>';
+    }
+    html += '</div>';
+  }
+  if(n.disliked){
+    html += '<div style="color:#f0616d;font-size:11px;margin-top:2px">⚠️ 已触发底线防御，小鱼在群内对其静默无视。</div>';
+    html += '<button class="rel-unblock-btn" onclick="unblockUser(\''+esc(n.id)+'\')">✨ 原谅 / 一键解除拉黑</button>';
+  }
+  box.innerHTML = html;
+}
+
+function layoutAndDrawRel(cvs){
+  const rect = cvs.getBoundingClientRect();
+  const W = rect.width || 800;
+  const H = rect.height || 380;
+  cvs.width = W;
+  cvs.height = H;
+
+  const cx = W / 2;
+  const cy = H / 2;
+
+  // 定位节点
+  const nodes = REL_DATA.nodes;
+  const selfNode = nodes.find(n => n.id === 'self');
+  if(selfNode && (selfNode.x == null)){
+    selfNode.x = cx;
+    selfNode.y = cy;
+    selfNode.r = 26;
+  }
+
+  // 老爸
+  const familyNode = nodes.find(n => n.tier === 'family');
+  if(familyNode && (familyNode.x == null)){
+    familyNode.x = cx;
+    familyNode.y = cy - 90;
+    familyNode.r = 21;
+  }
+
+  // 好友
+  const friends = nodes.filter(n => n.tier === 'friend');
+  const fCount = friends.length;
+  friends.forEach((fn, idx)=>{
+    if(fn.x == null){
+      const angle = (idx / Math.max(1, fCount)) * Math.PI * 2 + 0.3;
+      const radius = 150 + (idx % 2) * 25;
+      fn.x = cx + Math.cos(angle) * radius;
+      fn.y = cy + Math.sin(angle) * radius * 0.85;
+      fn.r = Math.min(18, Math.max(12, Math.round(Math.log10(fn.interactions + 1) * 4.5)));
+    }
+  });
+
+  // 警告
+  const warnings = nodes.filter(n => n.tier === 'warning');
+  warnings.forEach((wn, idx)=>{
+    if(wn.x == null){
+      const angle = Math.PI * 0.25 + idx * 0.4;
+      wn.x = cx + Math.cos(angle) * 220;
+      wn.y = cy + Math.sin(angle) * 160;
+      wn.r = 13;
+    }
+  });
+
+  // 讨厌
+  const disliked = nodes.filter(n => n.tier === 'disliked');
+  const dCount = disliked.length;
+  disliked.forEach((dn, idx)=>{
+    if(dn.x == null){
+      const angle = Math.PI * 0.6 + (idx / Math.max(1, dCount)) * Math.PI * 0.8;
+      dn.x = cx + Math.cos(angle) * (W * 0.42);
+      dn.y = cy + Math.sin(angle) * (H * 0.42);
+      dn.r = 13;
+    }
+  });
+
+  drawRelGraph(cvs);
+}
+
+function drawRelGraph(cvs){
+  const ctx = cvs.getContext('2d');
+  const W = cvs.width;
+  const H = cvs.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if(!REL_DATA||!REL_DATA.nodes) return;
+  const nodes = REL_DATA.nodes;
+  const links = REL_DATA.links;
+  const filter = REL_FILTER;
+
+  // 绘制连线
+  for(const link of links){
+    const s = nodes.find(n => n.id === link.source);
+    const t = nodes.find(n => n.id === link.target);
+    if(!s || !t) continue;
+
+    const matched = filter === 'all' || t.tier === filter;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(t.x, t.y);
+
+    if(link.type === 'family'){
+      ctx.strokeStyle = matched ? 'rgba(227, 179, 65, 0.75)' : 'rgba(227, 179, 65, 0.15)';
+      ctx.lineWidth = matched ? 2.5 : 1;
+      ctx.shadowColor = '#e3b341';
+      ctx.shadowBlur = matched ? 8 : 0;
+    } else if(link.type === 'disliked'){
+      ctx.strokeStyle = matched ? 'rgba(240, 97, 109, 0.6)' : 'rgba(240, 97, 109, 0.1)';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1.2;
+    } else if(link.type === 'warning'){
+      ctx.strokeStyle = matched ? 'rgba(240, 163, 94, 0.6)' : 'rgba(240, 163, 94, 0.1)';
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1.2;
+    } else {
+      ctx.strokeStyle = matched ? 'rgba(57, 208, 168, 0.4)' : 'rgba(57, 208, 168, 0.08)';
+      ctx.lineWidth = Math.min(3, Math.max(1, link.value / 2.5));
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 绘制节点
+  for(const n of nodes){
+    const matched = filter === 'all' || n.tier === filter || n.id === 'self';
+    const isHover = REL_HOVER_NODE === n;
+    const isSel = REL_SELECTED === n;
+
+    ctx.save();
+    ctx.globalAlpha = matched ? 1 : 0.18;
+
+    // 绘制外发光光晕
+    if(n.id === 'self' || n.tier === 'family' || isHover || isSel){
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r + (isHover ? 6 : 4), 0, Math.PI * 2);
+      ctx.fillStyle = n.id === 'self' ? 'rgba(57, 208, 168, 0.2)' : (n.tier === 'family' ? 'rgba(227, 179, 65, 0.25)' : (n.tier === 'disliked' ? 'rgba(240, 97, 109, 0.25)' : 'rgba(57, 208, 168, 0.15)'));
+      ctx.fill();
+    }
+
+    // 节点本体
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    if(n.id === 'self'){
+      ctx.fillStyle = '#1f6f5c';
+      ctx.strokeStyle = '#39d0a8';
+      ctx.lineWidth = 2.5;
+    } else if(n.tier === 'family'){
+      ctx.fillStyle = '#7a5a14';
+      ctx.strokeStyle = '#e3b341';
+      ctx.lineWidth = 2.5;
+    } else if(n.tier === 'disliked'){
+      ctx.fillStyle = '#4a181c';
+      ctx.strokeStyle = '#f0616d';
+      ctx.lineWidth = 1.8;
+    } else if(n.tier === 'warning'){
+      ctx.fillStyle = '#4e3316';
+      ctx.strokeStyle = '#f0a35e';
+      ctx.lineWidth = 1.8;
+    } else {
+      ctx.fillStyle = '#16232b';
+      ctx.strokeStyle = '#39d0a8';
+      ctx.lineWidth = 1.5;
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // 标签文字
+    ctx.fillStyle = '#e6edf3';
+    ctx.font = (n.id === 'self' || n.tier === 'family') ? 'bold 12px sans-serif' : '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    // 节点中心名称缩写或图标
+    const short = n.id === 'self' ? '🐳' : (n.tier === 'family' ? '👑' : n.name.slice(0, 2));
+    ctx.fillText(short, n.x, n.y);
+
+    // 下方名称标签
+    ctx.font = '10.5px sans-serif';
+    ctx.fillStyle = n.tier === 'family' ? '#e3b341' : (n.tier === 'disliked' ? '#f0616d' : '#8b949e');
+    const label = n.name.length > 6 ? n.name.slice(0, 5) + '…' : n.name;
+    ctx.fillText(label, n.x, n.y + n.r + 12);
+
+    ctx.restore();
+  }
 }
 
 function renderLearn(l){
@@ -1712,7 +2230,7 @@ async function tick(){
     el('fresh').textContent='数据：心情 '+ago(freshOf(d.files,'mood.json'))+' · 德行 '+ago(freshOf(d.files,'virtue.json'))+' · 行为 '+ago(freshOf(d.files,'mbti-behavior.jsonl'));
     renderMBTI(d.mbti); renderMood(d.mood, d.files); renderVirtue(d.virtue, d.files, d.reasoning, d.tarot); renderTarot(d.tarot); renderLearn(d.lessons); renderChat(d.chat);
     renderMotives(d.motives, d.motiveMeta, d.files); renderFocus(d.focus); renderIntents(d.intents);
-    renderReasoning(d.reasoning); renderNotebook(d.notebook);
+    renderReasoning(d.reasoning); renderNotebook(d.notebook); renderRelations(d.relationships);
     el('logs').textContent=(d.logs||[]).join('\n');
     breathCards(d);
   }catch(e){ el('br').textContent='连不上面板服务'; el('br').className='pill bad'; }
@@ -1733,7 +2251,7 @@ if(String(location.search||'').includes('clearanim=1')){
 tick(); setInterval(tick,3000);
 </script></body></html>`;
 
-export function handlePanelRequest(req, res, { prefix = '/panel' } = {}) {
+export async function handlePanelRequest(req, res, { prefix = '/panel', brain = null } = {}) {
   try {
     const url = new URL(req.url, 'http://127.0.0.1');
     let sub = url.pathname;
@@ -1799,6 +2317,75 @@ export function handlePanelRequest(req, res, { prefix = '/panel' } = {}) {
       res.writeHead(out.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       res.end(JSON.stringify(out));
       return;
+    }
+    if (sub === '/api/chat/send' && req.method === 'POST') {
+      const text = url.searchParams.get('text') || '';
+      if (!text) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'empty text' }));
+        return;
+      }
+      const now = Date.now();
+      const chatFile = path.join(STATE, 'chat-tail.jsonl');
+      const turnsFile = path.join(STATE, 'turns.jsonl');
+      
+      const inRec = { dir: 'in', text, at: now };
+      try { fs.appendFileSync(chatFile, JSON.stringify(inRec) + '\n', 'utf8'); } catch {}
+
+      let reply = '';
+      if (brain && typeof brain.reply === 'function') {
+        try {
+          const r = await brain.reply({
+            key: 'private:578021239',
+            userId: '578021239',
+            userName: '老爸',
+            text,
+            situation: '老爸通过心智控制面板给你发来了消息。',
+          });
+          reply = r?.text || '';
+        } catch (e) {
+          reply = '（小鱼大脑正在思考中...）收到啦老爸！';
+        }
+      } else {
+        reply = '收到啦老爸！本鱼正在电脑前盯着面板呢~';
+      }
+
+      const outRec = { dir: 'out', text: reply, at: Date.now() };
+      try {
+        fs.appendFileSync(chatFile, JSON.stringify(outRec) + '\n', 'utf8');
+        const turnRec = { t: now, where: 'private:578021239', who: 'Mew', text, reply };
+        fs.appendFileSync(turnsFile, JSON.stringify(turnRec) + '\n', 'utf8');
+      } catch {}
+
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, reply }));
+      return;
+    }
+    if (sub === '/api/respect/unblock' && req.method === 'POST') {
+      const uid = url.searchParams.get('uid');
+      if (!uid) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'missing uid' }));
+        return;
+      }
+      try {
+        const respectFile = path.join(STATE, 'respect.json');
+        const raw = JSON.parse(fs.readFileSync(respectFile, 'utf8') || '{}');
+        if (raw.users && raw.users[uid]) {
+          raw.users[uid].strikes = 0;
+          raw.users[uid].disliked = false;
+          raw.users[uid].level = '已解除';
+          raw.users[uid].lastAt = Date.now();
+          fs.writeFileSync(respectFile, JSON.stringify(raw, null, 2), 'utf8');
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, name: raw.users[uid].name }));
+          return;
+        }
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+        return;
+      }
     }
     if (sub === '/api/notebook') {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });

@@ -1189,7 +1189,7 @@ export function startVirtualRoomServer({
 
     // 0. 仿生心智总控与调节面板 (/panel)
     if (url.pathname === '/panel' || url.pathname.startsWith('/panel/')) {
-      handlePanelRequest(req, res, { prefix: '/panel' });
+      handlePanelRequest(req, res, { prefix: '/panel', brain: effectiveBrain });
       return;
     }
 
