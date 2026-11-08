@@ -215,8 +215,9 @@ export class Waker {
       return { wake: true, reason: 'question' };
     }
 
-    // 6. 随缘低频冒头（受 probability 与 cooldownMs 双重约束）
-    if (Number(c.probability) > 0 && Math.random() < Number(c.probability)) {
+    // 6. 随缘低频冒头（受 probability / topicInterestProbability 与 cooldownMs 双重约束）
+    const effectiveProb = Number(c.topicInterestProbability ?? c.probability);
+    if (effectiveProb > 0 && Math.random() < effectiveProb) {
       if (this.topicTracker && msg.isGroup) {
         const intInfo = this.topicTracker.evaluateInterest(msg);
         if (intInfo.isInteresting) {
