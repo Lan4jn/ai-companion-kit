@@ -47,46 +47,76 @@ function bridgeAlive() {
 }
 
 function moodSnapshot() {
+  const sess = readJson('session_moods.json') || {};
   const j = readJson('mood.json');
-  let byKey = j?.byKey;
-  if (!byKey || typeof byKey !== 'object') {
-    const sess = readJson('session_moods.json') || {};
-    const moodKeyToTier = {
-      furious: 0, angry: 1, pout: 2, irritable: 1,
-      flat: 3, sleepy: 3, tired: 3, bored: 3,
-      good: 4, content: 4,
-      happy: 5, excited: 6
-    };
-    byKey = {
-      default: {
-        tier: 3,
-        cause: '今日基准心境：平静',
-        sinceAt: Date.now(),
-        updatedAt: Date.now(),
-        specials: []
-      }
-    };
-    if (j && typeof j === 'object') {
-      const daily = Object.values(j).find((v) => v && v.key && v.label);
-      if (daily) {
-        byKey.default.tier = moodKeyToTier[daily.key] ?? 3;
-        byKey.default.cause = `今日心境基线：${daily.label}`;
-        byKey.default.sinceAt = daily.at || Date.now();
-      }
+  const moodKeyToTier = {
+    furious: 0, angry: 1, pout: 2, aggrieved: 2, irritable: 1,
+    flat: 3, sleepy: 3, tired: 3, bored: 3, calm: 3,
+    good: 4, content: 4, coaxed: 4,
+    happy: 5, smug: 5, excited: 6, fierce: 6
+  };
+  const moodLabels = {
+    furious: '非常愤怒', angry: '生气', pout: '委屈噘嘴', aggrieved: '委屈难过', irritable: '暴躁',
+    flat: '平静', sleepy: '迷糊', tired: '困倦', bored: '无聊', calm: '平静',
+    good: '不错', content: '惬意', coaxed: '被哄好了',
+    happy: '开心', smug: '自豪得瑟', excited: '十分开心', fierce: '护短开火'
+  };
+
+  const byKey = {
+    default: {
+      tier: 3,
+      cause: '今日基准心境：平静',
+      sinceAt: Date.now(),
+      updatedAt: Date.now(),
+      specials: []
     }
-    const ownerUid = String(OWNER || '578021239').replace(/[^\d]/g, '');
-    for (const [sKey, sVal] of Object.entries(sess)) {
-      if (!sVal) continue;
-      const t = moodKeyToTier[sVal.key] ?? 3;
-      const isOwner = sKey.includes(ownerUid);
-      const k = isOwner ? `person:${ownerUid}` : sKey;
-      byKey[k] = {
-        tier: t,
-        cause: sVal.reason || sVal.label || sVal.key || '',
-        sinceAt: sVal.updatedAt || Date.now(),
-        updatedAt: sVal.updatedAt || Date.now(),
-        specials: t !== 3 ? [{ id: sVal.key === 'pout' ? '委屈' : '开心', cause: sVal.reason || '', strength: sVal.intensity || 1, leftMin: 60, ageMin: 0, sinceAt: sVal.updatedAt || Date.now() }] : []
-      };
+  };
+
+  // 1. 获取今日全局心境基线
+  if (j && typeof j === 'object') {
+    const today = new Date().toISOString().slice(0, 10);
+    const daily = j[today] || Object.values(j).find((v) => v && v.key && v.label);
+    if (daily) {
+      byKey.default.tier = moodKeyToTier[daily.key] ?? 3;
+      byKey.default.cause = `今日心境基线：${daily.label}`;
+      byKey.default.sinceAt = daily.at || Date.now();
+    }
+  }
+
+  // 2. 优先从活跃的 session_moods.json 中提取即时情绪
+  const ownerUid = String(OWNER || '578021239').replace(/[^\d]/g, '');
+  for (const [sKey, sVal] of Object.entries(sess)) {
+    if (!sVal || !sVal.key) continue;
+    const t = moodKeyToTier[sVal.key] ?? 3;
+    const isOwner = sKey.includes(ownerUid);
+    const k = isOwner ? `person:${ownerUid}` : sKey;
+    const lbl = moodLabels[sVal.key] || sVal.label || sVal.key;
+    const specialList = [];
+    if (t !== 3) {
+      specialList.push({
+        id: lbl,
+        cause: sVal.reason || '',
+        strength: sVal.intensity || 1,
+        leftMin: Math.max(0, 60 - Math.round((Date.now() - (sVal.updatedAt || Date.now())) / 60000)),
+        ageMin: Math.round((Date.now() - (sVal.updatedAt || Date.now())) / 60000),
+        sinceAt: sVal.updatedAt || Date.now()
+      });
+    }
+    byKey[k] = {
+      tier: t,
+      cause: sVal.reason || `即时情绪：${lbl}`,
+      sinceAt: sVal.updatedAt || Date.now(),
+      updatedAt: sVal.updatedAt || Date.now(),
+      specials: specialList,
+    };
+  }
+
+  // 3. 如果 mood.json 里有旧的 byKey 但 session_moods 没覆盖到的非老爸人员，做兜底合并
+  if (j && j.byKey && typeof j.byKey === 'object') {
+    for (const [k, v] of Object.entries(j.byKey)) {
+      if (!byKey[k] && k !== `person:${ownerUid}`) {
+        byKey[k] = v;
+      }
     }
   }
   const now = Date.now();
@@ -343,7 +373,7 @@ function logTail(n = 12) {
 /** 各状态文件的"数据多旧"（毫秒），面板上直接标出来 */
 function fileAges() {
   const out = {};
-  for (const f of ['mood.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'goals-desires.json', 'focus.json', 'bridge.log']) {
+  for (const f of ['mood.json', 'session_moods.json', 'virtue.json', 'mbti.json', 'mbti-behavior.jsonl', 'motive.json', 'goals-desires.json', 'focus.json', 'bridge.log']) {
     try { out[f] = Math.max(0, Date.now() - fs.statSync(path.join(STATE, f)).mtimeMs); }
     catch { out[f] = null; }
   }
@@ -1891,7 +1921,7 @@ function renderMood(m,files){
   else h+='<div class="sub" style="margin-top:10px">特殊情绪：<span style="color:var(--dim)">无（只挂着温度轴）</span></div>';
 
   if(m.others&&m.others.length) h+='<div class="sub" style="margin-top:10px">其他人：'+m.others.map(x=>esc(x.key.replace('person:',''))+' '+TIERS[x.tier??3]+(x.specials.length?'（'+x.specials.map(s=>s.id)+'）':'')).join('；')+'</div>';
-  h+=freshLine(files,'mood.json','心情');
+  h+=freshLine(files,'session_moods.json','即时心情') || freshLine(files,'mood.json','心情');
   el('mood').innerHTML=h;
 
   MOODSTATE.tide=sp.filter(s=>TIDE.has(s.id)).length;
