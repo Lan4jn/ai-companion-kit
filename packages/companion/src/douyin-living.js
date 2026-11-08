@@ -77,6 +77,28 @@ let state = {
   updatedAt: Date.now(),
 };
 
+function readInteractedVideos(dataDir) {
+  try {
+    const f = path.join(dataDir, 'douyin-interacted.json');
+    if (fs.existsSync(f)) {
+      return JSON.parse(fs.readFileSync(f, 'utf8'));
+    }
+  } catch {}
+  return [];
+}
+
+function recordInteractedVideo(dataDir, vid) {
+  if (!vid) return;
+  try {
+    const f = path.join(dataDir, 'douyin-interacted.json');
+    const list = readInteractedVideos(dataDir);
+    if (!list.includes(vid)) {
+      list.push(vid);
+      fs.writeFileSync(f, JSON.stringify(list.slice(-200), null, 2), 'utf8');
+    }
+  } catch {}
+}
+
 function readCachedFeed(dataDir) {
   try {
     const f = path.join(dataDir, 'douyin-feed.json');
@@ -495,6 +517,68 @@ export async function fetchDouyinFeed() {
 }
 
 /**
+ * 抓取老爸主页视频列表
+ */
+export async function fetchOwnerVideos(dataDir) {
+  if (!douyinOwner.secUid) return [];
+  let browser = null;
+  let page = null;
+  try {
+    browser = await chromium.launch({
+      executablePath: CHROME_PATH,
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 720 },
+    });
+    const cookieFile = path.join(dataDir, 'douyin-cookies.json');
+    if (fs.existsSync(cookieFile)) {
+      try {
+        const savedCookies = JSON.parse(fs.readFileSync(cookieFile, 'utf8'));
+        if (Array.isArray(savedCookies)) await context.addCookies(savedCookies);
+      } catch {}
+    }
+    page = await context.newPage();
+    const ownerUrl = `https://www.douyin.com/user/${douyinOwner.secUid}`;
+    await page.goto(ownerUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(4000);
+    await dismissPopups(page);
+
+    const items = await page.evaluate(() => {
+      const list = document.querySelector('[data-e2e="user-post-list"]');
+      if (!list) return [];
+      const cards = Array.from(list.querySelectorAll('a[href*="/video/"]'));
+      const seen = new Set();
+      const res = [];
+      for (const a of cards) {
+        let href = a.getAttribute('href') || '';
+        if (!href) continue;
+        if (!href.startsWith('http')) href = 'https://www.douyin.com' + href;
+        const idMatch = href.match(/\/video\/(\d+)/);
+        if (!idMatch) continue;
+        const vid = idMatch[1];
+        if (seen.has(vid)) continue;
+        seen.add(vid);
+        const text = a.innerText?.replace(/\n+/g, ' ').trim() || '';
+        res.push({ id: vid, url: `https://www.douyin.com/video/${vid}`, title: text });
+      }
+      return res;
+    });
+    return items;
+  } catch (e) {
+    console.log('[douyin] 检查老爸主页视频失败:', e?.message || e);
+    return [];
+  } finally {
+    if (page) unregisterActivePage(page);
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+  }
+}
+
+/**
  * 触发一次真实的刷抖音流程（支持指定视频和自动交互）
  */
 export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl = null } = {}) {
@@ -576,6 +660,28 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
     };
   }
 
+  // 1. 优先检查老爸主页是否有最新发布的未互动视频
+  let ownerPick = null;
+  if (douyinOwner.secUid) {
+    try {
+      const ownerVideos = await fetchOwnerVideos(dataDir);
+      const interacted = readInteractedVideos(dataDir);
+      const freshOwnerVideo = ownerVideos.find((v) => !interacted.includes(v.id));
+      if (freshOwnerVideo) {
+        ownerPick = {
+          title: freshOwnerVideo.title || '老爸的抖音视频',
+          author: douyinOwner.name,
+          url: freshOwnerVideo.url,
+          views: '最新',
+          isOwner: true,
+        };
+        console.log(`[douyin] 发现老爸主页新视频：《${ownerPick.title}》，优先互动！`);
+      }
+    } catch (e) {
+      console.log('[douyin] 检查老爸视频异常:', e?.message || e);
+    }
+  }
+
   // 正常随机推荐流摸鱼
   let feed = await fetchDouyinFeed();
   if (!feed || feed.length === 0) {
@@ -605,9 +711,8 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
   const withUrl = feed.filter((x) => x.url && /\/video\/\d+/.test(x.url));
   const pool = withUrl.length ? withUrl : feed;
   // 老爸发的视频优先看，不参与随机
-  const ownerPick = pool.find((x) => isOwnerDouyin(x.author, x.authorHref));
-  const pick = ownerPick || pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
-  const isOwnerVideo = Boolean(ownerPick);
+  const pick = ownerPick || pool.find((x) => isOwnerDouyin(x.author, x.authorHref)) || pool[Math.floor(Math.random() * Math.min(pool.length, 5))];
+  const isOwnerVideo = Boolean(ownerPick || isOwnerDouyin(pick.author, pick.authorHref));
   if (isOwnerVideo) console.log(`[douyin] 刷到老爸发的视频：《${pick.title.slice(0, 30)}》，认真看完`);
   state.lastVideo = pick;
   state.lastAction = isOwnerVideo
@@ -654,6 +759,8 @@ export async function browseDouyinLive({ isOwner = true, prompt = '', targetUrl 
       if (interaction.liked) stats.likes = (stats.likes || 0) + 1;
       if (interaction.commented) stats.comments = (stats.comments || 0) + 1;
       writeDailyStats(dataDir, stats);
+      const vidMatch = pick.url.match(/\/video\/(\d+)/);
+      if (vidMatch) recordInteractedVideo(dataDir, vidMatch[1]);
     } catch (e) {
       console.log('[douyin] 打开视频互动失败:', e?.message || e);
     }
