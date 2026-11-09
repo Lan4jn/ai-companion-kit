@@ -268,7 +268,7 @@ async function main() {
       // 潜水记忆：无论小鱼此刻回不回复，群聊消息都滚动沉淀入环境背景记忆
       if (msg.isGroup) {
         memory.logGroupChatter({ groupKey: msg.key, userId: msg.userId, name: msg.name, text: msg.text });
-        memory.touch(msg.userId, { name: msg.name });
+        memory.touchSeen(msg.userId, { name: msg.name });
         // 先看这条是不是在骂她；骂她的话不能当"群风样本"学，
         // 否则一边让她收敛，一边教她这么说话
         const growthType = observeIncoming(msg, bot.selfId);

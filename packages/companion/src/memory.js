@@ -53,6 +53,8 @@ export class Memory {
       all[key] = {
         name: name || key,
         traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
         interactions: 0,
         firstSeenAt: Date.now(),
         lastSeenAt: Date.now(),
@@ -62,6 +64,9 @@ export class Memory {
     const p = all[key];
     // 补字段（老数据兼容）
     for (const k of ['traits', 'facts', 'topics', 'pending']) if (!Array.isArray(p[k])) p[k] = [];
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    if (typeof p.messagesSeen !== 'number') p.messagesSeen = Number(p.interactions) || 0;
+    p.interactions = p.dialogues;
     if (name && p.name !== name) { p.name = name; this.#writeAll(all); }
     return p;
   }
@@ -71,10 +76,20 @@ export class Memory {
     const all = this.#readAll();
     const key = String(id);
     if (!all[key]) {
-      all[key] = { name: name || key, traits: [], facts: [], topics: [], pending: [], interactions: 0, firstSeenAt: Date.now(), lastSeenAt: Date.now() };
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
     }
     const p = all[key];
     for (const k of ['traits', 'facts', 'topics', 'pending']) if (!Array.isArray(p[k])) p[k] = [];
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    if (typeof p.messagesSeen !== 'number') p.messagesSeen = Number(p.interactions) || 0;
     if (name) p.name = String(name).slice(0, 40);
 
     const put = (arr, v) => {
@@ -87,7 +102,11 @@ export class Memory {
 
     if (trait) put(p.traits, trait);
     if (fact) put(p.facts, fact);
-    if (topic) put(p.topics, topic);
+    if (topic) {
+      put(p.topics, topic);
+      p.dialogues = (Number(p.dialogues) || 0) + 1;
+      p.interactions = p.dialogues;
+    }
     if (pending) put(p.pending, pending);
 
     while (p.topics.length > this.maxTopics) p.topics.shift();
@@ -96,18 +115,65 @@ export class Memory {
     while (p.pending.length > 12) p.pending.shift();
 
     p.lastSeenAt = Date.now();
-    p.interactions = (Number(p.interactions) || 0) + 1;
     this.#writeAll(all);
     return p;
   }
 
-  /** 记一次互动（不加内容，只涨计数） */
+  /** 记录群聊潜水见证消息（只涨水群露脸次数，不涨真实对话） */
+  touchSeen(id, { name } = {}) {
+    const all = this.#readAll();
+    const key = String(id);
+    if (!all[key]) {
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
+    }
+    const p = all[key];
+    p.lastSeenAt = Date.now();
+    p.messagesSeen = (Number(p.messagesSeen) || 0) + 1;
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    p.interactions = p.dialogues;
+    if (name) p.name = String(name).slice(0, 40);
+    this.#writeAll(all);
+    return p;
+  }
+
+  /** 记一次与小鱼的真实对话 */
+  recordDialogue(id, { name, count = 1 } = {}) {
+    const all = this.#readAll();
+    const key = String(id);
+    if (!all[key]) {
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
+    }
+    const p = all[key];
+    p.lastSeenAt = Date.now();
+    p.dialogues = (Number(p.dialogues) || 0) + count;
+    p.interactions = p.dialogues;
+    if (name) p.name = String(name).slice(0, 40);
+    this.#writeAll(all);
+    return p;
+  }
+
+  /** 刷新最近出现时间（不加计数） */
   touch(id, { name } = {}) {
     const all = this.#readAll();
     const key = String(id);
-    if (!all[key]) return this.remember(key, { name });
+    if (!all[key]) return this.touchSeen(key, { name });
     all[key].lastSeenAt = Date.now();
-    all[key].interactions = (Number(all[key].interactions) || 0) + 1;
     if (name) all[key].name = String(name).slice(0, 40);
     this.#writeAll(all);
   }
@@ -214,7 +280,8 @@ export class Memory {
     if (p.facts?.length) L.push('他告诉过你：' + p.facts.slice(-15).join('；'));
     if (p.topics?.length) L.push('你们聊过：' + p.topics.slice(-16).join('；'));
     if (p.pending?.length) L.push('⚠️ 你心里还记着没说出口的事：' + p.pending.slice(-4).join('；'));
-    if (p.interactions) L.push('你们互动过 ' + p.interactions + ' 次');
+    if (p.dialogues || p.interactions) L.push('你们直接对话过 ' + (p.dialogues || p.interactions) + ' 次');
+    if (p.messagesSeen) L.push('他在群聊里发言过 ' + p.messagesSeen + ' 次');
     if (!L.length) return '';
     return '【关于 ' + (p.name || id) + '（' + id + '）的一本账】\n' + L.join('\n') + '\n';
   }

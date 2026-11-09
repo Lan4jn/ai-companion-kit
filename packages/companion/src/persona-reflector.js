@@ -48,7 +48,7 @@ export class PersonaReflector {
     // 3. 累计未反思轮数达到 5 轮
     const isReveal = typeof text === 'string' && this.revealRegex.test(text);
     const isMilestone = count >= 5;
-    const isFreshWhiteboard = hasZeroTraits && (p?.interactions || count) >= 2;
+    const isFreshWhiteboard = hasZeroTraits && (p?.dialogues || p?.interactions || count) >= 1;
 
     if (isReveal || isMilestone || isFreshWhiteboard) {
       this.enqueue(uid, name || p?.name || uid);
@@ -203,7 +203,7 @@ ${formatted}
           const hasTopics = Array.isArray(p.topics) && p.topics.length >= 2;
           return noTraits && hasTopics;
         })
-        .sort((a, b) => (b[1].interactions || 0) - (a[1].interactions || 0))
+        .sort((a, b) => ((b[1].dialogues || 0) * 10 + (b[1].messagesSeen || 0)) - ((a[1].dialogues || 0) * 10 + (a[1].messagesSeen || 0)))
         .slice(0, limit);
 
       if (candidates.length > 0) {

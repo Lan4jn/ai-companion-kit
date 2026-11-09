@@ -791,12 +791,16 @@ function relationshipSnapshot() {
 
   // 2. 老爸（养父）
   const ownerPerson = people[ownerUin] || {};
+  const ownerDlg = typeof ownerPerson.dialogues === 'number' ? ownerPerson.dialogues : Math.max(ownerPerson.interactions || 0, 95);
+  const ownerSeen = typeof ownerPerson.messagesSeen === 'number' ? ownerPerson.messagesSeen : Math.max(ownerPerson.interactions || 0, 2491);
   nodes.push({
     id: ownerUin,
     name: ownerPerson.name || '老爸 (真是咩咩又罗罗)',
     role: '老爸 · 养父',
     tier: 'family',
-    interactions: Math.max(ownerPerson.interactions || 0, 2281),
+    dialogues: ownerDlg,
+    messagesSeen: ownerSeen,
+    interactions: ownerDlg,
     traits: ownerPerson.traits || [],
     facts: ownerPerson.facts || [],
     topics: (ownerPerson.topics || []).slice(-4),
@@ -827,10 +831,14 @@ function relationshipSnapshot() {
     .map(([uid, p]) => {
       const resp = dislikedMap[uid];
       const rel = relationships[uid] || {};
+      const dlg = typeof p.dialogues === 'number' ? p.dialogues : (p.topics?.length || 0);
+      const seen = typeof p.messagesSeen === 'number' ? p.messagesSeen : (Number(p.interactions) || 0);
       return {
         id: uid,
         name: p.name || uid,
-        interactions: Number(p.interactions) || 0,
+        dialogues: dlg,
+        messagesSeen: seen,
+        interactions: dlg,
         traits: p.traits || [],
         facts: p.facts || [],
         topics: (p.topics || []).slice(-4),
@@ -841,7 +849,7 @@ function relationshipSnapshot() {
         respect: resp || null,
       };
     })
-    .sort((a, b) => b.interactions - a.interactions);
+    .sort((a, b) => (b.dialogues * 10 + Math.log10(b.messagesSeen + 1)) - (a.dialogues * 10 + Math.log10(a.messagesSeen + 1)));
 
   // 取常聊群友前 18 名，加上所有黑名单人员（确保拉黑的人全景在图上可见）
   const includedIds = new Set();
@@ -852,10 +860,14 @@ function relationshipSnapshot() {
     if (!includedIds.has(uid) && u.disliked) {
       const p = people[uid] || {};
       const rel = relationships[uid] || {};
+      const dlg = typeof p.dialogues === 'number' ? p.dialogues : (p.topics?.length || 0);
+      const seen = typeof p.messagesSeen === 'number' ? p.messagesSeen : (Number(p.interactions) || 0);
       topFriends.push({
         id: uid,
         name: u.name || p.name || uid,
-        interactions: p.interactions || 0,
+        dialogues: dlg,
+        messagesSeen: seen,
+        interactions: dlg,
         traits: p.traits || [],
         facts: p.facts || [],
         topics: (p.topics || []).slice(-3),
@@ -879,7 +891,9 @@ function relationshipSnapshot() {
       name: item.name,
       role: isDisliked ? `讨厌 · 已拉黑(${item.respect.reason === 'harass' ? '骚扰' : '辱骂'})` : (isWarning ? `警告中(${item.respect.strikes}次越界)` : (item.intimacy >= 60 ? '铁瓷' : (item.intimacy >= 20 ? '常聊熟人' : '群友'))),
       tier,
-      interactions: item.interactions,
+      dialogues: item.dialogues,
+      messagesSeen: item.messagesSeen,
+      interactions: item.dialogues,
       traits: item.traits,
       facts: item.facts,
       topics: item.topics,
@@ -895,8 +909,8 @@ function relationshipSnapshot() {
       source: 'self',
       target: item.id,
       type: tier,
-      label: isDisliked ? '已拉黑/冷落' : (isWarning ? '警戒中' : `互动 ${item.interactions} 次`),
-      value: isDisliked ? 2 : Math.min(8, Math.max(3, Math.round(Math.log10(item.interactions + 1) * 3))),
+      label: isDisliked ? '已拉黑/冷落' : (isWarning ? '警戒中' : (item.dialogues ? `对话 ${item.dialogues} 次` : `水群 ${item.messagesSeen} 句`)),
+      value: isDisliked ? 2 : Math.min(8, Math.max(3, Math.round(Math.log10(item.dialogues * 3 + item.messagesSeen * 0.1 + 1) * 3))),
     });
   }
 
@@ -910,12 +924,16 @@ function relationshipSnapshot() {
       const isDisliked = resp?.disliked || resp?.strikes >= 3;
       const isWarning = !isDisliked && resp && resp.strikes > 0;
       const tier = isOwner ? 'family' : (isDisliked ? 'disliked' : (isWarning ? 'warning' : (rel.intimacy >= 20 ? 'friend' : 'acquaintance')));
+      const dlg = isOwner ? Math.max(p.dialogues || 0, 95) : (typeof p.dialogues === 'number' ? p.dialogues : (p.topics?.length || 0));
+      const seen = isOwner ? Math.max(p.messagesSeen || 0, 2491) : (typeof p.messagesSeen === 'number' ? p.messagesSeen : (Number(p.interactions) || 0));
       return {
         id: uid,
         name: p.name || uid,
         role: isOwner ? '老爸 · 养父' : (isDisliked ? '已拉黑/冷落' : (isWarning ? '警戒中' : (rel.intimacy >= 60 ? '铁瓷' : (rel.intimacy >= 20 ? '常聊熟人' : '群友')))),
         tier,
-        interactions: Number(p.interactions) || 0,
+        dialogues: dlg,
+        messagesSeen: seen,
+        interactions: dlg,
         traits: p.traits || [],
         facts: p.facts || [],
         topics: (p.topics || []).slice(-4),
@@ -929,7 +947,7 @@ function relationshipSnapshot() {
         isOwner,
       };
     })
-    .sort((a, b) => b.interactions - a.interactions);
+    .sort((a, b) => (b.dialogues !== a.dialogues ? b.dialogues - a.dialogues : b.messagesSeen - a.messagesSeen));
 
   return {
     nodes,
@@ -1707,12 +1725,17 @@ function showRelDetail(n){
     const intim = n.intimacy ?? 0;
     const trust = n.trust ?? 50;
     const intimColor = intim >= 60 ? '#39d0a8' : (intim >= 0 ? '#58a6ff' : '#f0616d');
+    const dlgCount = n.dialogues ?? n.interactions ?? 0;
+    const seenCount = n.messagesSeen ?? n.interactions ?? 0;
     html += '<div style="background:#0a0e13;padding:8px 10px;border-radius:6px;border:1px solid #1c242f;display:flex;flex-direction:column;gap:5px">';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#8b949e">亲密度 (愿不愿意理你)</span><b style="color:'+intimColor+'">'+intim+' / 100</b></div>';
     html += '<div style="height:4px;background:#161b22;border-radius:2px;overflow:hidden"><div style="width:'+Math.max(4, Math.min(100, (intim+100)/2))+'%;height:100%;background:'+intimColor+'"></div></div>';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-top:2px"><span style="color:#8b949e">信任度 (愿不愿意说实话)</span><b style="color:#39d0a8">'+trust+' / 100</b></div>';
     html += '<div style="height:4px;background:#161b22;border-radius:2px;overflow:hidden"><div style="width:'+Math.max(4, Math.min(100, trust))+'%;height:100%;background:#39d0a8"></div></div>';
-    html += '<div style="color:#8b949e;font-size:11px;margin-top:2px">互动统计：<span style="color:#e6edf3">'+(n.interactions||0)+' 次真实对话</span></div>';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;color:#8b949e;font-size:11px;margin-top:4px;padding-top:4px;border-top:1px dashed #1c242f">';
+    html += '<span>💬 与小鱼对话：<b style="color:#58a6ff">'+dlgCount+' 次</b></span>';
+    html += '<span>👁️ 群聊露脸发言：<b style="color:#e6edf3">'+seenCount+' 句</b></span>';
+    html += '</div>';
     html += '</div>';
   }
 
