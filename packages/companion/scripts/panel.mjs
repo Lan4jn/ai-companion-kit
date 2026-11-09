@@ -773,6 +773,7 @@ function chatSnapshot() {
 function relationshipSnapshot() {
   const people = readJson('people.json') || {};
   const respect = readJson('respect.json') || { users: {} };
+  const relationships = readJson('relationships.json') || {};
   const ownerUin = '578021239';
 
   const nodes = [];
@@ -796,7 +797,12 @@ function relationshipSnapshot() {
     role: '老爸 · 养父',
     tier: 'family',
     interactions: Math.max(ownerPerson.interactions || 0, 2281),
-    topics: (ownerPerson.topics || []).slice(-3),
+    traits: ownerPerson.traits || [],
+    facts: ownerPerson.facts || [],
+    topics: (ownerPerson.topics || []).slice(-4),
+    pending: ownerPerson.pending || [],
+    intimacy: 100,
+    trust: 100,
     affinity: 100,
     isOwner: true,
   });
@@ -820,32 +826,42 @@ function relationshipSnapshot() {
     .filter(([uid]) => uid !== ownerUin && uid !== '123456')
     .map(([uid, p]) => {
       const resp = dislikedMap[uid];
+      const rel = relationships[uid] || {};
       return {
         id: uid,
         name: p.name || uid,
         interactions: Number(p.interactions) || 0,
-        topics: (p.topics || []).slice(-3),
-        facts: (p.facts || []).slice(-3),
+        traits: p.traits || [],
+        facts: p.facts || [],
+        topics: (p.topics || []).slice(-4),
+        pending: p.pending || [],
+        intimacy: typeof rel.intimacy === 'number' ? Math.round(rel.intimacy) : 0,
+        trust: typeof rel.trust === 'number' ? Math.round(rel.trust) : 50,
         lastSeenAt: p.lastSeenAt || 0,
         respect: resp || null,
       };
     })
     .sort((a, b) => b.interactions - a.interactions);
 
-  // 取常聊群友前 16 名，加上所有黑名单人员（确保拉黑的人全景在图上可见）
+  // 取常聊群友前 18 名，加上所有黑名单人员（确保拉黑的人全景在图上可见）
   const includedIds = new Set();
-  const topFriends = entries.slice(0, 16);
+  const topFriends = entries.slice(0, 18);
   for (const f of topFriends) includedIds.add(f.id);
 
   for (const [uid, u] of Object.entries(dislikedMap)) {
     if (!includedIds.has(uid) && u.disliked) {
       const p = people[uid] || {};
+      const rel = relationships[uid] || {};
       topFriends.push({
         id: uid,
         name: u.name || p.name || uid,
         interactions: p.interactions || 0,
-        topics: (p.topics || []).slice(-2),
-        facts: (p.facts || []).slice(-2),
+        traits: p.traits || [],
+        facts: p.facts || [],
+        topics: (p.topics || []).slice(-3),
+        pending: p.pending || [],
+        intimacy: typeof rel.intimacy === 'number' ? Math.round(rel.intimacy) : -50,
+        trust: typeof rel.trust === 'number' ? Math.round(rel.trust) : 10,
         lastSeenAt: p.lastSeenAt || 0,
         respect: u,
       });
@@ -861,10 +877,15 @@ function relationshipSnapshot() {
     nodes.push({
       id: item.id,
       name: item.name,
-      role: isDisliked ? `讨厌 · 已拉黑(${item.respect.reason === 'harass' ? '骚扰' : '辱骂'})` : (isWarning ? `警告中(${item.respect.strikes}次越界)` : '常聊群友'),
+      role: isDisliked ? `讨厌 · 已拉黑(${item.respect.reason === 'harass' ? '骚扰' : '辱骂'})` : (isWarning ? `警告中(${item.respect.strikes}次越界)` : (item.intimacy >= 60 ? '铁瓷' : (item.intimacy >= 20 ? '常聊熟人' : '群友'))),
       tier,
       interactions: item.interactions,
+      traits: item.traits,
+      facts: item.facts,
       topics: item.topics,
+      pending: item.pending,
+      intimacy: item.intimacy,
+      trust: item.trust,
       strikes: item.respect?.strikes || 0,
       reason: item.respect?.reason || '',
       disliked: Boolean(isDisliked),
@@ -879,9 +900,41 @@ function relationshipSnapshot() {
     });
   }
 
+  // 5. 全量名单索引（供搜索全量 219 位群友小账本）
+  const roster = Object.entries(people)
+    .filter(([uid]) => uid !== '123456')
+    .map(([uid, p]) => {
+      const resp = dislikedMap[uid];
+      const rel = relationships[uid] || {};
+      const isOwner = uid === ownerUin;
+      const isDisliked = resp?.disliked || resp?.strikes >= 3;
+      const isWarning = !isDisliked && resp && resp.strikes > 0;
+      const tier = isOwner ? 'family' : (isDisliked ? 'disliked' : (isWarning ? 'warning' : (rel.intimacy >= 20 ? 'friend' : 'acquaintance')));
+      return {
+        id: uid,
+        name: p.name || uid,
+        role: isOwner ? '老爸 · 养父' : (isDisliked ? '已拉黑/冷落' : (isWarning ? '警戒中' : (rel.intimacy >= 60 ? '铁瓷' : (rel.intimacy >= 20 ? '常聊熟人' : '群友')))),
+        tier,
+        interactions: Number(p.interactions) || 0,
+        traits: p.traits || [],
+        facts: p.facts || [],
+        topics: (p.topics || []).slice(-4),
+        pending: p.pending || [],
+        intimacy: isOwner ? 100 : (typeof rel.intimacy === 'number' ? Math.round(rel.intimacy) : 0),
+        trust: isOwner ? 100 : (typeof rel.trust === 'number' ? Math.round(rel.trust) : 50),
+        lastSeenAt: p.lastSeenAt || 0,
+        strikes: resp?.strikes || 0,
+        reason: resp?.reason || '',
+        disliked: Boolean(isDisliked),
+        isOwner,
+      };
+    })
+    .sort((a, b) => b.interactions - a.interactions);
+
   return {
     nodes,
     links,
+    roster,
     summary: {
       totalTracked: Object.keys(people).length,
       dislikedCount: Object.values(respect.users || {}).filter(u => u.disliked).length,
@@ -1117,6 +1170,9 @@ const PAGE = String.raw`<!doctype html>
   .badge.disliked{background:rgba(240,97,109,.15);color:#f0616d;border:1px solid rgba(240,97,109,.3)}
   .rel-detail .topics{max-height:160px;overflow-y:auto;color:#a9b4c0;font-size:11px;display:flex;flex-direction:column;gap:5px}
   .rel-detail .topics div{background:#1a222d;padding:6px 8px;border-radius:5px;line-height:1.4}
+  .trait-tag{background:rgba(57,208,168,.15);color:#39d0a8;border:1px solid rgba(57,208,168,.3);border-radius:4px;padding:2px 7px;font-size:11px;display:inline-block;margin:2px 4px 2px 0}
+  .fact-item{background:#161d27;padding:6px 9px;border-radius:5px;font-size:11px;color:#c9d1d9;border-left:3px solid #58a6ff;margin-bottom:5px;line-height:1.45}
+  .pending-item{background:#261a15;padding:6px 9px;border-radius:5px;font-size:11px;color:#f0a35e;border-left:3px solid #f0a35e;margin-bottom:5px;line-height:1.45}
   .rel-unblock-btn{background:#f0616d;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600;margin-top:8px}
   .rel-unblock-btn:hover{filter:brightness(1.15)}
   .msg{display:flex;margin:7px 0;align-items:flex-end}
@@ -1280,20 +1336,24 @@ const PAGE = String.raw`<!doctype html>
       <section class="card"><h2>实时推理（规则表 + 推理层）</h2><div id="reasoning"></div></section>
     </div>
     <section class="card relcard" id="relCard">
-      <h2 style="display:flex;align-items:center;gap:8px">
+      <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         人际关系网络图谱
-        <span class="tsub">社交圈 · 养父与常聊群友 · 实时状态</span>
-        <div class="rel-filter" id="relFilter" style="margin-left:auto;display:flex;gap:4px">
-          <button class="rel-btn active" data-filter="all">全部</button>
-          <button class="rel-btn" data-filter="family">老爸</button>
-          <button class="rel-btn" data-filter="friend">常聊好友</button>
-          <button class="rel-btn" data-filter="warning">警戒中</button>
-          <button class="rel-btn" data-filter="disliked">讨厌名单</button>
+        <span class="tsub">社交圈 · 养父与全量群友印象小账本</span>
+        <div class="rel-search-wrap" style="position:relative;margin-left:auto;display:flex;align-items:center;gap:6px">
+          <input type="text" id="relSearch" placeholder="🔍 搜群友昵称 / QQ号 (全量219人)..." list="relRosterList" style="background:#0a0e13;border:1px solid #232b36;color:#e6edf3;padding:4px 10px;border-radius:6px;font-size:12px;outline:none;width:220px">
+          <datalist id="relRosterList"></datalist>
+          <div class="rel-filter" id="relFilter" style="display:flex;gap:4px">
+            <button class="rel-btn active" data-filter="all">全部</button>
+            <button class="rel-btn" data-filter="family">老爸</button>
+            <button class="rel-btn" data-filter="friend">常聊好友</button>
+            <button class="rel-btn" data-filter="warning">警戒中</button>
+            <button class="rel-btn" data-filter="disliked">讨厌名单</button>
+          </div>
         </div>
       </h2>
       <div class="rel-body" style="display:flex;gap:12px;position:relative">
         <div style="flex:1;position:relative">
-          <canvas id="relCanvas" style="width:100%;height:380px;background:#0d1117;border-radius:8px;border:1px solid #232b36;cursor:grab;display:block"></canvas>
+          <canvas id="relCanvas" style="width:100%;height:440px;background:#0d1117;border-radius:8px;border:1px solid #232b36;cursor:grab;display:block"></canvas>
           <div id="relLegend" class="rel-legend">
             <span><i style="background:#e3b341"></i> 老爸 (养父)</span>
             <span><i style="background:#39d0a8"></i> 常聊好友</span>
@@ -1301,7 +1361,7 @@ const PAGE = String.raw`<!doctype html>
             <span><i style="background:#f0616d"></i> 讨厌 (已拉黑)</span>
           </div>
         </div>
-        <div id="relDetail" class="rel-detail" style="width:280px;background:#131820;border:1px solid #232b36;border-radius:8px;padding:12px;display:none;flex-direction:column;gap:8px;font-size:12px;line-height:1.5">
+        <div id="relDetail" class="rel-detail" style="width:340px;max-height:440px;overflow-y:auto;background:#131820;border:1px solid #232b36;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;font-size:12px;line-height:1.5">
         </div>
       </div>
     </section>
@@ -1526,6 +1586,25 @@ function renderRelations(rel){
     REL_INITED = true;
     initRelEvents(cvs);
   }
+  // 填充全量名单搜索 datalist
+  const dl = el('relRosterList');
+  if(dl && rel.roster && dl.children.length !== rel.roster.length){
+    dl.innerHTML = rel.roster.map(p => '<option value="' + esc(p.name) + ' (' + esc(p.id) + ')"></option>').join('');
+  }
+  // 默认选中老爸（或者选中的人更新数据）
+  if(!REL_SELECTED){
+    const fam = rel.nodes.find(n => n.id === '578021239') || (rel.roster && rel.roster.find(p => p.id === '578021239'));
+    if(fam) {
+      REL_SELECTED = fam;
+      showRelDetail(fam);
+    }
+  } else {
+    const updated = (rel.roster && rel.roster.find(p => p.id === REL_SELECTED.id)) || rel.nodes.find(n => n.id === REL_SELECTED.id);
+    if(updated) {
+      REL_SELECTED = updated;
+      showRelDetail(updated);
+    }
+  }
   layoutAndDrawRel(cvs);
 }
 
@@ -1539,6 +1618,27 @@ function initRelEvents(cvs){
       btn.classList.add('active');
       REL_FILTER = btn.dataset.filter || 'all';
       layoutAndDrawRel(cvs);
+    });
+  }
+
+  const searchInput = el('relSearch');
+  if(searchInput && !searchInput.dataset.bound){
+    searchInput.dataset.bound = '1';
+    searchInput.addEventListener('input', (e)=>{
+      const val = e.target.value.trim().toLowerCase();
+      if(!val || !REL_DATA || !REL_DATA.roster) return;
+      const numMatch = val.match(/\d{5,12}/);
+      const targetId = numMatch ? numMatch[0] : null;
+      const cleanVal = val.replace(/\s*\(\d+\)$/, '');
+      const found = REL_DATA.roster.find(p => 
+        (targetId && p.id === targetId) ||
+        p.id.toLowerCase().includes(val) || 
+        p.name.toLowerCase().includes(cleanVal)
+      );
+      if(found){
+        REL_SELECTED = found;
+        showRelDetail(found);
+      }
     });
   }
 
@@ -1592,29 +1692,80 @@ function showRelDetail(n){
   const box = el('relDetail');
   if(!box) return;
   box.style.display = 'flex';
+  if(!n) {
+    box.innerHTML = '<div style="color:#8b949e;text-align:center;margin-top:60px">💡 点击星系图中的人物节点<br>或在上方搜索框直接查找群友<br>即可查看小鱼心中的专属印象小账本</div>';
+    return;
+  }
   const badgeClass = n.tier || 'friend';
-  let badgeTxt = n.role || '好友';
-  let html = '<div><b>'+esc(n.name)+'</b> <span style="font-size:11px;color:#8b949e">('+esc(n.id)+')</span></div>';
-  html += '<div><span class="badge '+badgeClass+'">'+esc(badgeTxt)+'</span></div>';
-  html += '<div style="color:#8b949e">互动统计：<span style="color:#e6edf3">'+(n.interactions||0)+' 次真实对话</span></div>';
-  if(n.topics && n.topics.length){
-    html += '<div style="margin-top:4px;color:#8b949e;font-size:11px">最近话题记录：</div><div class="topics">';
-    for(const top of n.topics){
-      html += '<div>'+esc(top)+'</div>';
+  let badgeTxt = n.role || '群友';
+  let html = '<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #232b36;padding-bottom:8px">';
+  html += '<div><b style="font-size:14.5px;color:#e6edf3">'+esc(n.name)+'</b> <span style="font-size:11px;color:#8b949e">('+esc(n.id)+')</span></div>';
+  html += '<span class="badge '+badgeClass+'">'+esc(badgeTxt)+'</span>';
+  html += '</div>';
+
+  if(!n.isSelf){
+    const intim = n.intimacy ?? 0;
+    const trust = n.trust ?? 50;
+    const intimColor = intim >= 60 ? '#39d0a8' : (intim >= 0 ? '#58a6ff' : '#f0616d');
+    html += '<div style="background:#0a0e13;padding:8px 10px;border-radius:6px;border:1px solid #1c242f;display:flex;flex-direction:column;gap:5px">';
+    html += '<div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#8b949e">亲密度 (愿不愿意理你)</span><b style="color:'+intimColor+'">'+intim+' / 100</b></div>';
+    html += '<div style="height:4px;background:#161b22;border-radius:2px;overflow:hidden"><div style="width:'+Math.max(4, Math.min(100, (intim+100)/2))+'%;height:100%;background:'+intimColor+'"></div></div>';
+    html += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-top:2px"><span style="color:#8b949e">信任度 (愿不愿意说实话)</span><b style="color:#39d0a8">'+trust+' / 100</b></div>';
+    html += '<div style="height:4px;background:#161b22;border-radius:2px;overflow:hidden"><div style="width:'+Math.max(4, Math.min(100, trust))+'%;height:100%;background:#39d0a8"></div></div>';
+    html += '<div style="color:#8b949e;font-size:11px;margin-top:2px">互动统计：<span style="color:#e6edf3">'+(n.interactions||0)+' 次真实对话</span></div>';
+    html += '</div>';
+  }
+
+  // 1. 性格特征画像 (traits)
+  if(n.traits && n.traits.length){
+    html += '<div><div style="color:#39d0a8;font-size:11.5px;font-weight:600;margin-bottom:4px">🏷️ 小鱼眼里的性格特质：</div><div>';
+    for(const tr of n.traits){
+      html += '<span class="trait-tag">'+esc(tr)+'</span>';
+    }
+    html += '</div></div>';
+  } else if(!n.isSelf && n.id !== 'self') {
+    html += '<div style="color:#6e7681;font-size:11px">🏷️ 暂无特定特质标签（日常随和交流）</div>';
+  }
+
+  // 2. 记住的事实档案 (facts)
+  if(n.facts && n.facts.length){
+    html += '<div><div style="color:#58a6ff;font-size:11.5px;font-weight:600;margin-bottom:4px">📝 脑海里记着的事实：</div>';
+    for(const f of n.facts){
+      html += '<div class="fact-item">'+esc(f)+'</div>';
     }
     html += '</div>';
   }
+
+  // 3. 心里还记着没说出口的事 (pending)
+  if(n.pending && n.pending.length){
+    html += '<div><div style="color:#f0a35e;font-size:11.5px;font-weight:600;margin-bottom:4px">⚠️ 心里惦记着的事：</div>';
+    for(const p of n.pending){
+      html += '<div class="pending-item">'+esc(p)+'</div>';
+    }
+    html += '</div>';
+  }
+
+  // 4. 最近话题记录 (topics)
+  if(n.topics && n.topics.length){
+    html += '<div><div style="color:#8b949e;font-size:11.5px;font-weight:600;margin-bottom:4px">💬 最近对话与接茬：</div><div class="topics">';
+    for(const top of n.topics){
+      html += '<div>'+esc(top)+'</div>';
+    }
+    html += '</div></div>';
+  }
+
   if(n.disliked){
     html += '<div style="color:#f0616d;font-size:11px;margin-top:2px">⚠️ 已触发底线防御，小鱼在群内对其静默无视。</div>';
     html += '<button class="rel-unblock-btn" onclick="unblockUser(\''+esc(n.id)+'\')">✨ 原谅 / 一键解除拉黑</button>';
   }
+
   box.innerHTML = html;
 }
 
 function layoutAndDrawRel(cvs){
   const rect = cvs.getBoundingClientRect();
   const W = rect.width || 800;
-  const H = rect.height || 380;
+  const H = rect.height || 440;
   cvs.width = W;
   cvs.height = H;
 
