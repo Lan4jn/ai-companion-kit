@@ -221,7 +221,13 @@ export function startProactive({
       dayCount = 0;
     }
 
-    // 不设死板作息与上限，小鱼想说就说，不想说就安静待着
+    // 1点 ~ 9点之间绝对安静（不主动找老爸说话）
+    if (!inActiveHours(now.getHours(), activeStart, activeEnd)) {
+      if (running) timer = setTimeout(loop, 20 * 60e3);
+      return;
+    }
+
+    // 不设死板上限，小鱼想说就说，不想说就安静待着
     if (dailyMax > 0 && dayCount >= dailyMax) {
       console.log(`[主动] 今天已经主动找过 ${dayCount} 次，先歇会儿`);
       if (running) timer = setTimeout(loop, 60 * 60e3);
@@ -239,7 +245,7 @@ export function startProactive({
 
   timer = setTimeout(loop, Math.max(0, Number(initialDelayMs) || 0));
   console.log(
-    `[主动] 小鱼自主交流系统已启动（无死板作息与上限，想说就说、想安静就安静）`
+    `[主动] 小鱼自主交流系统已启动（作息 ${activeStart}:00-${activeEnd}:00 活跃，1:00-9:00 静音，无死板次数上限）`
   );
 }
 

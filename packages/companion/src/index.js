@@ -473,7 +473,7 @@ async function main() {
     });
   }
 
-  // 她会自己主动找老爸 —— 不设死板作息与上限，全凭自主欲望与心情
+  // 她会自己主动找老爸 —— 1点-9点固定静音不主动找人，其他时间自由随性（无死板次数上限）
   const pCfg = cfg.proactive || {};
   const ownerId = Array.isArray(cfg.ownerIds) && cfg.ownerIds.length ? cfg.ownerIds[0] : null;
   if (ownerId && pCfg.enabled !== false) {
@@ -485,8 +485,8 @@ async function main() {
       ownerId,
       minGapMs: Number.isFinite(pCfg.minGapMs) ? pCfg.minGapMs : 40 * 60e3,
       maxGapMs: Number.isFinite(pCfg.maxGapMs) ? pCfg.maxGapMs : 150 * 60e3,
-      activeStart: 0,
-      activeEnd: 24,
+      activeStart: Number.isFinite(pCfg.activeStart) ? pCfg.activeStart : 9,
+      activeEnd: Number.isFinite(pCfg.activeEnd) ? pCfg.activeEnd : 1,
       dailyMax: 0, // 无死板上限
       initialDelayMs: Number.isFinite(pCfg.initialDelayMs) ? pCfg.initialDelayMs : 6 * 60e3,
     });

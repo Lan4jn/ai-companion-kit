@@ -198,6 +198,14 @@ export class Waker {
       }
     }
 
+    // 2.6 深夜 1:00 ~ 9:00 静音守护：群聊中未被明确呼叫（@、叫名字、拍一拍）时不主动插话/抢答
+    if (msg.isGroup && !directlyCalled) {
+      const h = new Date().getHours();
+      if (h >= 1 && h < 9) {
+        return { wake: false, reason: 'quiet-hours' };
+      }
+    }
+
     // 3. 关键词检查（使用清洗后的文本；潜水群聊不响应通用日常词，除非该群配置了专属 keywords）
     const kw = c.mode === 'diving' ? (c.keywords || []) : [...(c.keywords || []), ...this.keywords];
     if (kw.length) {
