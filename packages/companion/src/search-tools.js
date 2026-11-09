@@ -1,5 +1,19 @@
 import http from 'node:http';
 import tls from 'node:tls';
+import fs from 'node:fs';
+import path from 'node:path';
+
+function getBaiduKey() {
+  if (process.env.BAIDU_SEARCH_API_KEY) return process.env.BAIDU_SEARCH_API_KEY;
+  try {
+    const cfgPath = path.resolve(process.cwd(), 'config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (cfg.baiduSearchApiKey) return cfg.baiduSearchApiKey;
+    }
+  } catch {}
+  return '';
+}
 
 /**
  * 实时联网搜索工具 (web_search)
@@ -47,24 +61,124 @@ export async function executeSearchTool(name, args = {}) {
 
   console.log(`[web_search] 小鱼自主发起网络搜索: "${query}"`);
 
-  // 首选 AnySearch API
+  // 1. 国内直连首选：百度 AI 搜索 v2（千帆 AppBuilder 结构化 API）
   try {
-    const apiKey = 'as_sk_d19bd7beb14590d2071c684bcf321715';
-    const url = 'https://api.anysearch.com/mcp';
+    const baiduKey = getBaiduKey();
+    if (!baiduKey) throw new Error('未配置 baiduSearchApiKey');
+    const baiduUrl = 'https://qianfan.baidubce.com/v2/ai_search/web_search';
     const currentYear = new Date().getFullYear();
-    // 如果查询词包含发售、上线、时间、最新等，自动附带当前年份增强相关度
     let finalQuery = query;
     if (/(发售|上线|上市|几号|时间|最新|出了没)/.test(query) && !query.includes(String(currentYear))) {
       finalQuery += ` ${currentYear} 最新`;
     }
 
     const payload = {
+      messages: [{ role: 'user', content: finalQuery.slice(0, 100) }],
+      search_source: 'baidu_search_v2',
+      resource_type_filter: [{ type: 'web', top_k: 5 }]
+    };
+
+    const res = await fetch(baiduUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Appbuilder-Authorization': `Bearer ${baiduKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(6000)
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const refs = data.references || [];
+      if (refs.length > 0) {
+        console.log(`[web_search] 百度 AI 搜索成功，获取 ${refs.length} 条摘要`);
+        const now = new Date();
+        const header = `【互联网实时搜索结果（基准时间：${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日）】：\n\n`;
+        const body = refs.map((r, i) => `${i + 1}. 【${r.title}】\n${r.content || ''}\n(来源: ${r.date || ''} ${r.url || ''})`).join('\n\n');
+        return { success: true, text: header + body };
+      }
+    }
+  } catch (err) {
+    console.warn(`[web_search] 百度 AI 搜索通道异常: ${err.message}，尝试备用搜索...`);
+  }
+
+  // 2. 海外/时政备用通道：维基百科 API（通过本地 7890 局部代理）
+  try {
+    const wikiData = await new Promise((resolve, reject) => {
+      const u = new URL('https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=' + encodeURIComponent(query) + '&format=json&utf8=1');
+      const req = http.request({
+        host: '127.0.0.1',
+        port: 7890,
+        method: 'CONNECT',
+        path: `${u.hostname}:443`,
+        timeout: 6000,
+      });
+      req.on('timeout', () => req.destroy(new Error('Proxy connect timeout')));
+      req.on('connect', (res, socket) => {
+        if (res.statusCode !== 200) return reject(new Error('Proxy CONNECT status ' + res.statusCode));
+        const tlsSocket = tls.connect({ socket, servername: u.hostname, timeout: 6000 }, () => {
+          const headers = [
+            `GET ${u.pathname}${u.search} HTTP/1.1`,
+            `Host: ${u.hostname}`,
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Connection: close',
+            '',
+            ''
+          ].join('\r\n');
+          tlsSocket.write(headers);
+        });
+        tlsSocket.on('timeout', () => tlsSocket.destroy(new Error('TLS socket timeout')));
+        let data = '';
+        tlsSocket.on('data', chunk => data += chunk);
+        tlsSocket.on('end', () => {
+          const bodyIdx = data.indexOf('\r\n\r\n');
+          let body = bodyIdx >= 0 ? data.slice(bodyIdx + 4) : data;
+          // 处理 chunked 编码
+          if (data.toLowerCase().includes('transfer-encoding: chunked')) {
+            body = body.replace(/^[0-9a-fA-F]+\r\n/, '').replace(/\r\n[0-9a-fA-F]+\r\n[\s\S]*$/, '');
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (e) {
+            // 正则二次提取 json
+            const m = body.match(/\{[\s\S]*\}/);
+            if (m) {
+              try { return resolve(JSON.parse(m[0])); } catch {}
+            }
+            reject(new Error('Wikipedia JSON parse error'));
+          }
+        });
+        tlsSocket.on('error', reject);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const items = wikiData.query?.search || [];
+    if (items.length > 0) {
+      console.log(`[web_search] 维基代理搜索成功，获取 ${items.length} 条百科`);
+      const body = items.slice(0, 4).map((it, i) => {
+        const cleanSnippet = (it.snippet || '').replace(/<[^>]+>/g, '').trim();
+        return `${i + 1}. 【${it.title}】：${cleanSnippet}`;
+      }).join('\n\n');
+      return { success: true, text: `【维基百科实时检索结果】：\n\n` + body };
+    }
+  } catch (err) {
+    console.warn(`[web_search] 维基代理搜索通道异常: ${err.message}`);
+  }
+
+  // 3. 兜底搜索：AnySearch / 第三方接口备用
+  try {
+    const apiKey = 'as_sk_d19bd7beb14590d2071c684bcf321715';
+    const url = 'https://api.anysearch.com/mcp';
+    const payload = {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
       params: {
         name: 'search',
-        arguments: { query: finalQuery, max_results: 5 }
+        arguments: { query, max_results: 5 }
       }
     };
 
@@ -75,7 +189,7 @@ export async function executeSearchTool(name, args = {}) {
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(5000)
     });
 
     if (res.ok) {
@@ -83,72 +197,11 @@ export async function executeSearchTool(name, args = {}) {
       const content = data.result?.content || [];
       const textItem = content.find((c) => c.type === 'text');
       if (textItem && textItem.text) {
-        console.log(`[web_search] 搜索成功，返回长度: ${textItem.text.length}`);
-        const now = new Date();
-        const header = `【互联网实时搜索结果（当前真实时间为 ${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日，请结合此基准时间理解新闻动态）】：\n\n`;
-        return { success: true, text: header + textItem.text };
+        return { success: true, text: `【互联网实时搜索结果】：\n\n` + textItem.text };
       }
     }
   } catch (err) {
-    console.warn(`[web_search] AnySearch 失败: ${err.message}，尝试备用搜索...`);
-  }
-
-  // 备用搜索：DuckDuckGo HTML 提取（经由本地 7890 局部代理）
-  try {
-    const html = await new Promise((resolve, reject) => {
-      const u = new URL('https://html.duckduckgo.com/html/');
-      const req = http.request({
-        host: '127.0.0.1',
-        port: 7890,
-        method: 'CONNECT',
-        path: `${u.hostname}:443`,
-        timeout: 8000,
-      });
-      req.on('timeout', () => req.destroy(new Error('Proxy connect timeout')));
-      req.on('connect', (res, socket) => {
-        if (res.statusCode !== 200) return reject(new Error('Proxy CONNECT status ' + res.statusCode));
-        const tlsSocket = tls.connect({ socket, servername: u.hostname, timeout: 8000 }, () => {
-          const body = `q=${encodeURIComponent(query)}`;
-          const headers = [
-            `POST ${u.pathname}${u.search} HTTP/1.1`,
-            `Host: ${u.hostname}`,
-            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Content-Type: application/x-www-form-urlencoded',
-            `Content-Length: ${Buffer.byteLength(body)}`,
-            'Connection: close',
-            '',
-            body
-          ].join('\r\n');
-          tlsSocket.write(headers);
-        });
-        tlsSocket.on('timeout', () => tlsSocket.destroy(new Error('TLS socket timeout')));
-        let data = '';
-        tlsSocket.on('data', chunk => data += chunk);
-        tlsSocket.on('end', () => {
-          const bodyIdx = data.indexOf('\r\n\r\n');
-          resolve(bodyIdx >= 0 ? data.slice(bodyIdx + 4) : data);
-        });
-        tlsSocket.on('error', reject);
-      });
-      req.on('error', reject);
-      req.end();
-    });
-
-    if (html) {
-      // 提取结果中的标题和摘要
-      const snippets = [];
-      const regex = /<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/gi;
-      let m;
-      while ((m = regex.exec(html)) !== null && snippets.length < 4) {
-        const clean = m[1].replace(/<[^>]+>/g, '').trim();
-        if (clean) snippets.push(clean);
-      }
-      if (snippets.length > 0) {
-        return { success: true, text: snippets.map((s, i) => `${i + 1}. ${s}`).join('\n\n') };
-      }
-    }
-  } catch (e) {
-    console.warn(`[web_search] 备用搜索也失败: ${e.message}`);
+    console.warn(`[web_search] 兜底 AnySearch 失败: ${err.message}`);
   }
 
   return { success: false, text: `未找到关于 "${query}" 的相关搜索结果或网络连接超时。` };
