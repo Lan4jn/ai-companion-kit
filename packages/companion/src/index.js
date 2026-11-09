@@ -30,7 +30,7 @@ import { startPhoneLiving, getPhoneLivingStatus, setVideoBrain } from './phone-l
 import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living.js';
 import { startDouyinLiving, browseDouyinLive, getDouyinLivingStatus, setDouyinRoom } from './douyin-living.js';
 import { startWebLiving, browseWebTopic, getWebLivingStatus, renderWebKnowledge } from './web-living.js';
-import { startVirtualRoomServer, setRoomState } from './virtual-room.js';
+import { startVirtualRoomServer, setRoomState, getRoomState } from './virtual-room.js';
 import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
@@ -433,9 +433,9 @@ async function main() {
       commentChance: Number.isFinite(dyCfg.commentChance) ? dyCfg.commentChance : 0.2,
       commentDailyMax: Number.isFinite(dyCfg.commentDailyMax) ? dyCfg.commentDailyMax : 8,
       followChance: Number.isFinite(dyCfg.followChance) ? dyCfg.followChance : 0.12,
-      windowStart: Number.isFinite(dyCfg.windowStart) ? dyCfg.windowStart : 9,
-      windowEnd: Number.isFinite(dyCfg.windowEnd) ? dyCfg.windowEnd : 1,
-      dailyMax: Number.isFinite(dyCfg.dailyMax) ? dyCfg.dailyMax : 40,
+      windowStart: 0,
+      windowEnd: 24,
+      dailyMax: 0, // 0 表示无死板上限，完全自主想刷就刷
       ownerName: dyCfg.ownerName || '不吃肘击（香菜版）',
       ownerSecUid: dyCfg.ownerSecUid || '',
     },
@@ -444,36 +444,36 @@ async function main() {
   // 启动小鱼全网冲浪与吃瓜系统（自主看微博/B站/百度热搜、查背景、写日记、聊天分享）
   startWebLiving({ brain, memory });
 
-  // 她自己上网刷B站看视频（不依赖手机，按作息随机醒）
+  // 她自己上网刷B站看视频（不依赖手机，随性自主想看就看、想歇就歇）
   const biliCfg = cfg.bili || {};
   if (biliCfg.enabled !== false) {
     startBiliLiving({
       brain,
       memory,
       credentials: biliCfg.credentials || null,
-      windowStart: Number.isFinite(biliCfg.windowStart) ? biliCfg.windowStart : 20,
-      windowEnd: Number.isFinite(biliCfg.windowEnd) ? biliCfg.windowEnd : 24,
+      windowStart: 0,
+      windowEnd: 24,
       ownerMid: biliCfg.ownerMid || null,
       ownerName: biliCfg.ownerName || 'Mew',
       ownerQQ: biliCfg.ownerQQ || null,
-      dmDailyMax: Number.isFinite(biliCfg.dmDailyMax) ? biliCfg.dmDailyMax : 1,
+      dmDailyMax: 0,
       reachChance: Number.isFinite(biliCfg.reachChance) ? biliCfg.reachChance : 0.35,
       skipChance: Number.isFinite(biliCfg.skipChance) ? biliCfg.skipChance : 0.15,
       mentionPollMs: Number.isFinite(biliCfg.mentionPollMs) ? biliCfg.mentionPollMs : 480000,
-      dailyMax: Number.isFinite(biliCfg.dailyMax) ? biliCfg.dailyMax : 8,
+      dailyMax: 0, // 无死板上限
       commentEnabled: biliCfg.commentEnabled !== false,
-      commentDailyMax: Number.isFinite(biliCfg.commentDailyMax) ? biliCfg.commentDailyMax : 2,
+      commentDailyMax: 0,
       danmakuEnabled: biliCfg.danmakuEnabled !== false,
       danmakuChance: Number.isFinite(biliCfg.danmakuChance) ? biliCfg.danmakuChance : 0.55,
       coinChance: Number.isFinite(biliCfg.coinChance) ? biliCfg.coinChance : 0.25,
       watchBrowserSeconds: Number.isFinite(biliCfg.watchBrowserSeconds) ? biliCfg.watchBrowserSeconds : 20,
       watchBrowserRate: Number.isFinite(biliCfg.watchBrowserRate) ? biliCfg.watchBrowserRate : 2,
       followEnabled: biliCfg.followEnabled !== false,
-      followDailyMax: Number.isFinite(biliCfg.followDailyMax) ? biliCfg.followDailyMax : 2,
+      followDailyMax: 0,
     });
   }
 
-  // 她会自己主动找老爸 —— 不用等消息
+  // 她会自己主动找老爸 —— 不设死板作息与上限，全凭自主欲望与心情
   const pCfg = cfg.proactive || {};
   const ownerId = Array.isArray(cfg.ownerIds) && cfg.ownerIds.length ? cfg.ownerIds[0] : null;
   if (ownerId && pCfg.enabled !== false) {
@@ -483,11 +483,11 @@ async function main() {
       bot,
       human,
       ownerId,
-      minGapMs: Number.isFinite(pCfg.minGapMs) ? pCfg.minGapMs : 45 * 60e3,
-      maxGapMs: Number.isFinite(pCfg.maxGapMs) ? pCfg.maxGapMs : 160 * 60e3,
-      activeStart: Number.isFinite(pCfg.activeStart) ? pCfg.activeStart : 8,
-      activeEnd: Number.isFinite(pCfg.activeEnd) ? pCfg.activeEnd : 1,
-      dailyMax: Number.isFinite(pCfg.dailyMax) ? pCfg.dailyMax : 4,
+      minGapMs: Number.isFinite(pCfg.minGapMs) ? pCfg.minGapMs : 40 * 60e3,
+      maxGapMs: Number.isFinite(pCfg.maxGapMs) ? pCfg.maxGapMs : 150 * 60e3,
+      activeStart: 0,
+      activeEnd: 24,
+      dailyMax: 0, // 无死板上限
       initialDelayMs: Number.isFinite(pCfg.initialDelayMs) ? pCfg.initialDelayMs : 6 * 60e3,
     });
   } else {
@@ -507,6 +507,14 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   setCurrentChat(key);
   const isOwnerTurn = cfg.ownerIds.includes(last.userId);
   const relVerdict = rel ? rel.verdict(last.userId, { isOwner: isOwnerTurn }) : 'normal';
+
+  // 睡觉状态自适应：如果正在床上睡觉，收到消息自然揉眼睛醒来回话
+  try {
+    const curRoom = getRoomState();
+    if (curRoom && curRoom.state === 'bed_sleep') {
+      setRoomState('bed_sit', { action: '聊天', message: '被消息唤醒啦，揉着眼睛回话' });
+    }
+  } catch {}
 
   // 心智内核：当日牌灵、德行十轴与尊重守卫
   const tarotPrompt = tarotPromptBlock(cfg.dataDir || './data');

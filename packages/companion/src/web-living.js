@@ -524,19 +524,12 @@ export function startWebLiving({ brain, memory, intervalMinutes = 15 } = {}) {
 
     timer = setTimeout(async () => {
       try {
-        const hour = new Date().getHours();
-        // 睡眠时间（1:00 ~ 8:30）不冲浪，保持人类真实作息
-        if (hour >= 1 && hour < 9) {
-          scheduleNext();
-          return;
-        }
-
         if (state.isRunning) {
           scheduleNext();
           return;
         }
 
-        // ★ 核心改变：走一遍她的大脑层流程，由小鱼自己决定！
+        // ★ 核心改变：走一遍她的大脑层流程，由小鱼自己决定想做啥做啥（睡觉都行）！
         const decision = await decideWebSurfing({ brain: activeBrain, memory: activeMemory });
         if (decision.want) {
           console.log(`[WebLiving] 🧠 小鱼大脑决定去上网冲浪！理由: "${decision.reason}"${decision.keyword ? ` (想查: "${decision.keyword}")` : ''}`);
@@ -548,7 +541,7 @@ export function startWebLiving({ brain, memory, intervalMinutes = 15 } = {}) {
             prompt: decision.reason
           });
         } else {
-          console.log(`[WebLiving] 🧠 小鱼大脑自省：这会儿不想上网（理由: "${decision.reason || '想先发呆放空'}"）`);
+          console.log(`[WebLiving] 🧠 小鱼大脑自省：这会儿不想上网（理由: "${decision.reason || '想先发呆放空或睡觉'}"）`);
         }
       } catch (err) {
         console.warn('[WebLiving] 冲浪周期执行异常:', err.message);

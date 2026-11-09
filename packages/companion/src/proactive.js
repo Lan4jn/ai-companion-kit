@@ -221,13 +221,9 @@ export function startProactive({
       dayCount = 0;
     }
 
-    if (!inActiveHours(now.getHours(), activeStart, activeEnd)) {
-      if (running) timer = setTimeout(loop, 30 * 60e3);
-      return;
-    }
-
-    if (dayCount >= dailyMax) {
-      console.log(`[主动] 今天已经找过 ${dayCount} 次，先歇着`);
+    // 不设死板作息与上限，小鱼想说就说，不想说就安静待着
+    if (dailyMax > 0 && dayCount >= dailyMax) {
+      console.log(`[主动] 今天已经主动找过 ${dayCount} 次，先歇会儿`);
       if (running) timer = setTimeout(loop, 60 * 60e3);
       return;
     }
@@ -243,7 +239,7 @@ export function startProactive({
 
   timer = setTimeout(loop, Math.max(0, Number(initialDelayMs) || 0));
   console.log(
-    `[主动] 已启动：${activeStart}:00-${activeEnd}:00 之间，每 ${Math.round(minGapMs / 60000)}~${Math.round(maxGapMs / 60000)} 分钟想一次，每天最多 ${dailyMax} 次`
+    `[主动] 小鱼自主交流系统已启动（无死板作息与上限，想说就说、想安静就安静）`
   );
 }
 

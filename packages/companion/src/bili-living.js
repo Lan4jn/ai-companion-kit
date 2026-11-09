@@ -374,26 +374,18 @@ export function startBiliLiving({
       ctx.todayCount = 0;
     }
 
-    // 窗口外：等到点
-    if (!inWindow(now.getHours(), ctx.windowStart, ctx.windowEnd)) {
-      const wait = msUntilWindowStart(now, ctx.windowStart);
-      console.log(`[BiliLiving] 不在作息窗口，${(wait / 3600e3).toFixed(1)} 小时后再说`);
+    // 不设死板作息与上限，小鱼自主想看就看；只有在显式设置了上限且达到时才短歇
+    if (ctx.dailyMax > 0 && ctx.todayCount >= ctx.dailyMax) {
+      const wait = 60 * 60e3;
+      console.log(`[BiliLiving] 已经连续看了 ${ctx.todayCount} 个视频，小鱼揉了揉眼睛准备去干别的`);
       if (running) timer = setTimeout(loop, wait);
       return;
     }
 
-    // 今天看够了
-    if (ctx.todayCount >= ctx.dailyMax) {
-      const wait = msUntilWindowStart(now, ctx.windowStart) + 60_000;
-      console.log(`[BiliLiving] 今天已经看了 ${ctx.todayCount} 个，明天见`);
-      if (running) timer = setTimeout(loop, wait);
-      return;
-    }
-
-    // 三成概率这会儿没兴趣
-    if (Math.random() < (ctx.skipChance ?? 0.3)) {
-      const wait = 40 * 60e3 + Math.random() * 60 * 60e3;
-      console.log('[BiliLiving] 这会儿不想看视频，过一阵再说');
+    // 随性自主：这会儿没兴趣就去发呆、干饭或睡觉
+    if (Math.random() < (ctx.skipChance ?? 0.25)) {
+      const wait = 25 * 60e3 + Math.random() * 40 * 60e3;
+      console.log('[BiliLiving] 这会儿不想看B站（去发呆/吃白米饭/睡觉），过一阵再说');
       if (running) timer = setTimeout(loop, wait);
       return;
     }
@@ -402,7 +394,7 @@ export function startBiliLiving({
     const batch = 1 + Math.floor(Math.random() * 3);
     const results = [];
     for (let i = 0; i < batch; i++) {
-      if (!running || ctx.todayCount >= ctx.dailyMax) break;
+      if (!running) break;
       try {
         const r = await watchOne();
         if (r) results.push(r);
@@ -505,7 +497,7 @@ export function startBiliLiving({
   mentionTimer = setTimeout(mentionLoop, 60000);
 
   timer = setTimeout(loop, Math.max(0, Number(initialDelayMs) || 0));
-  console.log(`[BiliLiving] B站网页看视频已启动（作息 ${windowStart}:00-${windowEnd}:00，每天最多 ${dailyMax} 个）`);
+  console.log(`[BiliLiving] B站网页看视频已启动（无死板作息与上限，由小鱼想看就看、想歇就歇）`);
 }
 
 

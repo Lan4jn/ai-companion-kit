@@ -869,23 +869,17 @@ export function startDouyinLiving({ brain, memory, room, opts = null } = {}) {
     ? h >= windowStart && h < windowEnd
     : h >= windowStart || h < windowEnd);
 
-  console.log(`[DouyinLiving] 抖音自主摸鱼已启动（作息 ${windowStart}:00-${windowEnd}:00，每天最多 ${dailyMax} 条）`);
+  console.log(`[DouyinLiving] 抖音自主摸鱼已启动（无死板作息与上限，小鱼想刷就刷、随性自主）`);
 
   const scheduleNext = (ms) => {
     timer = setTimeout(tick, ms);
   };
 
   const tick = async () => {
-    const h = new Date().getHours();
-    if (!inWindow(h)) {
-      scheduleNext(20 * 60 * 1000);
-      return;
-    }
-
-    const stats = readDailyStats(dataDir);
-    if ((stats.videos || 0) >= dailyMax) {
-      console.log(`[DouyinLiving] 今天已经刷了 ${stats.videos} 条，够了`);
-      scheduleNext(30 * 60 * 1000);
+    // 随性自主：偶尔发呆放空或想去干别的（20% 概率）
+    if (Math.random() < 0.20) {
+      console.log('[DouyinLiving] 这会儿不想刷短视频（去发呆/吃白饭/睡觉），歇会儿再说');
+      scheduleNext((15 + Math.random() * 25) * 60 * 1000);
       return;
     }
 
@@ -899,8 +893,8 @@ export function startDouyinLiving({ brain, memory, room, opts = null } = {}) {
       console.log('[DouyinLiving] 自动摸鱼异常:', e?.message || e);
     }
 
-    // 像人一样刷两三条就歇一会儿，3~8 分钟后再来
-    scheduleNext((3 + Math.random() * 5) * 60 * 1000);
+    // 像人一样刷两三条就歇一会儿，4~12 分钟后再来
+    scheduleNext((4 + Math.random() * 8) * 60 * 1000);
   };
 
   // 开机后先缓一会儿再开始，不要一重启就扑上去
