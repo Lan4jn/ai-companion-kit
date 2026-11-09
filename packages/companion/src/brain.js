@@ -665,7 +665,7 @@ export class Brain {
           } else if (tc.function.name === 'tdai_search_memories') {
             execRes = await executeTdaiTool(tc.function.name, args);
           } else {
-            execRes = await executePhoneTool(tc.function.name, args);
+            execRes = await executePhoneTool(tc.function.name, args, { memory: this.memory, userId, userName, sessionKey: key });
           }
 
           if (execRes.cq_image) cqImageToSend = execRes.cq_image;

@@ -35,6 +35,7 @@ import { startProactive } from './proactive.js';
 import { collectFromSegs as collectStickers, pickSticker, readStickerBase64 } from './stickers.js';
 import { Relationship } from './relationship.js';
 import { ChatterLearner } from './chatter-learner.js';
+import { PersonaReflector } from './persona-reflector.js';
 import { initGrowth, observeIncoming, observeOwn, renderGrowth } from './growth.js';
 import { initDesireEngine, renderDesirePrompt } from './desire-engine.js';
 import { initImageGen } from './image-gen.js';
@@ -125,6 +126,7 @@ async function main() {
   console.log('');
 
   const memory = new Memory({ dir: cfg.dataDir });
+  globalThis.__xiaoyu_memory = memory;
   const role = new Role({ cardPath: cfg.roleCard, altCardPath: cfg.roleCardSassy, selfImagePath: cfg.selfImageCard, selfImageAutoPath: cfg.selfImageAuto, maxChars: cfg.roleMaxChars });
 
   // 角色卡体检
@@ -160,6 +162,12 @@ async function main() {
     ownerUin: cfg.ownerIds?.[0] || '578021239',
     log: console.log,
   });
+
+  // 群友人设画像与事实提炼器 (PersonaReflector)
+  const personaReflector = new PersonaReflector({ memory, brain, dataDir: cfg.dataDir });
+  setTimeout(() => {
+    personaReflector.bootstrap({ limit: 25 });
+  }, 12000);
 
   // 初始化当日牌灵与德行十轴
   tarotDailyTick(cfg.dataDir || './data', (m) => {
@@ -373,7 +381,7 @@ async function main() {
         pending.delete(batchKey);
         const items = waker.flush(batchKey);
         if (!items.length) return;
-        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard }, items, cfg)
+        handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard, personaReflector }, items, cfg)
           .catch((e) => console.error('[出错] ' + (e?.message || e)));
       }, win));
     },
@@ -493,7 +501,7 @@ async function main() {
 }
 
 /** 处理一轮（可能是合并后的多条） */
-export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard }, items, cfg) {
+export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPortrait, chatterLearner, topicTracker, respectGuard, personaReflector }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
   setCurrentChat(key);
@@ -901,6 +909,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   memory.touch(last.userId, { name: last.name });
   if (respectGuard) {
     respectGuard.clearNotice(key);
+  }
+  if (personaReflector) {
+    personaReflector.consider(last.userId, { name: last.name, text, reply: out, isGroup: last.isGroup });
   }
 }
 

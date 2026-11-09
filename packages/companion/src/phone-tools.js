@@ -739,10 +739,27 @@ export const PHONE_TOOLS = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'remember_person',
+      description: '当你从当前对方的发言中发现了对方的新特点、性格习惯、生活事实、拥有的硬件/宠物/城市/工作、或者答应对方的待办事项时调用，悄悄记在心里的小账本上！比如对方提到“我养了一只柯基”、“在杭州做前端”、“换了4080显卡”、“天天熬夜加班”等。',
+      parameters: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: '对方的QQ号或用户标识（若为空则自动使用当前聊天对象）' },
+          trait: { type: 'string', description: '性格或行为特征标签，如“数码折腾党”、“重度熬夜社畜”、“嘴硬心软”、“二游非酋”' },
+          fact: { type: 'string', description: '真实生活/硬件事实档案，如“养了一只柯基”、“在杭州读大学”、“用的是一加13手机”、“买了4080显卡”' },
+          pending: { type: 'string', description: '答应对方的待办事项或约定，如“答应下次帮他看配置单”' },
+        },
+        required: []
+      }
+    }
+  },
 ];
 
 // ── 执行分发核心 ──
-export async function executePhoneTool(name, args = {}) {
+export async function executePhoneTool(name, args = {}, context = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
   if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
   if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
@@ -750,9 +767,9 @@ export async function executePhoneTool(name, args = {}) {
   if (name === 'talk_to_hermes') return callAunt({ message: args.text || args.message, situation: '找阿姨聊两句' });
   if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
 
-  // 生图/图库/表情这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
+  // 生图/图库/表情/记账这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
   const NO_PHONE_TOOLS = new Set([
-    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker', 'send_selfie',
+    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker', 'send_selfie', 'remember_person',
   ]);
   let target = '';
   if (!NO_PHONE_TOOLS.has(name)) {
@@ -762,6 +779,28 @@ export async function executePhoneTool(name, args = {}) {
 
   try {
     switch (name) {
+      case 'remember_person': {
+        const uid = String(args.user_id || context?.userId || '').trim();
+        if (!uid || uid === 'self' || uid === 'system') {
+          return { status: 'error', message: '无法识别目标用户QQ号' };
+        }
+        const mem = context?.memory || globalThis.__xiaoyu_memory;
+        if (!mem) return { status: 'error', message: '记忆系统未连接' };
+        const res = mem.remember(uid, {
+          trait: args.trait,
+          fact: args.fact,
+          pending: args.pending,
+          name: args.name || context?.userName,
+        });
+        return {
+          status: 'success',
+          user: res.name || uid,
+          traits: res.traits,
+          facts: res.facts,
+          pending: res.pending,
+          note: '记下了！已经在小本本上更新了关于他的画像账本。'
+        };
+      }
       case 'generate_image': {
         try {
           const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size, quality: args.quality, kind: args.type });
