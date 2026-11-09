@@ -280,7 +280,7 @@ async function doGenerate({ prompt, tags = '', size, quality, kind, provider } =
 
   const row = db.prepare('SELECT * FROM images WHERE path = ?').get(path.relative(root, file));
   console.log(`[ImageGen] 画好了 #${row.id}（驱动: ${usedProvider}）：${text.slice(0, 40)} → ${path.relative(root, file)}`);
-  return row;
+  return { ...row, absPath: file };
 }
 
 /** 对外入口：等一小会儿，画不完就转后台，别把对话卡死 */

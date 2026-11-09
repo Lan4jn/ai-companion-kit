@@ -770,7 +770,14 @@ export async function executePhoneTool(name, args = {}) {
           }
           let cq = '';
           try {
-            const file = row.absPath || row.path;
+            let file = row.absPath;
+            if (!file && row.id) {
+              const fullRow = getImage(row.id);
+              if (fullRow?.absPath) file = fullRow.absPath;
+            }
+            if (!file && row.path) {
+              file = path.isAbsolute(row.path) ? row.path : path.resolve(process.cwd(), 'data', row.path);
+            }
             let fileToSend = file;
             const st = fs.statSync(file);
             if (st.size > 300 * 1024) {
@@ -903,8 +910,18 @@ export async function executePhoneTool(name, args = {}) {
         const row = getImage(args.id);
         if (!row) return { status: 'error', message: '没有这张图' };
         try {
-          // 库里存的是相对 data 的路径，得用 absPath 才读得到
-          const b64 = fs.readFileSync(row.absPath || row.path).toString('base64');
+          let file = row.absPath;
+          if (!file && row.path) {
+            file = path.isAbsolute(row.path) ? row.path : path.resolve(process.cwd(), 'data', row.path);
+          }
+          let fileToSend = file;
+          const st = fs.statSync(file);
+          if (st.size > 300 * 1024) {
+            const small = path.join(os.tmpdir(), `xiaoyu-send-${row.id}-${Date.now()}.jpg`);
+            await execFileAsync('convert', [file, '-resize', '1024x1024>', '-quality', '85', small], { timeout: 15000 });
+            if (fs.existsSync(small) && fs.statSync(small).size > 0) fileToSend = small;
+          }
+          const b64 = fs.readFileSync(fileToSend).toString('base64');
           markImageUsed(row.id);
           return { status: 'success', cq_image: `[CQ:image,file=base64://${b64}]`, id: row.id, prompt: row.prompt, note: '图发出去了。别再解释画面或加括号动作。' };
         } catch (e) {

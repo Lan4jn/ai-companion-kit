@@ -10,13 +10,13 @@
  * 这里的策略是"发现就拦，记一笔，让人知道"，不静默吞掉。
  */
 export class LoopGuard {
-  constructor({ windowMs = 120_000, maxSame = 2, maxPerWindow = 6, maxEmpty = 2 } = {}) {
-    this.windowMs = windowMs;       // 观察窗口
-    this.maxSame = maxSame;         // 同一句话在窗口内最多允许出现的次数
+  constructor({ windowMs = 120_000, maxSame = 2, maxPerWindow = 10, maxEmpty = 2 } = {}) {
+    this.windowMs = windowMs;       // 时间窗口（默认 2 分钟）
+    this.maxSame = maxSame;         // 窗口内最多允许同一句话重复几次
     this.maxPerWindow = maxPerWindow; // 窗口内最多允许的发言条数
-    this.maxEmpty = maxEmpty;       // 窗口内最多允许连续空回复次数
-    this.state = new Map();         // key -> [{ text, at, empty }]
-    this.trips = new Map();         // key -> 触发次数（用于对外汇报）
+    this.maxEmpty = maxEmpty;       // 最多允许连续几次空回复
+    this.state = new Map();         // key -> Array<{ text, at, empty }>
+    this.trips = new Map();         // key -> 触发过几次拦截（用于告警）
   }
 
   _recent(key) {
@@ -30,7 +30,7 @@ export class LoopGuard {
    * 发言前检查。返回 { block, reason, silent }。
    * silent=true 表示"这次不吭声就对了"，不需要给用户任何提示。
    */
-  check(key, text) {
+  check(key, text, { bypassFrequency = false } = {}) {
     const k = String(key || 'default');
     const arr = this._recent(k);
     const t = String(text || '').trim();
@@ -56,7 +56,7 @@ export class LoopGuard {
 
     // 3. 频率失控
     const spoken = arr.filter((x) => !x.empty).length;
-    if (spoken >= this.maxPerWindow) {
+    if (!bypassFrequency && spoken >= this.maxPerWindow) {
       this._trip(k);
       return {
         block: true,

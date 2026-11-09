@@ -733,7 +733,9 @@ export class Brain {
     // 只对真正的对话生效 —— 内部判断（选不选关注、飘什么弹幕）输出本来就是
     // 结构化 JSON，重复几次是正常的，不该被当成卡住。
     if (/^(private|group):/.test(String(key || ''))) {
-      const gate = loopGuard.check(key, out);
+      const isOwner = String(userId) === '578021239';
+      const hasImage = Boolean(cqImageToSend);
+      const gate = loopGuard.check(key, out, { bypassFrequency: isOwner || Boolean(input.addressed) || hasImage });
       if (gate.block) {
         console.log(`[守卫] 拦下一次输出（${gate.reason}）`);
         return { text: '', blocked: true, reason: gate.reason, silent: gate.silent };
