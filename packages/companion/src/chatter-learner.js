@@ -32,6 +32,53 @@ export class ChatterLearner {
     this.timer = null;
 
     this.insights = this.loadInsights();
+
+    // 启动时检查近期的群聊记录，与网络梗词典比对，自主搜录群友玩过但未收录的梗
+    setTimeout(() => {
+      try {
+        const recentRows = this.memory ? this.memory.recentGroupChatter(null, 80) : [];
+        const texts = recentRows.map((r) => r.text || '');
+        this.absorbMemesFromDictionary(texts);
+      } catch {}
+    }, 3000);
+  }
+
+  /**
+   * 从网络梗词典（meme_dictionary.json）中自主检索并搜录保存到自己的黑话库中
+   * 当群友在群里聊到相关词汇时，小鱼自主对照词典搞懂含义并记录保存
+   */
+  absorbMemesFromDictionary(texts = []) {
+    try {
+      const dictFile = path.join(this.dataDir, 'meme_dictionary.json');
+      if (!fs.existsSync(dictFile)) return;
+      const dict = JSON.parse(fs.readFileSync(dictFile, 'utf8'));
+      const entries = Array.isArray(dict?.entries) ? dict.entries : [];
+      if (!entries.length) return;
+
+      const combinedText = texts.join(' ');
+      let added = 0;
+      for (const entry of entries) {
+        const matches = [entry.term, ...(entry.aliases || [])].some((alias) =>
+          combinedText.includes(alias)
+        );
+        if (matches) {
+          const exists = this.insights.slangs.some((s) => s.term === entry.term);
+          if (!exists) {
+            this.insights.slangs.unshift({
+              term: entry.term,
+              meaning: entry.meaning,
+            });
+            added++;
+            console.log(`[ChatterLearner] 小鱼从梗词典中自主搜录新梗: 【${entry.term}】 -> ${entry.meaning.slice(0, 45)}`);
+          }
+        }
+      }
+      if (added > 0) {
+        this.saveInsights();
+      }
+    } catch (e) {
+      console.warn('[ChatterLearner] 查阅网络梗词典异常:', e?.message || e);
+    }
   }
 
   loadInsights() {
@@ -98,6 +145,11 @@ export class ChatterLearner {
     // 忽略小鱼自己的发言与过短指令
     if (msg.isSelf) return;
     this.unlearnedCount++;
+
+    // 实时比对网络梗词典，群友一玩到未收录的梗立即自主搜录保存
+    if (msg.text) {
+      this.absorbMemesFromDictionary([msg.text]);
+    }
 
     // 如果累积达到阈值，且冷却时间已过，在后台平缓触发反思
     if (this.unlearnedCount >= this.msgThreshold && Date.now() - this.lastLearnedAt > this.minGapMs) {

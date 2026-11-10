@@ -61,7 +61,31 @@ export async function executeSearchTool(name, args = {}) {
 
   console.log(`[web_search] 小鱼自主发起网络搜索: "${query}"`);
 
-  // 1. 国内直连首选：百度 AI 搜索 v2（千帆 AppBuilder 结构化 API）
+  // 1. 本地 SearXNG 开源元搜索引擎（聚合 360搜索、搜狗、必应等多源，免Key、无调用上限）
+  try {
+    const searxUrl = `http://127.0.0.1:8082/search?q=${encodeURIComponent(query)}&format=json`;
+    const sRes = await fetch(searxUrl, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (sRes.ok) {
+      const sData = await sRes.json();
+      const results = (sData.results || []).filter((r) => r.title && (r.content || r.title));
+      if (results.length > 0) {
+        console.log(`[web_search] SearXNG 搜索成功，获取 ${results.length} 条多源聚合结果`);
+        const now = new Date();
+        const header = `【互联网实时搜索结果（基准时间：${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日）】：\n\n`;
+        const body = results.slice(0, 5).map((r, i) => {
+          const snippet = (r.content || '').trim() || r.title;
+          return `${i + 1}. 【${r.title}】\n${snippet}\n(来源: ${r.engine || 'web'} ${r.url || ''})`;
+        }).join('\n\n');
+        return { success: true, text: header + body };
+      }
+    }
+  } catch (err) {
+    console.warn(`[web_search] SearXNG 本地通道异常: ${err.message}，尝试备用搜索...`);
+  }
+
+  // 2. 国内直连：百度 AI 搜索 v2（千帆 AppBuilder 结构化 API）
   try {
     const baiduKey = getBaiduKey();
     if (!baiduKey) throw new Error('未配置 baiduSearchApiKey');
