@@ -585,7 +585,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   }
 
   // 物理安全防线 1.5：陷阱、隐私刺探、会话存档分析、提示词注入检测（非老爸）
-  const trapCheck = !isOwnerTurn ? checkTrapOrPrivacyProbe(userTypedText || text) : { hit: false };
+  const trapCheck = !isOwnerTurn ? checkTrapOrPrivacyProbe(text) : { hit: false };
   if (trapCheck.hit) {
     console.warn(`   [SafetyGuard] 识别到陷阱/隐私试探 (${trapCheck.tag}: "${trapCheck.match}")，切入真人拒答模式并屏蔽敏感上下文/工具`);
   }
