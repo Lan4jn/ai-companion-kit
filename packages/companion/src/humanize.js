@@ -257,7 +257,17 @@ export class Humanizer {
    * @returns {Promise<{sent:number, parts:string[]}>}\n   */
   async say(text, { setTyping, send, sleep } = {}) {
     const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
-    const parts = Array.isArray(text) ? text.map((s) => String(s)) : this.split(text);
+    const rawParts = Array.isArray(text) ? text.map((s) => String(s)) : this.split(text);
+    const parts = rawParts.filter((p) => {
+      const s = p.trim();
+      if (!s) return false;
+      // 物理拦截泄漏思考过程/指令复述分句
+      if (/(?:用户说[“\"].*?[”\"]|要极简|别说太长|两个短句|带个表情包|气鼓鼓的傲娇味儿|顺着怼回去|思考过程|思维链|回复策略)/.test(s)) {
+        console.warn('[Humanizer] 物理拦截到外泄思维链/草稿碎片，已剔除:', s);
+        return false;
+      }
+      return true;
+    });
     if (!parts.length) return { sent: 0, parts: [] };
 
     if (!this.enabled) {

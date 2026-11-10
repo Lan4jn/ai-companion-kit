@@ -555,9 +555,14 @@ export class Brain {
         const reqPayload = {
           model: prov.model,
           messages,
-          temperature: 1.1,
+          temperature: 0.85,
           stream: false,
         };
+        // 显式禁止思维链/思考模式，避免模型草稿与CoT泄露
+        if (String(prov.name).includes('ark') || String(prov.model).includes('deepseek')) {
+          reqPayload.thinking = { type: 'disabled' };
+          reqPayload.reasoning = false;
+        }
         if (enableTools && round < 4) {
           reqPayload.tools = ALL_TOOLS;
           reqPayload.tool_choice = 'auto';
@@ -630,7 +635,7 @@ export class Brain {
 
       const choice = successChoice;
       const msg = successMsg;
-      let content = String(msg?.content || msg?.reasoning_content || '').trim();
+      let content = String(msg?.content || '').trim();
 
       // 提取工具调用：支持标准 tool_calls 与 DeepSeek DSML 文本格式
       let toolCalls = (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) ? [...msg.tool_calls] : [];
