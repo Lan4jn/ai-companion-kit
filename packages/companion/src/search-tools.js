@@ -103,6 +103,28 @@ export async function executeSearchTool(name, args = {}) {
     console.warn(`[web_search] 百度 AI 搜索通道异常: ${err.message}，尝试备用搜索...`);
   }
 
+  // 1.5 国内免鉴权免费通道：百度百科 OpenAPI（精准破译网络流行梗、空耳、人物游戏概念）
+  try {
+    const cleanTerm = query.replace(/(是什么梗|到底是什么梗|是什么意思|是什么|为什么|怎么回事|梗|来源)/g, '').trim() || query;
+    const baikeUrl = `https://baike.baidu.com/api/openapi/BaikeLemmaCardApi?scope=103&format=json&appid=379020&bk_key=${encodeURIComponent(cleanTerm)}`;
+    const bRes = await fetch(baikeUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(4000)
+    });
+    if (bRes.ok) {
+      const bData = await bRes.json();
+      if (bData.abstract && bData.abstract.trim()) {
+        console.log(`[web_search] 百度百科直接命中词条: 【${bData.title || cleanTerm}】`);
+        const now = new Date();
+        const header = `【百科实时词条检索（${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日）】：\n\n`;
+        const content = `【${bData.title || cleanTerm}】\n${bData.abstract.trim()}\n(来源: ${bData.url || '百度百科'})`;
+        return { success: true, text: header + content };
+      }
+    }
+  } catch (err) {
+    // 静默降级
+  }
+
   // 2. 海外/时政备用通道：维基百科 API（通过本地 7890 局部代理）
   try {
     const wikiData = await new Promise((resolve, reject) => {
