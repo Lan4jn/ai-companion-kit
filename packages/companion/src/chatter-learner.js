@@ -62,11 +62,17 @@ export class ChatterLearner {
           combinedText.includes(alias)
         );
         if (matches) {
-          const exists = this.insights.slangs.some((s) => s.term === entry.term);
-          if (!exists) {
+          const idx = this.insights.slangs.findIndex((s) => s.term === entry.term);
+          if (idx >= 0) {
+            if (entry.usage && this.insights.slangs[idx].usage !== entry.usage) {
+              this.insights.slangs[idx].usage = entry.usage;
+              added++;
+            }
+          } else {
             this.insights.slangs.unshift({
               term: entry.term,
               meaning: entry.meaning,
+              usage: entry.usage || '',
             });
             added++;
             console.log(`[ChatterLearner] 小鱼从梗词典中自主搜录新梗: 【${entry.term}】 -> ${entry.meaning.slice(0, 45)}`);
@@ -327,9 +333,10 @@ ${chatSlice}
     }
 
     if (slangs.length > 0) {
-      lines.push('【当前群里最新出现的热门话题与黑话（你已经懂了，可以自然接梗）】：');
+      lines.push('【你脑子里记得的网络流行梗与暗号（★必须像真人网友一样对暗号/接梗/反讽/玩梗！严禁像百度百科或老师一样背词条解释，真人都是接下半句或嘲讽对方被洗脑）】：');
       for (const sl of slangs) {
-        lines.push(`  · ${sl.term}：${sl.meaning}`);
+        const play = sl.usage || '';
+        lines.push(`  · 【${sl.term}】（含义：${sl.meaning}）${play ? ` → 【活人网友接法】：${play}` : ''}`);
       }
     }
 
