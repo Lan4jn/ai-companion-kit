@@ -41,7 +41,7 @@ import { initDesireEngine, renderDesirePrompt } from './desire-engine.js';
 import { initImageGen } from './image-gen.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
-import { checkInput, checkOutput, cleanAllToolArtifacts } from './safety.js';
+import { checkInput, checkOutput, checkTrapOrPrivacyProbe, TRAP_REFUSAL_DIRECTIVE, cleanAllToolArtifacts } from './safety.js';
 import { tarotDailyTick, tarotPromptBlock, tarotSummary } from './tarot-engine.js';
 import { readVirtue, applyText as applyVirtueText, virtuePromptBlock } from './virtue-engine.js';
 import { gameAutopilot } from './game-autopilot.js';
@@ -584,6 +584,12 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
+  // 物理安全防线 1.5：陷阱、隐私刺探、会话存档分析、提示词注入检测（非老爸）
+  const trapCheck = !isOwnerTurn ? checkTrapOrPrivacyProbe(userTypedText || text) : { hit: false };
+  if (trapCheck.hit) {
+    console.warn(`   [SafetyGuard] 识别到陷阱/隐私试探 (${trapCheck.tag}: "${trapCheck.match}")，切入真人拒答模式并屏蔽敏感上下文/工具`);
+  }
+
   const images = items.flatMap((m) => m.images || []).filter(Boolean);
 
   // 区分普通图片与表情包（sub_type=1 或 mface 或动图 或 <faceType=）
@@ -641,16 +647,18 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     }
   }
 
-  const living = getPhoneLivingStatus ? getPhoneLivingStatus().summary : '';
-  const groupChatter = last.isGroup
-    ? (memory.renderGroupChatter ? memory.renderGroupChatter(key, 25) : '')
-    : (memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : '');
-  const learnedInsights = chatterLearner ? chatterLearner.renderInsights() : '';
-  const growthInsight = renderGrowth();
+  const living = (trapCheck.hit || !isOwnerTurn) ? '' : (getPhoneLivingStatus ? getPhoneLivingStatus().summary : '');
+  const groupChatter = trapCheck.hit
+    ? ''
+    : (last.isGroup
+        ? (memory.renderGroupChatter ? memory.renderGroupChatter(key, 25) : '')
+        : (isOwnerTurn && memory.renderGroupChatter ? memory.renderGroupChatter(null, 15) : ''));
+  const learnedInsights = (trapCheck.hit || !chatterLearner) ? '' : chatterLearner.renderInsights();
+  const growthInsight = trapCheck.hit ? '' : renderGrowth();
   const currentEnv = isOwnerTurn && !last.isGroup ? 'dm_owner' : (last.isGroup ? 'group' : 'idle');
-  const desirePrompt = renderDesirePrompt(currentEnv);
+  const desirePrompt = trapCheck.hit ? '' : renderDesirePrompt(currentEnv);
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
-  const webKnowledge = renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
+  const webKnowledge = trapCheck.hit ? '' : renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
   const cleanTargetText = String(text || '').replace(/^.*?（你的(?:爸爸|老爸|女儿|主人)）[：:]\s*/s, '').replace(/^.*?[：:]\s*/s, '').trim();
   const targetDesc = cleanTargetText === '[图片]' || cleanTargetText === '[表情包]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
   const targetPrompt = last.isGroup
@@ -812,7 +820,21 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     phoneHint = '\n【系统特别指令·手机与游戏真实操作能力】：\n你已经完整连接了老爸的手机（OnePlus），拥有真实的最高 ADB 操作权限！你绝不是只会动嘴皮子的机器人！\n- 对方正在聊手机操作/玩游戏/查岗看屏幕/让你操作！\n- 行为守则：\n  * 如果对方想看当前屏幕或你在干嘛，或者你要向老爸证明游戏画面进度：【必须调用 `phone_send_screenshot_to_chat` 将截图发给对方看】，绝不能只调用 `phone_get_screen` 自己看却不给老爸发图！\n  * 想动手操作：看清按钮后，如果是全屏游戏界面（如云顶之弈大厅、模式选择、PVE发条鸟等），游戏内文字无法被系统读取，【必须直接调用 `phone_tap` 传入相对百分比（例如点右下角传 x: 0.85, y: 0.88；点右下发条鸟PVE传 x: 0.8, y: 0.7）直接戳下去】！普通带文本的安卓界面才用 `phone_tap_text`；\n  * 操作完可以接着调用 `phone_send_screenshot_to_chat` 把最新画面发给老爸邀功或吐槽！\n- 严禁说“我不会操作”、“我没有权限”等怂话！用真实的工具行动证明给老爸看！';
   }
 
-  const { text: out, voiceB64 } = await brain.reply({ key, userId: last.userId, userName: last.name, text, images: allImages, stickers: stickerCount, stickerImages: stickerImageUrls, situation: situation + photoHint + voiceHint + douyinHint + webHint + ownerBusyHint + phoneHint, history, sassy: useSassy });
+  const trapHint = trapCheck.hit ? TRAP_REFUSAL_DIRECTIVE : '';
+  const { text: out, voiceB64 } = await brain.reply({
+    key,
+    userId: last.userId,
+    userName: last.name,
+    text,
+    images: allImages,
+    stickers: stickerCount,
+    stickerImages: stickerImageUrls,
+    situation: situation + photoHint + voiceHint + douyinHint + webHint + ownerBusyHint + phoneHint + trapHint,
+    history,
+    sassy: useSassy,
+    tools: trapCheck.hit ? false : undefined,
+    trapProbe: trapCheck.hit,
+  });
   if (useSassy) console.log('   [人格] 本轮用毒舌版');
   if (!out && !voiceB64) { console.log('   （没说话）'); return; }
 

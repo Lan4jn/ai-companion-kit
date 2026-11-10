@@ -23,6 +23,18 @@ import { TDAI_TOOLS, executeTdaiTool, syncTurnToTdai } from './tdai-tools.js';
 import { cleanAllToolArtifacts, parseDsmlToolCalls } from './safety.js';
 
 const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS];
+// 敏感/内部工具：仅限老爸本人调用，群友或陌生私聊严禁开放，杜绝隐私泄露与提权注入
+const OWNER_ONLY_TOOL_NAMES = new Set([
+  'phone_status', 'phone_connect', 'phone_devices', 'phone_pair',
+  'phone_send_screenshot_to_chat', 'phone_get_screen', 'phone_dump', 'phone_record_screen',
+  'phone_tap_text', 'phone_tap', 'phone_swipe', 'phone_drag', 'phone_type_text',
+  'phone_key', 'phone_open_app', 'phone_shell', 'phone_macro',
+  'phone_feed_next', 'phone_feed_prev', 'phone_like', 'phone_search',
+  'send_selfie', 'read_group_chat', 'queue_group_message',
+  'call_aunt', 'talk_to_hermes', 'request_feature',
+  'discard_image', 'remember_person', 'tdai_search_memories',
+]);
+const PUBLIC_SAFE_TOOLS = ALL_TOOLS.filter((t) => !OWNER_ONLY_TOOL_NAMES.has(t?.function?.name));
 
 async function toDataUrl(url) {
   if (!url) return null;
@@ -365,13 +377,24 @@ export class Brain {
   }
 
   async reply(input) {
-    const { key, userId, userName, text, images = [], stickers = 0, stickerImages = [], situation = '', history = [], record = true } = input;
+    const { key, userId, userName, text, images = [], stickers = 0, stickerImages = [], situation = '', history = [], record = true, trapProbe = false } = input;
+    const isOwner = String(userId || '') === '578021239';
+    const isGroup = String(key || '').startsWith('group:');
+    const isInternal = !String(key || '').startsWith('__bili_dm') && (
+      userId === 'system' || userId === 'self' || key === '__diary_generation__' || key === '__proactive__' || String(key || '').startsWith('internal:')
+    );
+    const isTrusted = isOwner || isInternal;
 
     const memLine = this.memory.renderPerson(userId);
-    const diary = this.memory.renderDiary ? this.memory.renderDiary(6) : '';
-    const recent = this.memory.renderRecent(20, { excludeWhere: key });
+    const diary = (trapProbe || (!isTrusted && !isGroup)) ? '' : (this.memory.renderDiary ? this.memory.renderDiary(6) : '');
+    // 非老爸或群聊场景绝不注入 private:* 私聊记忆，防止把私聊对话泄露到群里或外人私聊
+    const recent = trapProbe
+      ? ''
+      : (isTrusted && !isGroup
+          ? this.memory.renderRecent(20, { excludeWhere: key })
+          : this.memory.renderRecent(10, { excludeWhere: key, excludePrivate: true }));
     let learnedLine = '';
-    if (this.recall) {
+    if (this.recall && !trapProbe) {
       try {
         const hits = this.recall(String(text || ''), 3) || [];
         if (hits.length) {
@@ -388,7 +411,7 @@ export class Brain {
       } catch (e) {}
     }
     let recalledTurnsLine = '';
-    if (this.memory && typeof this.memory.recallTurns === 'function') {
+    if (!trapProbe && this.memory && typeof this.memory.recallTurns === 'function') {
       try {
         const hits = this.memory.recallTurns(String(text || ''), { where: key, limit: 3, excludeRecent: 80 });
         if (hits.length) {
@@ -555,12 +578,15 @@ export class Brain {
         const reqPayload = {
           model: prov.model,
           messages,
-          temperature: 1.1,
+          temperature: 0.9,
           stream: false,
         };
         if (enableTools && round < 4) {
-          reqPayload.tools = ALL_TOOLS;
-          reqPayload.tool_choice = 'auto';
+          const allowedTools = isTrusted ? ALL_TOOLS : PUBLIC_SAFE_TOOLS;
+          if (allowedTools.length > 0) {
+            reqPayload.tools = allowedTools;
+            reqPayload.tool_choice = 'auto';
+          }
         }
 
         const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + prov.apiKey };
@@ -658,7 +684,10 @@ export class Brain {
           let args = {};
           try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
           let execRes;
-          if (tc.function.name === 'web_search') {
+          if (!isTrusted && OWNER_ONLY_TOOL_NAMES.has(tc.function.name)) {
+            console.warn(`[Security] 拦截非老爸(${userId})触发敏感工具: ${tc.function.name}`);
+            execRes = { status: 'denied', message: '非老爸无权调用该内部/隐私工具，请直接用真实人类群友语气随口拒绝。' };
+          } else if (tc.function.name === 'web_search') {
             execRes = await executeSearchTool(tc.function.name, args);
           } else if (tc.function.name === 'legal_lookup') {
             execRes = await executeLegalTool(tc.function.name, args);

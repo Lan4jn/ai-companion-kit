@@ -668,6 +668,41 @@ export class OneBot {
     }
 
     if (atUserId) message = '[CQ:at,qq=' + atUserId + '] ' + message;
+
+    // 含有 [CQ:image,...]（如大体积 base64 表情包）时，转为 OneBot 标准段数组发送，
+    // 防止 CQ 字符串在解析或长文本链路中被截断而直接发出原始代码
+    if (/\[CQ:image,[^\]]+\]/.test(message)) {
+      const segs = [];
+      const re = /\[CQ:(image|at),([^\]]+)\]/g;
+      let lastIdx = 0;
+      let m;
+      while ((m = re.exec(message)) !== null) {
+        if (m.index > lastIdx) {
+          const txt = message.slice(lastIdx, m.index);
+          if (txt) segs.push({ type: 'text', data: { text: txt } });
+        }
+        const kind = m[1];
+        const kv = m[2];
+        if (kind === 'image') {
+          const fm = kv.match(/(?:^|,)file=([^,]+)/);
+          if (fm && fm[1]) segs.push({ type: 'image', data: { file: fm[1] } });
+        } else if (kind === 'at') {
+          const qm = kv.match(/(?:^|,)qq=([^,]+)/);
+          if (qm && qm[1]) segs.push({ type: 'at', data: { qq: qm[1] } });
+        }
+        lastIdx = m.index + m[0].length;
+      }
+      if (lastIdx < message.length) {
+        const tail = message.slice(lastIdx);
+        if (tail) segs.push({ type: 'text', data: { text: tail } });
+      }
+      if (segs.length > 0) {
+        return isGroup
+          ? this.api('send_group_msg', { group_id: id, message: segs })
+          : this.api('send_private_msg', { user_id: id, message: segs });
+      }
+    }
+
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });

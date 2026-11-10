@@ -214,7 +214,7 @@ export class Memory {
   }
 
   /** 取最近 n 轮（可按来源过滤） */
-  recentTurns(n = 20, { excludeWhere, sinceMs } = {}) {
+  recentTurns(n = 20, { excludeWhere, excludePrivate = false, sinceMs } = {}) {
     let rows = [];
     try {
       rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
@@ -223,6 +223,12 @@ export class Memory {
     } catch { return []; }
     if (sinceMs) rows = rows.filter((r) => Date.now() - r.t < sinceMs);
     if (excludeWhere) rows = rows.filter((r) => !String(r.where || '').startsWith(excludeWhere));
+    if (excludePrivate) {
+      rows = rows.filter((r) => {
+        const w = String(r.where || '');
+        return !w.startsWith('private:') && !w.startsWith('__bili_dm') && !w.startsWith('internal:');
+      });
+    }
     return rows.slice(-n);
   }
 
