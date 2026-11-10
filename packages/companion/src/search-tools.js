@@ -65,7 +65,7 @@ export async function executeSearchTool(name, args = {}) {
   try {
     const searxUrl = `http://127.0.0.1:8082/search?q=${encodeURIComponent(query)}&format=json`;
     const sRes = await fetch(searxUrl, {
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(8000),
     });
     if (sRes.ok) {
       const sData = await sRes.json();
