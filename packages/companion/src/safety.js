@@ -138,13 +138,6 @@ export function cleanAllToolArtifacts(text) {
   // 1. 清除模型思维链与系统提醒标签
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
   s = s.replace(/<system_reminder>[\s\S]*?<\/system_reminder>/gi, '');
-  // 清理明文思考过程、自我对话与指令复述（如“用户说...我就顺着...要极简...别说太长”）
-  s = s.replace(/(?:思考过程|思维链|CoT|思考：|回复策略：|策略：)[\s\S]*?(?=\n\n|$|[。！？!?])/gi, '');
-  s = s.replace(/用户(?:又|在|还)?说[“\"][^”\"]*?[”\"][，,、\s]*(?:我就|我先|我顺着|顺着)?[^\n。！？!?]*[。！？!?]?/g, '');
-  s = s.replace(/(?:我就|我先|我顺着|顺着)(?:怼|回|接|吐槽|答)[^\n。！？!?]*[。！？!?]?/g, '');
-  s = s.replace(/要(?:极简|简短|毒舌|傲娇|随性|克制|短小|可爱|短句)[^。！？!?\n]*[。！？!?]?/g, '');
-  s = s.replace(/(?:别说太长|别太长|两个短句|一个短句|带个表情包|少说几句|精简一点|短句即可)[。！？!?\s]*/g, '');
-  s = s.replace(/[(（](?:内心|心理|草稿|OS|思考|设定|人设|语气)[：:][^）)]*[)）]/g, '');
 
   // 2. 彻底清除 DeepSeek DSML 标签和整块调用结构
   s = s.replace(/<[｜|][^>]*?calls>[\s\S]*?(?:<\/[｜|][^>]*?calls>|$)/gi, '');
@@ -165,11 +158,6 @@ export function cleanAllToolArtifacts(text) {
 
   // 6. 零散清理
   s = s.replace(/<[｜|][^>]*$/g, '');
-  s = s.replace(/\s*[，,、]\s*(?=[。！？!?\n]|$)/g, '');
-  s = s.replace(/([。！？!?\n])\s*[，,、]/g, '$1');
-  s = s.replace(/\s+[，,、]\s+/g, '，');
-  s = s.replace(/^[，,、。！？!?\s]+/, '');
-  s = s.replace(/[ \t]{2,}/g, ' ');
 
   return s.trim();
 }
