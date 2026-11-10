@@ -754,7 +754,17 @@ async function checkMentions() {
   if (handled) console.log(`[BiliLiving] 这一轮回了 ${handled} 条`);
 }
 
-// ── B 站私信：只认主人，别人一概不理 ──────────────────────
+// ── B 站私信：支持老爸与普通网友交流 ──────────────────────
+/** 拉取当前单聊私信会话列表（session_type=1） */
+async function fetchSessions(headers, size = 20) {
+  const url =
+    'https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions' +
+    `?session_type=1&group_fold=1&unofcounter=0&sort_rule=2&size=${size}&build=0&mobi_app=web`;
+  const j = await jget(url, headers);
+  if (!j || j.code !== 0) return [];
+  return j.data?.session_list || [];
+}
+
 /** 拉取和某个人的私信记录（session_type=1 = 单聊） */
 async function fetchSessionMsgs(talkerId, headers, size = 20) {
   const url =
@@ -811,87 +821,172 @@ export async function expandVideoLink(text) {
   return text;
 }
 
-/** 主人发了 B 站私信 → 让她自己决定回不回、回什么 */
+/** 检查并回复 B 站私信（支持老爸与普通网友） */
 async function checkPrivateMessages() {
   const { brain, credentials, ownerMid } = ctx || {};
-  if (!brain || !credentials?.sessdata || !ownerMid) return;
+  if (!brain || !credentials?.sessdata) return;
   const headers = buildHeaders(credentials);
+  const selfMid = String(credentials.dedeuserid || '');
   const st = loadState();
   const replied = new Set(st.repliedDM || []);
 
-  const r = await fetchSessionMsgs(ownerMid, headers, 20);
-  if (!r.ok) {
-    if (r.code !== 0) console.log('[BiliLiving] 私信拉取失败 code=' + r.code + ' ' + (r.message || ''));
-    return;
-  }
+  // 1. 整理待巡检的 talkerId 列表：老爸始终在列，再追加会话列表中的真实网友
+  const targetTalkers = new Set();
+  if (ownerMid) targetTalkers.add(String(ownerMid));
 
-  // 接口是从新到旧返回的，先按时间正序排，取最新未处理消息
-  const fresh = r.messages
-    .filter((m) => !m.isMine && !replied.has(m.id))
-    .sort((a, b) => a.ts - b.ts);
-  if (!fresh.length) return;
-
-  for (const m of fresh) replied.add(m.id);
-  st.repliedDM = [...replied].slice(-200);
-  saveState(st);
-
-  const combinedParts = [];
-  for (const m of fresh) {
-    if (/b23\.tv|BV[A-Za-z0-9]{10}/.test(m.text) && !m.text.includes('【视频卡片信息')) {
-      m.text = await expandVideoLink(m.text);
-    }
-    combinedParts.push(m.text);
-  }
-  const combinedSaid = combinedParts.join('\n');
-  const ago = Math.max(0, Math.round((Date.now() - fresh[fresh.length - 1].ts) / 60000));
-  console.log(`[BiliLiving] 老爸新私信(${ago}分钟前，共${fresh.length}条):\n${combinedSaid}`);
-
-  const sessionKey = `private:bili:${ownerMid}`;
-  const ownerId = String(ctx.ownerQQ || '578021239');
-  const history = ctx.memory ? ctx.memory.sessionTurns(sessionKey, 30) : [];
-
-  let text = null;
   try {
-    const out = await brain.reply({
-      key: sessionKey,
-      userId: ownerId,
-      userName: ctx.ownerName || '老爸',
-      text:
-        `老爸在B站私信跟你聊天。\n\n他说：\n${combinedSaid}\n\n` +
-        `这是B站私信就你们俩。如果老爸分享了视频，你可以顺着视频内容吐槽、调侃或聊两句；像平时傲娇女儿跟老爸说话那样回，随意、亲近、带点小调皮，15~50字，别客套、别长篇、别说教。\n\n` +
-        `只输出 JSON：{"reply": false} 或 {"reply": true, "text": "..."}`,
-      images: [],
-      situation: '你在B站刷视频，老爸在私信里找你聊天、分享视频',
-      history,
-      record: false,
-      tools: false,
-    });
-    const raw = String(out?.text || '').trim();
-    const mt = raw.match(/\{[\s\S]*\}/);
-    if (mt) {
-      const j = JSON.parse(mt[0]);
-      if (j.reply && j.text) text = String(j.text).trim().slice(0, 200);
+    const sessions = await fetchSessions(headers, 20);
+    for (const s of sessions) {
+      const tid = String(s.talker_id || '');
+      if (!tid) continue;
+      if (s.session_type !== 1 || s.system_msg_type !== 0) continue;
+      const lastMsg = s.last_msg || {};
+      const src = Number(lastMsg.msg_source ?? 0);
+      // 忽略 UP主自动感谢关注 (8), 登录/系统通知 (6), 官方活动 (5)
+      if (src === 8 || src === 6 || src === 5) continue;
+      // 如果最后一条就是小鱼自己发的，说明对方还没发新消息，跳过
+      if (String(lastMsg.sender_uid) === selfMid && tid !== String(ownerMid)) continue;
+      targetTalkers.add(tid);
     }
-  } catch (e) {}
+  } catch (e) {
+    console.log('[BiliLiving] 获取私信会话列表异常: ' + (e?.message || e));
+  }
 
-  if (!text) { console.log('[BiliLiving] 这条私信先不回'); return; }
+  for (const talkerId of targetTalkers) {
+    const isOwner = ownerMid && String(talkerId) === String(ownerMid);
+    const r = await fetchSessionMsgs(talkerId, headers, 20);
+    if (!r.ok) {
+      if (r.code !== 0 && isOwner) {
+        console.log('[BiliLiving] 私信拉取失败 talker=' + talkerId + ' code=' + r.code + ' ' + (r.message || ''));
+      }
+      continue;
+    }
 
-  const sr = await sendDM(ownerMid, text, headers);
-  if (sr.ok) {
-    console.log(`[BiliLiving] 回了老爸私信: ${text.slice(0, 40)}`);
-    if (ctx.memory) {
-      ctx.memory.logTurn({ where: sessionKey, who: '老爸', text: combinedSaid, reply: text });
-      ctx.memory.remember(ownerId, {
-        name: ctx.ownerName || '老爸',
-        topic: `B站私信：${combinedSaid.replace(/\s+/g, ' ').slice(0, 30)} → ${text.replace(/\s+/g, ' ').slice(0, 30)}`
-      });
-      // 提取老爸提到的兴趣偏好（如红警）进入永久记忆
-      if (/红警/.test(combinedSaid)) {
-        ctx.memory.remember(ownerId, { fact: '老爸从小就开始玩红警（红色警戒），喜欢看红警魔鬼蓝天这类带剧情的博主，吵架时要帮老爸对线' });
+    // 接口是从新到旧返回的，先按时间正序排，取最新未处理消息
+    const fresh = r.messages
+      .filter((m) => !m.isMine && !replied.has(m.id))
+      .sort((a, b) => a.ts - b.ts);
+    if (!fresh.length) continue;
+
+    for (const m of fresh) replied.add(m.id);
+    st.repliedDM = [...replied].slice(-600);
+    saveState(st);
+
+    const combinedParts = [];
+    for (const m of fresh) {
+      if (/b23\.tv|BV[A-Za-z0-9]{10}/.test(m.text) && !m.text.includes('【视频卡片信息')) {
+        m.text = await expandVideoLink(m.text);
+      }
+      combinedParts.push(m.text);
+    }
+    const combinedSaid = combinedParts.join('\n');
+    const ago = Math.max(0, Math.round((Date.now() - fresh[fresh.length - 1].ts) / 60000));
+
+    if (isOwner) {
+      console.log(`[BiliLiving] 老爸新私信(${ago}分钟前，共${fresh.length}条):\n${combinedSaid}`);
+      const sessionKey = `private:bili:${ownerMid}`;
+      const ownerId = String(ctx.ownerQQ || '578021239');
+      const history = ctx.memory ? ctx.memory.sessionTurns(sessionKey, 30) : [];
+
+      let text = null;
+      try {
+        const out = await brain.reply({
+          key: sessionKey,
+          userId: ownerId,
+          userName: ctx.ownerName || '老爸',
+          text:
+            `老爸在B站私信跟你聊天。\n\n他说：\n${combinedSaid}\n\n` +
+            `这是B站私信就你们俩。如果老爸分享了视频，你可以顺着视频内容吐槽、调侃或聊两句；像平时傲娇女儿跟老爸说话那样回，随意、亲近、带点小调皮，15~50字，别客套、别长篇、别说教。\n\n` +
+            `只输出 JSON：{"reply": false} 或 {"reply": true, "text": "..."}`,
+          images: [],
+          situation: '你在B站刷视频，老爸在私信里找你聊天、分享视频',
+          history,
+          record: false,
+          tools: false,
+        });
+        const raw = String(out?.text || '').trim();
+        const mt = raw.match(/\{[\s\S]*\}/);
+        if (mt) {
+          const j = JSON.parse(mt[0]);
+          if (j.reply && j.text) text = String(j.text).trim().slice(0, 200);
+        }
+      } catch (e) {}
+
+      if (!text) { console.log('[BiliLiving] 老爸这条私信先不回'); continue; }
+
+      const sr = await sendDM(ownerMid, text, headers);
+      if (sr.ok) {
+        console.log(`[BiliLiving] 回了老爸私信: ${text.slice(0, 40)}`);
+        if (ctx.memory) {
+          ctx.memory.logTurn({ where: sessionKey, who: '老爸', text: combinedSaid, reply: text });
+          ctx.memory.remember(ownerId, {
+            name: ctx.ownerName || '老爸',
+            topic: `B站私信：${combinedSaid.replace(/\s+/g, ' ').slice(0, 30)} → ${text.replace(/\s+/g, ' ').slice(0, 30)}`
+          });
+          if (/红警/.test(combinedSaid)) {
+            ctx.memory.remember(ownerId, { fact: '老爸从小就开始玩红警（红色警戒），喜欢看红警魔鬼蓝天这类带剧情的博主，吵架时要帮老爸对线' });
+          }
+        }
+      } else {
+        console.log(`[BiliLiving] 老爸私信回复失败 code=${sr.code} ${sr.message || ''}`);
+      }
+    } else {
+      // ── 其他人（B站网友/粉丝）发来的私信 ──
+      let talkerName = 'B站网友';
+      try {
+        const cr = await jget(`https://api.bilibili.com/x/web-interface/card?mid=${talkerId}`, headers);
+        if (cr?.data?.card?.name) talkerName = cr.data.card.name;
+      } catch {}
+
+      console.log(`[BiliLiving] 收到B站网友「${talkerName}」(UID: ${talkerId})新私信(${ago}分钟前):\n${combinedSaid}`);
+      const sessionKey = `private:bili:${talkerId}`;
+      const history = ctx.memory ? ctx.memory.sessionTurns(sessionKey, 20) : [];
+
+      let text = null;
+      try {
+        const out = await brain.reply({
+          key: sessionKey,
+          userId: `bili:${talkerId}`,
+          userName: talkerName,
+          text:
+            `B站网友「${talkerName}」（UID: ${talkerId}）在B站私信给你发消息。\n\n` +
+            `对方说：\n${combinedSaid}\n\n` +
+            `【身份与说话准则】：\n` +
+            `1. 认准身份：对方是B站网友，绝不是你老爸！你的养父老爸叫「織梦行云」（UID: ${ctx.ownerMid || '53374723'}）。绝不能叫对方老爸或爸爸！\n` +
+            `2. 活人性格：自然随性、接地气大白话、简短（10~35字），像个在B站冲浪的普通女网友。如果对方问是不是AI、问视频、或者随口闲聊打招呼，随性自然吐槽或接梗，绝不说教，绝不长篇大论，绝不谄媚。\n` +
+            `3. 自主决定：如果是广告、骚扰、垃圾推广或无意义内容，输出 {"reply": false}；若是正常交流打招呼，可以随性回一句。\n\n` +
+            `只输出 JSON：{"reply": false} 或 {"reply": true, "text": "..."}`,
+          images: [],
+          situation: `你在B站刷视频，B站网友「${talkerName}」在私信找你说话`,
+          history,
+          record: false,
+          tools: false,
+        });
+        const raw = String(out?.text || '').trim();
+        const mt = raw.match(/\{[\s\S]*\}/);
+        if (mt) {
+          const j = JSON.parse(mt[0]);
+          if (j.reply && j.text) text = String(j.text).trim().slice(0, 200);
+        }
+      } catch (e) {}
+
+      if (!text) {
+        console.log(`[BiliLiving] 决定不回B站网友「${talkerName}」的私信`);
+        continue;
+      }
+
+      const sr = await sendDM(talkerId, text, headers);
+      if (sr.ok) {
+        console.log(`[BiliLiving] 回复了B站网友「${talkerName}」私信: ${text}`);
+        if (ctx.memory) {
+          ctx.memory.logTurn({ where: sessionKey, who: talkerName, text: combinedSaid, reply: text });
+          ctx.memory.touchSeen(String(talkerId), { name: talkerName });
+          ctx.memory.touch(String(talkerId), { name: talkerName });
+        }
+      } else {
+        console.log(`[BiliLiving] 回复B站网友私信失败 talker=${talkerId} code=${sr.code} ${sr.message || ''}`);
       }
     }
-  } else {
-    console.log(`[BiliLiving] 私信回复失败 code=${sr.code} ${sr.message || ''}`);
   }
 }
 

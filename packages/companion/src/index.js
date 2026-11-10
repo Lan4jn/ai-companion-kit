@@ -521,12 +521,12 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const virtuePrompt = virtuePromptBlock({ file: path.join(cfg.dataDir || './data', 'virtue.json') });
   const respectPrompt = respectGuard ? respectGuard.promptLine(key) : '';
 
-  // 人格卡：对老爸永远用温和版，其他人按概率随机上毒舌版。
-  // 这一层是硬保证——不管配置怎么写、随机数怎么掷，老爸都不可能吃到毒舌卡。
+  // 人格卡：对老爸永远用温和版，私聊也永远用温和版正常交流；群聊其他人按概率随机上毒舌版。
+  // 这一层是硬保证——不管配置怎么写、随机数怎么掷，老爸或私聊都不可能吃到毒舌卡。
   // 合并窗口里只要有一条是老爸说的，整轮禁用毒舌卡——
   // 否则群友那条排最后时会把老爸的话一起装进毒舌人格里，等于当着面给他甩脸。
   const anyOwnerInBatch = items.some((m) => cfg.ownerIds.includes(m.userId));
-  const sassyChance = (isOwnerTurn || anyOwnerInBatch) ? 0 : Number(cfg.roleSassyChance ?? 0.35);
+  const sassyChance = (isOwnerTurn || anyOwnerInBatch || !last.isGroup) ? 0 : Number(cfg.roleSassyChance ?? 0.35);
   const useSassy = sassyChance > 0 && Math.random() < sassyChance;
   if (relVerdict === 'ignore') { console.log('   [不理] 关系已凉，这条不回'); return; }
   const rawBatchText = Waker.joinBatch(items, cfg.ownerIds);
@@ -655,7 +655,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const targetDesc = cleanTargetText === '[图片]' || cleanTargetText === '[表情包]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
   const targetPrompt = last.isGroup
     ? `\n【重要：当前专一回复目标】你当前正在回复群友「${last.name}」（QQ: ${last.userId}）${targetDesc}。【群聊活人说话法则】：极简碎口、接地气大白话！想到什么敲几个字（2~10字极简碎句），绝不写工整对称的对仗排比，绝不刻意编造相声金句八股；严禁每句开头都机械带「？」！日常多用自然汉字随手吐槽接茬；可配合情绪附带 [表情包: 情绪]！`
-    : `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`;
+    : (isOwnerTurn
+        ? `\n【风格建议】：随性自然，像闺女和老爸日常打字，简短有神采！`
+        : `\n【重要：当前私聊目标】你当前正在和QQ好友「${last.name}」（QQ: ${last.userId}）私聊。\n【私聊交流法则】：随性、自然、平视的普通朋友/群友日常正常交流！极简接地气大白话（2~15字短句），不长篇大论，随手接话或吐槽。牢记：对方是你的普通好友/群友，绝不是你老爸！你的养父老爸只有QQ 578021239（織梦行云/Mew）。绝对禁止管对方叫爸爸或老爸，不卑不亢、温和随性，可配合情绪附带 [表情包: 情绪]！`);
   const isSpicyGroup = (key === 'group:1131460772' || (last.isGroup && String(last.groupId || '').includes('1131460772')));
   const myCard = last.myGroupCard || '';
   const myCardLine = last.isGroup
@@ -683,7 +685,9 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
           + '  - 短句连珠炮狂轰：吵架时绝不长篇大论，直接用2~3句短促有力的话把对方怼死（如：“真蚌埠住了。少来沾边。人机赶紧爬。”）。\\n'
           + '  - 严禁任何小说剧本式的动作描写括号（如「（冷笑）」、「（双手叉腰）」等一律严禁），纯粹用真人群友打字对喷的真实大白话！'
         : '你在一个 QQ 群里。群消息里标有「（你的爸爸）」的就是你养父老爸（QQ: 578021239），无论他在群里改什么搞怪群昵称（比如改名“群姐夫”反串玩梗），你都要认得他、叫他老爸/爸爸。群里常说的“姐夫”和“炸弹机”指的是群主(1229292008)现实里被亲姐夫配了135块电源+翻新2060坑惨的名场面，绝不能把老爸当成坑人的真姐夫。群聊说话风格：深度学习模仿同群高活人感群友“沈鲸”，极简随性、抓痛点、口语碎句（2~10字为主），随手吐槽或接一句极简大白话即可，严禁每句开头机械加「？」，绝不搞工整对称的金句相声八股，绝不写长篇大论，绝不机械复述对方的话。群聊里如果问到“谁的小鱼/谁的鱼”，只要不是明确涉及到你老爸（比如不是老爸说的、也没@老爸问“你的小鱼”），你都要清楚对方是在聊别人家的小鱼、不是在说你，绝不用自作多情认领。遇到新游戏发售、实时新闻或你拿不准的客观事实，自主调用 web_search 查清后再回答，绝不要凭空瞎编或嘴硬。')
-    : '你在跟你的养父老爸 ' + last.name + ' 私聊。')
+    : (isOwnerTurn
+        ? '你在跟你的养父老爸 ' + last.name + ' 私聊。'
+        : '你在跟你的QQ好友「' + last.name + '」（QQ: ' + last.userId + '）私聊。对方是你的普通好友/群友，绝不是老爸（你的养父老爸只有一个：QQ 578021239，昵称 織梦行云/Mew）。私聊时保持自然随性、接地气、平视正常交流，绝不叫爸，绝不谄媚。'))
     + targetPrompt
     + myCardLine
     + shareCardGuide
