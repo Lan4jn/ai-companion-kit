@@ -1,0 +1,3 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {verifiedTurn} from '../src/fanqie-autonomous.js';
+test('页码不前进不得报告翻页成功',async()=>{let i=0;const a={page:3,total:50};const r=await verifiedTurn({getProgress:async()=>a,capture:async()=>({text:'文字'.repeat(100)}),gesture:async()=>{i++},expected:a});assert.equal(r.ok,false);assert.equal(i,1)});
+test('用户已切页时不能执行手势',async()=>{let i=0;const r=await verifiedTurn({getProgress:async()=>({page:4,total:50}),capture:async()=>({text:'文字'.repeat(100)}),gesture:async()=>i++,expected:{page:3,total:50}});assert.equal(r.ok,false);assert.equal(i,0)});

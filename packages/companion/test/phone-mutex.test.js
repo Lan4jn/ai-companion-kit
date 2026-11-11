@@ -1,0 +1,3 @@
+import {test} from 'node:test'; import assert from 'node:assert/strict'; import {createPhoneMutex} from '../src/phone-mutex.js';
+test('主动使用与后台使用互斥，后台不抢占',async()=>{const m=createPhoneMutex();let done;const gate=new Promise(r=>done=r);let events=[];const a=m.runUser(async()=>{events.push('user-start');await gate;events.push('user-end')});await new Promise(r=>setImmediate(r));assert.equal(await m.tryBackground(async()=>events.push('background')),false);done();await a;assert.deepEqual(events,['user-start','user-end']);assert.equal(await m.tryBackground(async()=>events.push('background')),true)});
+test('异常后释放',async()=>{const m=createPhoneMutex();await assert.rejects(m.runUser(async()=>{throw Error('x')}));assert.equal(await m.tryBackground(async()=>{}),true)});

@@ -1,0 +1,2 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {parseReaderProgress,isForwardProgress} from '../src/fanqie-reading.js';
+test('读取章节和页码并只接受明确前进',()=>{let a=parseReaderProgress(['第1章 怎么吃都不饱','2/11946']),b=parseReaderProgress(['第1章 怎么吃都不饱','3/11946']);assert.equal(a.page,2);assert.equal(isForwardProgress(a,b),true);assert.equal(isForwardProgress(b,a),false);assert.equal(isForwardProgress(a,null),false);assert.equal(isForwardProgress(a,{...b,total:10}),false)});

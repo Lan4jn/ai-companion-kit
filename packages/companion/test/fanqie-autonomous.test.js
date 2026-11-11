@@ -1,0 +1,3 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {runReadingStep} from '../src/fanqie-autonomous.js';
+test('阅读后由模型决定停止，不能翻页',async()=>{let turns=0;const r=await runReadingStep({observe:async()=>({text:'真实正文',progress:{page:3,total:10}}),understand:async()=>({interested:true,summary:'正文',keywords:[],continueReading:false}),save:async()=>{},turn:async()=>{turns++}});assert.equal(r.ok,true);assert.equal(turns,0)});
+test('无法获取正文时不可理解或执行',async()=>{let calls=0;const r=await runReadingStep({observe:async()=>null,understand:async()=>calls++,save:async()=>calls++,turn:async()=>calls++});assert.equal(r.ok,false);assert.equal(calls,0)});

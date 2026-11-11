@@ -234,7 +234,7 @@ export class Brain {
       }
       const body = await res.json();
       const msg = body?.choices?.[0]?.message || {};
-      const c = msg.content || msg.reasoning_content;
+      const c = msg.content;
       if (typeof c === 'string' && c.trim()) return c.trim();
       if (Array.isArray(c)) {
         const joined = c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join(' ').trim();
@@ -615,6 +615,9 @@ export class Brain {
             const choice = json.choices?.[0];
             const msg = choice?.message;
             if (!msg) throw new Error(`[${prov.name || prov.model}] 未返回 message`);
+            if (!msg.content?.trim?.() && !(Array.isArray(msg.tool_calls) && msg.tool_calls.length)) {
+              throw new Error(`[${prov.name || prov.model}] 返回空正文，跳过推理内容并重试或降级`);
+            }
 
             successJson = json;
             successMsg = msg;
@@ -656,7 +659,7 @@ export class Brain {
 
       const choice = successChoice;
       const msg = successMsg;
-      let content = String(msg?.content || msg?.reasoning_content || '').trim();
+      let content = String(msg?.content || '').trim();
 
       // 提取工具调用：支持标准 tool_calls 与 DeepSeek DSML 文本格式
       let toolCalls = (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) ? [...msg.tool_calls] : [];

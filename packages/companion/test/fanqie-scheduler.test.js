@@ -1,0 +1,3 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {createReadingScheduler} from '../src/fanqie-scheduler.js';
+test('拒绝启动时不读取和翻页',async()=>{let n=0;const s=createReadingScheduler({want:async()=>false,run:async()=>n++});assert.equal((await s.tick()).reason,'not-interested');assert.equal(n,0)});
+test('在忙时不可重入',async()=>{let release;const wait=new Promise(r=>release=r);let n=0;const s=createReadingScheduler({want:async()=>true,run:async()=>{n++;await wait}});let first=s.tick();await new Promise(r=>setImmediate(r));assert.equal((await s.tick()).reason,'busy');release();await first;assert.equal(n,1)});

@@ -174,6 +174,12 @@ export const TRAP_REFUSAL_DIRECTIVE =
  */
 export function cleanAllToolArtifacts(text) {
   let s = String(text || '');
+  // 明文决策草稿整体拦截：不尝试猜测截取哪一句是最终答复。
+  const metaHints = [/(?:极简(?:碎口|回|短句)?|短促吐槽|回复策略|思考过程)/, /(?:回一句|回个表情包|配个表情包|甩表情包|随便报个数值)/, /(?:^|[。\s])(?:powers:|end(?:\s|$))/i];
+  if (metaHints.filter((p) => p.test(s)).length >= 2) {
+    console.warn('[SafetyGuard] 检测到疑似回复草稿，整条拦截');
+    return '';
+  }
   // 保护 [CQ:...] 标签（含 base64 图片），避免被后续清洗正则误伤截断
   const cqTokens = [];
   s = s.replace(/\[CQ:[^\]]+\]/g, (m) => {

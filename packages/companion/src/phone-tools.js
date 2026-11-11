@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { phoneMutex } from './phone-mutex.js';
 import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus } from './phone-living.js';
 import { synthesize } from './tts.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
@@ -13,7 +14,8 @@ import { generateImage, findImages, getImage, discardImage, markUsed as markImag
 const execFileAsync = promisify(execFile);
 
 // ── 环境变量与全局配置 ──
-let CURRENT_SERIAL = process.env.PHONE_SERIAL || '';
+const PINNED_SERIAL = process.env.PHONE_SERIAL || '';
+let CURRENT_SERIAL = PINNED_SERIAL;
 const MACRO_FILE = process.env.PHONE_MACRO_FILE || path.join(os.homedir(), '.phone-mcp', 'macros.json');
 const SHOT_DIR = process.env.PHONE_SHOT_DIR || '/root/.hermes/cache/scratch/phone-shots';
 
@@ -25,6 +27,8 @@ try {
  * 自动寻找/解析当前活跃的 ADB 设备（优先 192.168.31.160:5557 模拟器/外部设备）
  */
 export async function getAdbTarget() {
+  // Explicitly bound devices must never fall back to another handset.
+  if (PINNED_SERIAL) return PINNED_SERIAL;
   try {
     const { stdout } = await execFileAsync('adb', ['devices']);
     const lines = stdout.split(/\r?\n/).slice(1).filter(l => l.trim());
@@ -760,6 +764,10 @@ export const PHONE_TOOLS = [
 
 // ── 执行分发核心 ──
 export async function executePhoneTool(name, args = {}, context = {}) {
+  if (String(name).startsWith('phone_')) return phoneMutex.runUser(() => executePhoneToolUnlocked(name, args, context));
+  return executePhoneToolUnlocked(name, args, context);
+}
+async function executePhoneToolUnlocked(name, args = {}, context = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
   if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
   if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
@@ -1039,6 +1047,7 @@ export async function executePhoneTool(name, args = {}, context = {}) {
         const host = args.host || '127.0.0.1';
         const port = args.port || '5555';
         const endpoint = `${host}:${port}`;
+        if (PINNED_SERIAL && endpoint !== PINNED_SERIAL) return { status: 'error', message: '设备已固定，不能切换' };
         const r = await adb(['connect', endpoint], { timeout: 30000, serial: false });
         if (/connected to/i.test(r.out)) {
           CURRENT_SERIAL = endpoint;
@@ -1049,6 +1058,7 @@ export async function executePhoneTool(name, args = {}, context = {}) {
 
       case 'phone_devices': {
         if (args.use) {
+          if (PINNED_SERIAL && args.use !== PINNED_SERIAL) return { status: 'error', message: '设备已固定，不能切换' };
           CURRENT_SERIAL = args.use;
           return { status: 'success', message: `已切换当前操作设备为：${args.use}` };
         }

@@ -26,6 +26,7 @@ import { Humanizer } from './humanize.js';
 import { Waker } from './wake.js';
 import { TopicFocusTracker } from './topic-focus.js';
 import { OneBot } from './transport-onebot.js';
+import { recallFanqie } from './fanqie-session.js';
 import { startPhoneLiving, getPhoneLivingStatus, setVideoBrain } from './phone-living.js';
 import { startBiliLiving, recallKnowledge, expandVideoLink } from './bili-living.js';
 import { startDouyinLiving, browseDouyinLive, getDouyinLivingStatus, setDouyinRoom } from './douyin-living.js';
@@ -671,6 +672,13 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const desirePrompt = trapCheck.hit ? '' : renderDesirePrompt(currentEnv);
   // 她自己上网查明白的事，聊到相关话题时能用上；用不用、怎么说全看她自己
   const webKnowledge = trapCheck.hit ? '' : renderWebKnowledge(memory.dir || path.join(process.cwd(), 'data'));
+  let fanqieKnowledge = '';
+  if (!trapCheck.hit && isOwnerTurn && !last.isGroup) {
+    try {
+      const rows = await recallFanqie(memory.dir || path.join(process.cwd(), 'data'), text);
+      if (rows.length) fanqieKnowledge = `【此前阅读番茄小说的相关片段，OCR可能有误，不要推测书名或剧情】\n${rows.map(r => `- ${r.summary}（来源：${r.source}）`).join('\n')}`;
+    } catch (e) { console.warn('[Fanqie] 召回失败:', e.message); }
+  }
   const cleanTargetText = String(text || '').replace(/^.*?（你的(?:爸爸|老爸|女儿|主人)）[：:]\s*/s, '').replace(/^.*?[：:]\s*/s, '').trim();
   const targetDesc = cleanTargetText === '[图片]' || cleanTargetText === '[表情包]' ? '发来的表情包/图片' : `对你说的话：“${text}”`;
   const targetPrompt = last.isGroup
@@ -718,6 +726,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (growthInsight || '')
     + (desirePrompt || '')
     + (webKnowledge ? `\n${webKnowledge}` : '')
+    + (fanqieKnowledge ? `\n${fanqieKnowledge}` : '')
     + (topicFocusPrompt || '')
     + (tarotPrompt ? `\n${tarotPrompt}` : '')
     + (virtuePrompt ? `\n${virtuePrompt}` : '')
