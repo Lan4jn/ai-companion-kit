@@ -42,6 +42,7 @@ import { initImageGen } from './image-gen.js';
 import { initGroupBridge, startOutboxWorker, setCurrentChat } from './group-bridge.js';
 import { initDevChannel } from './dev-channel.js';
 import { checkInput, checkOutput, checkTrapOrPrivacyProbe, TRAP_REFUSAL_DIRECTIVE, cleanAllToolArtifacts } from './safety.js';
+import { buildTermHint } from './term-lookup.js';
 import { tarotDailyTick, tarotPromptBlock, tarotSummary } from './tarot-engine.js';
 import { readVirtue, applyText as applyVirtueText, virtuePromptBlock } from './virtue-engine.js';
 import { gameAutopilot } from './game-autopilot.js';
@@ -592,6 +593,17 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
 
   const images = items.flatMap((m) => m.images || []).filter(Boolean);
 
+  // 先查后答：群里甩来不认识的缩写/新词时，先查明白再回，别硬猜
+  let termHint = '';
+  try {
+    if (!trapCheck.hit && last.isGroup) {
+      termHint = await buildTermHint(text, { dataDir: cfg.dataDir || './data' });
+      if (termHint) console.log('   [先查后答] 命中未知词，已注入查证资料');
+    }
+  } catch (e) {
+    console.log('   [先查后答] 查词异常: ' + (e?.message || e));
+  }
+
   // 区分普通图片与表情包（sub_type=1 或 mface 或动图 或 <faceType=）
   const stickerUrls = [];
   const stickerImageUrls = [];   // sub_type=1 或 mface 的图：既是"表情包"，也是画面，必须让视觉模型能读懂真实含义
@@ -702,6 +714,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + (last.isPoke ? `\n【重要提醒】：对方刚刚在 QQ 里“戳了戳”你（或者拍了拍你的头像）！请结合上下文做出自然灵动的少女傲娇反应（如：“戳我干嘛”、“别戳了，再戳鱼肉要散了”、“有事说事”等，如果是老爸戳你可以撒娇抱怨），绝不要机械死板复述！` : '')
     + (living ? `\n【你此刻真实的手机动态】：${living}。如果老爸或群友问你在干嘛或发截图，你可以顺着这个状态自然回应或截图。` : '')
     + (learnedInsights ? `\n${learnedInsights}` : '')
+    + (termHint || '')
     + (growthInsight || '')
     + (desirePrompt || '')
     + (webKnowledge ? `\n${webKnowledge}` : '')
