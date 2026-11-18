@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {createHmac,createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {EncryptedChatJournal} from '../src/chat-durable-journal-candidate.js';
+import {DurableBatchCandidate,createBoundBatchProcessorCandidate} from '../src/chat-durable-batch-candidate.js';
+import {initializeManagedStore,createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+import {Memory} from '../src/memory.js';
+const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'};
+const worker=fileURLToPath(new URL('./fixtures/chat-history-sigkill-worker.js',import.meta.url));
+for (const phase of ['after-ack','after-history']) test(`real SIGKILL ${phase}: retain acknowledgement, never resend or duplicate`,async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'chat-sigkill-')); let journal; t.after(()=>{journal?.close();fs.rmSync(dir,{recursive:true,force:true});});
+ const journalDir=path.join(dir,'journal');fs.mkdirSync(journalDir,{mode:0o700});initializeManagedStore(path.join(dir,'store'));
+ const child=spawnSync(process.execPath,[worker,dir,phase],{encoding:'utf8',timeout:20000});
+ assert.equal(child.signal,'SIGKILL',child.stderr);
+ assert.throws(()=>new EncryptedChatJournal({directory:journalDir,key:Buffer.alloc(32,31)}),/lock held or stale/);
+ // The child was reaped; this synthetic fixture has no other writers. Never do this automatically in production.
+ fs.rmdirSync(path.join(journalDir,'.journal.lock'));
+ journal=new EncryptedChatJournal({directory:journalDir,key:Buffer.alloc(32,31)});
+ const queue=new DurableBatchCandidate(journal),sealKey=createHmac('sha256',journal.key).update('main-local-onebot-seal-v1').digest();
+ const session='transport-bound-v1:'+createHash('sha256').update(JSON.stringify(['onebot-qq',scope.session])).digest('hex');
+ assert.equal(queue.list(session)[0]?.state,'history-pending');
+ let sends=0; const delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot:{},sender:{send:async()=>{sends++;throw Error('must not send');}},sealKey,ownerId:'123',retainAcknowledged:true});
+ const store=createManagedMemoryBrain({backend:'sqlite-fts',directory:path.join(dir,'store'),scope,sources:['qq-private-message'],trustedProcess:true});
+ assert.equal((await store.chatHistory(scope)).length,phase==='after-history'?1:0);
+ assert.equal((await delivery.process(session)).status,'blocked');
+ assert.equal(await delivery.recordHistory(session,new Memory({dir:path.join(dir,'memory')}),{store,scope}),phase==='after-history'?'duplicate':'inserted');
+ assert.deepEqual(await store.chatHistory(scope),[{turnId:'fixture',events:['onebot-message:1'],text:'synthetic question',reply:'firstsecond'}]);
+ assert.deepEqual(queue.list(session),[]);assert.equal(sends,0);assert.equal(fs.readFileSync(path.join(dir,'sends'),'utf8'),'first\nsecond\n');
+});

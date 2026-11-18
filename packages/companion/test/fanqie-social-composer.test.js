@@ -1,0 +1,10 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {inspectFanqieComposer} from '../src/fanqie-social-composer.js';
+const activity='com.dragon.read/com.dragon.community.impl.detail.page.CSSBookCommentDetailsActivity';
+const xml=(nodes)=>`<?xml version="1.0"?><hierarchy>${nodes}</hierarchy>`;
+const field='<node text="发表评论..." resource-id="com.dragon.read:id/dfy" class="android.widget.EditText" focused="true" enabled="true" bounds="[28,1652][1052,1750]" />';
+const button='<node text="发表" resource-id="com.dragon.read:id/jyu" class="android.widget.TextView" clickable="true" enabled="true" bounds="[946,1769][1052,1820]" />';
+test('识别实机输入控件但不臆测登录或发送成功',()=>{assert.deepEqual(inspectFanqieComposer({activity,xml:xml(field+button)}),{composer:true,login:'unknown',canPublish:false});});
+test('空控件坐标和窗口外控件不得认为可用',()=>{assert.equal(inspectFanqieComposer({activity,xml:xml(field.replace('[28,1652][1052,1750]','[0,0][0,0]')+button)}).composer,false);});
+test('重复控件、登录提示及错误页面均拒绝',()=>{for(const [a,x] of [[activity,xml(field+field+button)],[activity,xml(field+button+'<node text="请登录" />')],['other',xml(field+button)]])assert.equal(inspectFanqieComposer({activity:a,xml:x}).composer,false);});

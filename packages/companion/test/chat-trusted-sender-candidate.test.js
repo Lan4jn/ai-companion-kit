@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import net from 'node:net';
+import {register} from 'node:module';
+import {spawn} from 'node:child_process';
+import {OneBot} from '../src/transport-onebot.js';
+import {EncryptedChatJournal} from '../src/chat-durable-journal-candidate.js';
+import {DurableBatchCandidate,createTransportBoundMessageCandidate,createPreGenerationBatchCandidate} from '../src/chat-durable-batch-candidate.js';
+import {inspectTrustedRecovery} from '../src/chat-trusted-recovery.js';
+import {startTrustedSenderCandidate} from '../src/chat-trusted-sender-candidate.js';
+import {initializeManagedStore,createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+const ask=(socket,request)=>new Promise((resolve,reject)=>{let text='';const c=net.createConnection(socket,()=>c.write(JSON.stringify(request)+'\n'));c.on('data',b=>text+=b);c.on('end',()=>resolve(JSON.parse(text)));c.on('error',reject)});
+test('private service independently verifies and sends only signed current segment once',async()=>{
+ const root=fs.mkdtempSync(path.join(process.env.TMPDIR,'trusted-sender-')); let journal,bot,service;
+ try {
+  const socket=path.join(root,'s'); const key=Buffer.alloc(32,8), sealKey=Buffer.alloc(32,9);let receive;const message=new Promise(r=>receive=r);
+  bot=new OneBot({wsUrl:'ws://fixture',onMessage:receive});while(!bot.ws)await new Promise(r=>setTimeout(r,1));bot.ws.emit('open');bot.ws.emit('message',JSON.stringify({post_type:'message',self_id:789,message_type:'private',user_id:123,message_id:456,message:[{type:'text',data:{text:'fixture'}}]}));
+  journal=new EncryptedChatJournal({directory:root,key});const queue=new DurableBatchCandidate(journal);const {session}=createTransportBoundMessageCandidate({enabled:true,queue,bot,sealKey}).accept(await message);
+  const directory=path.join(root,'store');initializeManagedStore(directory);
+  const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'};
+  const store=createManagedMemoryBrain({backend:'sqlite-fts',directory,scope,sources:['qq-private-message'],trustedProcess:true});
+  await createPreGenerationBatchCandidate({enabled:true,queue,bot,sealKey,ownerId:'123',generate:async()=>({segments:['synthetic output','second'],history:await store.chatHistory(scope)})}).form(session,1);
+  let calls=[];bot.send=async (...args)=>{calls.push(args);return {ok:true,data:{status:'ok',retcode:0}}};
+  await assert.rejects(startTrustedSenderCandidate({queue,bot,sealKey,ownerId:'123',socket}));
+  service=await startTrustedSenderCandidate({enabled:true,queue,bot,sealKey,ownerId:'123',socket,store,scope});
+  assert.equal(fs.statSync(socket).mode & 0o777,0o600);
+  const row=inspectTrustedRecovery(queue)[0], req={id:row.id,snapshot:row.snapshot,confirm:true};
+  const authentic=structuredClone(journal.rows);const tampered=structuredClone(authentic);tampered[0].segments[0]='tampered';journal.save(tampered);
+  const altered=inspectTrustedRecovery(queue)[0];assert.equal((await ask(socket,{id:altered.id,snapshot:altered.snapshot,confirm:true})).status,'blocked');
+  journal.save(authentic);
+  assert.equal((await ask(socket,{...req,segment:'arbitrary'})).status,'blocked');
+  assert.equal((await ask(socket,{...req,snapshot:'0'.repeat(64)})).status,'blocked');
+  assert.equal((await ask(socket,req)).status,'delivered');
+  assert.equal((await ask(socket,req)).status,'blocked');
+  assert.deepEqual(calls,[['private:123','synthetic output']]);
+  const next=inspectTrustedRecovery(queue)[0];bot.send=async()=>{throw Error('private info')};
+  const cli=await new Promise((resolve,reject)=>{const p=spawn(process.execPath,['scripts/chat-trusted-sender-client.mjs','send','--socket',socket,'--id',next.id,'--snapshot',next.snapshot,'--confirm-one-segment']);let out='';p.stdout.on('data',b=>out+=b);p.on('error',reject);p.on('close',code=>resolve({code,out}));});
+  assert.equal(cli.code,2);assert.equal(JSON.parse(cli.out).status,'unknown');
+  const unknown=inspectTrustedRecovery(queue)[0];assert.equal(unknown.state,'unknown');
+  assert.equal((await ask(socket,{id:unknown.id,snapshot:unknown.snapshot,confirm:true})).status,'blocked');
+ } finally {if(service)await service.close();bot?.close();journal?.close();fs.rmSync(root,{recursive:true,force:true});}
+});

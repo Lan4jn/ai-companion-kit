@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {initializeManagedStore, createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+import {OneBot} from '../src/transport-onebot.js';
+register('./memory-brain-fake-ws-loader.js', import.meta.url);
+
+test('forgotten tieba evidence is not injected through native recall', async t => {
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'memory-native-forget-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const scope={tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'};
+ const directory=path.join(dir,'memory-brain-scoped');
+ initializeManagedStore(directory);
+ const opts={directory,scope,sources:['tieba'],trustedProcess:true,backend:'sqlite-fts'};
+ const brainStore=createManagedMemoryBrain(opts);
+ const url='https://tieba.baidu.com/p/123';
+ fs.writeFileSync(path.join(dir,'tieba-interest.jsonl'),JSON.stringify({version:3,source:'百度贴吧（外部来源）',forum:'肥鱼避难所吧',url,keywords:['橘猫'],excerpt:'橘猫秘密合成内容',capturedAt:new Date().toISOString()})+'\n');
+ await brainStore.forget(scope,{source:'tieba',evidence:url});
+ let done; const received=new Promise(r=>done=r);
+ const bot=new OneBot({wsUrl:'ws://fixture',onMessage:done}); bot.api=async()=>({ok:false}); bot.getMyGroupCard=async()=>'';
+ while(!bot.ws) await new Promise(r=>setTimeout(r,1));
+ bot.ws.emit('open');
+ bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:1,message_id:123,message:[{type:'text',data:{text:'橘猫'}}]}));
+ const owner=await received; bot.close();
+ let prompt;
+ await handleTurn({brain:{reply:async p=>{prompt=p;return {text:''}}},memory:{dir},bot:{},human:{},waker:{}},[owner],{ownerIds:['1'],dataDir:dir,tieba:{enabled:true},memoryBrain:{enabled:true,backend:'sqlite-fts',trustedProcess:true,trustedScope:scope,authorizedSources:['tieba']}});
+ assert.doesNotMatch(prompt.situation,/橘猫秘密合成内容/);
+});

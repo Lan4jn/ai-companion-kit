@@ -1,0 +1,29 @@
+# Journal-owning restricted sender candidate
+
+`startTrustedSenderCandidate` in `src/chat-trusted-sender-candidate.js` is an opt-in composition API, **not connected to normal production startup**. An explicit operator-started launcher candidate is described below. No automatic recovery is performed. The synthetic tests are not evidence of a real deployment boundary.
+
+This is deliberately **not** the raw `{destination,segment}` protocol of `chat-trusted-recovery.mjs send`: accepting that protocol as authority would let any socket client send arbitrary text. Instead the journal-owning service accepts only `{id,snapshot,confirm:true}` and independently reloads the selected current record from the locked queue; it invokes the signed bound processor, which verifies owner, source input, all output and position MACs and persists `unknown` before any transport call. It returns only a status. The service cannot open a journal already owned by the offline CLI: stop it before offline inspection, then explicitly start the service with the same journal and keys. Do not start other writers. Keep the printed inspection output private.
+
+After the offline `inspect` command documented in `chat-trusted-batch-candidate.md`, an authorized operator using a private terminal can explicitly select one segment:
+
+```
+node scripts/chat-trusted-sender-client.mjs send --socket /absolute/private/sender.sock --id BATCH_ID --snapshot INSPECT_SNAPSHOT --confirm-one-segment
+```
+
+## Explicit launcher candidate
+
+The launcher is default-off and is not invoked by normal startup. It requires a local HTTPS OneBot v11 `/send_private_msg` endpoint at **127.0.0.1**, a bearer token file, and the endpoint's independently verified leaf certificate SHA-256 fingerprint (64 lowercase hex characters). It checks the certificate on every TLS connection before sending the token or message. Obtain and verify the fingerprint out-of-band against the intended endpoint; fetching it from the same unauthenticated port is not identity evidence. A matching certificate establishes only possession of that private key, not that the service is the intended account; the operator must independently establish that binding, token enforcement, endpoint isolation, and anti-rollback controls. If these cannot be established, do not start it. Plain HTTP/WS TCP OneBot interfaces remain unsupported; an optional private Unix-socket HTTP interface is described below and has different trust assumptions. Token must be a private owner-only regular file, 16–512 ASCII letters, digits, `.`, `_`, `~`, or `-`, without a newline. Keys remain separate existing 32-byte private key files. Journal and socket directories must satisfy the existing private-directory rules.
+
+After offline inspection and stopping all other journal writers, an operator may explicitly run:
+
+```sh
+node scripts/chat-trusted-sender-service.mjs --enable --directory /absolute/private/journal --key /absolute/private/journal-key --seal-key /absolute/private/seal-key --owner OWNER_ID --socket /absolute/private/sender.sock --port PORT --certificate-sha256 VERIFIED_LEAF_FINGERPRINT --token-file /absolute/private/token
+```
+
+## Optional private Unix HTTP endpoint
+
+Use `--onebot-unix-socket /absolute/private/onebot.sock` instead of all three TLS options. This speaks the same OneBot v11 HTTP action but sends no bearer token. The server must itself expose this Unix socket or a separately secured adapter must be provisioned; the existing OneBot TCP/WS service does not automatically provide it. The socket and its parent must be owned by this UID, mode 0600 and 0700 or stricter respectively; ancestors cannot be symlinks or writable by others. The socket inode is checked at startup and before each send. A same-UID process can replace the socket between check and connect; this is not cryptographic authentication or peer-credential verification. Same UID, root, the server, and any upstream bridge are trusted. A bridge to plaintext TCP cannot independently authenticate the upstream endpoint, and account identity and journal rollback protection require separate verification. Do not enable if these assumptions cannot be met. This is a synthetic-tested candidate, not a deployment claim.
+
+Then use the selector client above with the previously inspected snapshot. The launcher never automatically sends or replays. `delivered` is the legacy protocol name for a positive OneBot transport ACK, **not recipient display or reading**. Timeouts, TLS failures, disconnects, negative responses and malformed replies leave the claimed segment `unknown`; there is no automatic or manual resend of unknown through this service. Inspect and reconcile independently offline. Shutdown waits for an active send before releasing the journal lock; never delete a live or unexplained lock. Do not include tokens, journal contents or messages in logs.
+
+The underlying composition API takes `enabled:true`, an open `DurableBatchCandidate`, 32-byte `sealKey`, `ownerId`, authenticated `bot.send` and absolute socket path. The socket parent must be owner-owned mode 0700 or stricter; ancestors must be non-writable by others and not symlinks; the socket is mode 0600 and existing paths are refused. Only same-owner processes should have access. Same-UID hostile processes, root, a malicious injected bot, filesystem compromise, credential theft, endpoint impersonation and authenticated whole-journal rollback are outside this boundary. No automatic unknown reconciliation or retry exists. A disconnect, timeout, crash, negative or ambiguous response must be treated as unknown until independently investigated. A transport acknowledgement is not proof of recipient display. Do not use where the required endpoint or anti-rollback assumptions cannot be established. Never log credentials, socket request bodies, journal content, private text or untrusted errors.

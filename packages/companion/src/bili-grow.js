@@ -1,3 +1,6 @@
+import { biliPrivacyBlock } from './bili-privacy.js';
+import { hasFishCliche } from './fish-cliche.js';
+import { biliPublicReply } from './bili-public-reply.js';
 /**
  * B 站养号。
  *
@@ -42,9 +45,13 @@ async function post(url, body, headers) {
 }
 
 /** 发一条弹幕。progressMs 是它出现在视频第几毫秒。 */
-export async function postDanmaku({ cid, bvid, aid, msg, headers, progressMs = 15000 }) {
-  const text = String(msg || '').trim().slice(0, 100);
-  if (!text) return { ok: false, code: -1, message: '空弹幕' };
+export async function postDanmaku({ cid, bvid, aid, msg, headers, progressMs = 15000, ownerIds }) {
+  if (typeof msg !== 'string' || !msg.trim()) return { ok: false, code: -1, message: '空弹幕' };
+  if (Array.from(msg).length > 50) return { ok: false, code: 'reply_too_long' };
+  const blocked = biliPrivacyBlock(msg, ownerIds);
+  if (blocked) return blocked;
+  const text = msg;
+  if (hasFishCliche(text)) return { ok: false, code: 'fish_cliche' };
   try {
     const r = await post(
       'https://api.bilibili.com/x/v2/dm/post',
@@ -155,11 +162,11 @@ export function recentGrowth(n = 10) {
 }
 
 /** 让她自己想说一句什么弹幕。短、随口、不像总结。 */
-export async function draftDanmaku(brain, v, seen, { mood = '' } = {}) {
+export async function draftDanmaku(brain, v, seen) {
   const prompt =
-    `你刚看完一个视频。\n\n` +
-    `标题：${v.title}\nUP：${v.up}\n你刚才的感受：${mood || '（说不清）'}\n\n` +
-    (seen ? `视频里的画面：\n${String(seen).slice(0, 800)}\n\n` : '') +
+    `你刚播放了视频的一段并阅读了部分材料；不能声称完整播放或完整听到语音。\n\n` +
+    `标题：${v.title}\nUP：${v.up}\n\n` +
+    (seen ? `可用的分段材料（字幕不等于完整音轨）：\n${String(seen)}\n\n` : '') +
     `现在你想在屏幕上飘一句弹幕。\n\n` +
     `弹幕的样子：短、随口、像脑子里冒出来就发出去的，一般 5~12 个字。\n` +
     `可以是吐槽、可以是接梗、可以是一句感叹、可以是问一句。\n` +
@@ -170,7 +177,7 @@ export async function draftDanmaku(brain, v, seen, { mood = '' } = {}) {
     `只输出那句话本身，不要引号，不要解释。`;
 
   try {
-    const out = await brain.reply({
+    const out = await biliPublicReply(brain, {
       key: '__danmaku__',
       userId: 'self',
       userName: '自己',
@@ -181,8 +188,8 @@ export async function draftDanmaku(brain, v, seen, { mood = '' } = {}) {
       record: false,
     });
     const t = String(out?.text || '').trim().replace(/^["'「『]|["'」』]$/g, '').trim();
-    if (!t || t.length > 30) return null;
-    return t.slice(0, 24);
+    if (!t || Array.from(t).length > 50) return null;
+    return t;
   } catch (e) {
     return null;
   }

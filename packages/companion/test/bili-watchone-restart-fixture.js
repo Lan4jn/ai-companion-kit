@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import {register} from 'node:module';
+import {Memory} from '../src/memory.js';
+import {createBiliBackgroundFilter} from '../src/bili-background-memory.js';
+import {__debug} from '../src/bili-living.js';
+import {Brain} from '../src/brain.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {handleTurn} from '../src/index.js';
+register('./memory-brain-fake-ws-loader.js', import.meta.url);
+const [dir, expected] = process.argv.slice(2);
+const scope={tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'};
+const config={dataDir:dir,ownerIds:['1'],memoryBrain:{enabled:true,backend:'sqlite-fts',trustedProcess:true,trustedScope:scope,authorizedSources:['bili-observation']}};
+const memory=new Memory({dir});
+const filter=createBiliBackgroundFilter(config,dir);
+const rows=memory.biliFeelingCandidates('BV1234567890');
+assert.equal(rows.length,1,'diary must survive process restart');
+assert.equal((await filter(rows)).length,expected==='yes'?1:0);
+let messages=[];
+globalThis.fetch=async (url,opts)=>{assert.equal(url,'https://fixture.invalid/v1/chat/completions');messages=JSON.parse(opts.body).messages;return {ok:true,text:async()=>JSON.stringify({choices:[{message:{content:'好'}}]})}};
+let done; const received=new Promise(r=>done=r); const bot=new OneBot({wsUrl:'ws://fixture',onMessage:done});bot.api=async()=>({ok:false});
+try {
+ for(let i=0;!bot.ws && i<1000;i++) await new Promise(r=>setTimeout(r,1));
+ assert.ok(bot.ws);bot.ws.emit('open');bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:1,message_id:123,message:[{type:'text',data:{text:'你最近在B站有啥好看的？'}}]}));
+ const event=await received;
+ const brain=new Brain({apiKey:'synthetic',baseUrl:'https://fixture.invalid/v1',model:'synthetic',memory,dataDir:dir,ownerIds:['1']});
+ await handleTurn({brain,memory,bot:{},human:{say:async()=>({ok:true})},waker:{}},[event],config);
+ let prompt=''; await __debug.decideBiliBrowsing({complete:async p=>{prompt=p.prompt;return '{"want":false}'}},memory,{todayCount:0},new AbortController().signal,filter);
+ for (const text of [JSON.stringify(messages),prompt]) assert.equal(text.includes('我喜欢小猫'),expected==='yes');
+} finally {bot.close();}

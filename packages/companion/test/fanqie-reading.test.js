@@ -1,0 +1,2 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {extractReadingPage} from '../src/fanqie-reading.js';
+test('只接受番茄阅读页面且正文足够',()=>{assert.equal(extractReadingPage({foreground:'com.phoenix.read',ocr:'这是一本书的实际正文'.repeat(10)}),null);assert.equal(extractReadingPage({foreground:'com.dragon.read/ReaderActivity',ocr:'设置'}),null);assert.ok(extractReadingPage({foreground:'com.dragon.read/ReaderActivity',ocr:'古城后方的露天营地，一群正在备战高考的学生正在庆祝生日。'.repeat(4)}));});

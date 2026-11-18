@@ -18,6 +18,8 @@
  * 除非再次命中条件，否则都当没看见。这就是群聊里"潜水"的实现。
  */
 
+import { classifyMessage } from './conversation-closure.js';
+
 /** 中文里"在问问题"的粗略特征 */
 const QUESTION_HINTS = /[?？]|怎么|为什么|为啥|如何|是不是|能不能|可不可以|有没有|谁|哪儿|哪里|何时|多少/;
 
@@ -36,10 +38,16 @@ export class Waker {
     this.ownerIds = (opts.ownerIds || []).map(String);
     this.probability = opts.probability ?? 0.05;
     this.batchWindowMs = opts.batchWindowMs ?? 3000;
+    /** @type {import('./topic-focus.js').TopicFocusTracker|null} */
+    this.topicTracker = opts.topicTracker || null;
     /** @type {Map<string, object>} 每个会话的唤醒配置 */
     this.configs = new Map();
     /** @type {Map<string, object>} 待合并的消息缓冲 */
     this.buffers = new Map();
+  }
+
+  setTopicTracker(tracker) {
+    this.topicTracker = tracker;
   }
 
   /** 给某个会话设置唤醒配置 */
@@ -96,7 +104,12 @@ export class Waker {
    */
   findDirectNameCall(text, msg = {}) {
     if (!text || msg.isPureShareCard) return { hitName: null, cleaned: '' };
-    let cleaned = String(text);
+    const hasReply = Array.isArray(msg.raw) ? msg.raw.some(s => s?.type === 'reply')
+      : typeof msg.raw === 'string' && /\[CQ:reply(?:,|\])/.test(msg.raw);
+    let cleaned = hasReply && Array.isArray(msg.raw)
+      ? msg.raw.filter(s => s?.type === 'text').map(s => String(s.data?.text || '')).join('')
+      : hasReply && typeof msg.raw === 'string' ? msg.raw.replace(/\[CQ:[^\]]*\]/g, '')
+      : String(text);
     const uid = String(msg.userId || '');
     const isOwner = this.ownerIds.includes(uid);
     const isAtOwner = Boolean(msg.isAtOwner);
@@ -129,6 +142,10 @@ export class Waker {
   shouldWake(msg) {
     const c = this.getConfig(msg.key);
     const text = String(msg.text || '');
+    // Media markers can follow a real question, obscuring its sentence ending.
+    // Keep media-only messages intact for the ordinary acknowledgement filter.
+    const withoutMedia = text.replace(/\[(?:图片|表情包|表情|视频|语音|文件)\]/g, '').trim();
+    const closureText = withoutMedia || text;
     const uid = String(msg.userId || '');
     const isOwner = this.ownerIds.includes(uid);
 
@@ -140,11 +157,47 @@ export class Waker {
 
     const { hitName: directlyCalledName, cleaned: cleanedText } = this.findDirectNameCall(text, msg);
     const directlyCalled = Boolean(msg.isAtMe || msg.isQuoteMe || msg.isPoke || directlyCalledName);
+    // Only images in the current OneBot message count: `images` also contains
+    // attachments extracted from quoted and forwarded messages.
+    const ownerGroupImage = isOwner && msg.isGroup && !directlyCalled &&
+      (Array.isArray(msg.raw) ? msg.raw.some(s => s?.type === 'image' || s?.type === 'mface') :
+        typeof msg.raw === 'string' ? /\[CQ:(?:image|mface)(?:,|\])/.test(msg.raw) :
+          Array.isArray(msg.images) && msg.images.length > 0);
+
+    // 0. 话题专注锁定检查 (Topic Focus Tracker):
+    // 如果该群当前正处于 3 分钟话题专注锁定中：
+    if (msg.isGroup && this.topicTracker) {
+      const lockVerdict = this.topicTracker.checkMessage(msg, isOwner && !ownerGroupImage, directlyCalled);
+      if (lockVerdict.inLock) {
+        if (lockVerdict.wake) {
+          // Direct calls and the owner retain priority. A relevant group topic
+          // is only an opportunity to join, not a command to answer every turn.
+          if (lockVerdict.reason === 'topic-priority-override') {
+            return { wake: true, reason: lockVerdict.reason, topic: lockVerdict.topic };
+          }
+          const closure = classifyMessage(closureText);
+          if (closure.kind === 'ack' || closure.kind === 'silence') {
+            return { wake: false, reason: 'conversation-closure-ack', topic: lockVerdict.topic };
+          }
+          const hour = new Date().getHours();
+          if (hour >= 1 && hour < 9) {
+            return { wake: false, reason: 'quiet-hours', topic: lockVerdict.topic };
+          }
+          const probability = Number(c.topicInterestProbability ?? c.probability);
+          if (!(probability > 0 && Math.random() < probability)) {
+            return { wake: false, reason: 'topic-focus-listening', topic: lockVerdict.topic };
+          }
+          return { wake: true, reason: lockVerdict.reason, topic: lockVerdict.topic };
+        } else {
+          return { wake: false, reason: lockVerdict.reason, topic: lockVerdict.topic };
+        }
+      }
+    }
 
     // 1. 主人（老爸）说话判定：
     // 私聊中每条必醒；群聊中若开启了 ownerMustCall，没叫小鱼时当背景潜水；
     // 若未开启 ownerMustCall（如熟人小群），老爸说话时小鱼可主动搭腔，但在发言冷却期内且未被明确呼叫时保持礼貌倾听
-    if (isOwner && c.mode !== 'active') {
+    if (isOwner && !ownerGroupImage && c.mode !== 'active') {
       if (msg.isGroup) {
         if (c.ownerMustCall && !directlyCalled) {
           return { wake: false, reason: 'owner-chatting-with-group' };
@@ -169,6 +222,22 @@ export class Waker {
       return { wake: true, reason: 'name:' + directlyCalledName };
     }
 
+    // 2.5 拟真对话收尾过滤：群聊中未被直接呼叫时，对方单纯附和（“嗯/好/666/收到”）或纯标点绝对不插话
+    if (msg.isGroup && !directlyCalled) {
+      const closureType = classifyMessage(closureText);
+      if (closureType.kind === 'ack' || closureType.kind === 'silence') {
+        return { wake: false, reason: 'conversation-closure-ack' };
+      }
+    }
+
+    // 2.6 深夜 1:00 ~ 9:00 静音守护：群聊中未被明确呼叫（@、叫名字、拍一拍）时不主动插话/抢答
+    if (msg.isGroup && !directlyCalled) {
+      const h = new Date().getHours();
+      if (h >= 1 && h < 9) {
+        return { wake: false, reason: 'quiet-hours' };
+      }
+    }
+
     // 3. 关键词检查（使用清洗后的文本；潜水群聊不响应通用日常词，除非该群配置了专属 keywords）
     const kw = c.mode === 'diving' ? (c.keywords || []) : [...(c.keywords || []), ...this.keywords];
     if (kw.length) {
@@ -186,8 +255,17 @@ export class Waker {
       return { wake: true, reason: 'question' };
     }
 
-    // 6. 随缘低频冒头（受 probability 与 cooldownMs 双重约束）
-    if (Number(c.probability) > 0 && Math.random() < Number(c.probability)) {
+    // 6. 随缘低频冒头（受 probability / topicInterestProbability 与 cooldownMs 双重约束）
+    const effectiveProb = Number(c.topicInterestProbability ?? c.probability);
+    if (effectiveProb > 0 && Math.random() < effectiveProb) {
+      if (this.topicTracker && msg.isGroup) {
+        const intInfo = this.topicTracker.evaluateInterest(msg);
+        if (intInfo.isInteresting) {
+          return { wake: true, reason: 'topic-interest:' + intInfo.topic, topicInfo: intInfo };
+        }
+        // 如果是无聊的纯数字/打卡/单字无意义消息，随缘冒头也放弃，保持真实活人感
+        return { wake: false, reason: 'uninteresting-skip' };
+      }
       return { wake: true, reason: 'probability' };
     }
 
@@ -214,7 +292,7 @@ export class Waker {
     const b = this.buffers.get(key);
     if (!b) return [];
     const items = b.items;
-    b.items = [];
+    this.buffers.delete(key);
     return items;
   }
 

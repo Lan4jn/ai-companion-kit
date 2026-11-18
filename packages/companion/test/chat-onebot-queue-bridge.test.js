@@ -1,0 +1,74 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { signBridgeSelector, startOneBotQueueBridge } from '../src/chat-onebot-queue-bridge.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import net from 'node:net';
+import {register} from 'node:module';
+import {spawn,execFileSync} from 'node:child_process';
+import https from 'node:https';
+import {X509Certificate} from 'node:crypto';
+import {createAuthenticatedOneBotSender} from '../src/chat-onebot-authenticated-sender.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {EncryptedChatJournal} from '../src/chat-durable-journal-candidate.js';
+import {DurableBatchCandidate,createTransportBoundMessageCandidate,createPreGenerationBatchCandidate} from '../src/chat-durable-batch-candidate.js';
+import {inspectTrustedRecovery} from '../src/chat-trusted-recovery.js';
+import {initializeManagedStore,createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+const ask=(socket,request)=>new Promise((resolve,reject)=>{let text='';const c=net.createConnection(socket,()=>c.write(JSON.stringify(request)+'\n'));c.on('data',b=>text+=b);c.on('end',()=>resolve(JSON.parse(text)));c.on('error',reject)});
+
+test('bridge refuses to start by default and signs only exact selectors', async () => {
+ await assert.rejects(startOneBotQueueBridge(), /disabled/);
+ const key=Buffer.alloc(32,7);
+ const selector={id:'batch-1',snapshot:'a'.repeat(64),confirm:true};
+ const signed=signBridgeSelector(key,selector);
+ assert.deepEqual(Object.keys(signed).sort(),['confirm','id','signature','snapshot']);
+ assert.match(signed.signature,/^[a-f0-9]{64}$/);
+ assert.throws(()=>signBridgeSelector(key,{...selector,segment:'injected'}));
+});
+
+test('signed selectors only; target binding and unknown prevent replay',async()=>{
+ const root=fs.mkdtempSync(path.join(process.env.TMPDIR,'queue-bridge-'));let journal,bot,bridge,server;
+ try {
+  const socket=path.join(root,'bridge.sock'),sealKey=Buffer.alloc(32,3),selectorKey=Buffer.alloc(32,4);let receive;
+  const message=new Promise(r=>receive=r);
+  bot=new OneBot({wsUrl:'ws://fixture',onMessage:receive});while(!bot.ws)await new Promise(r=>setTimeout(r,1));
+  bot.ws.emit('open'); bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',self_id:789,user_id:123,message_id:456,message:[{type:'text',data:{text:'fixture'}}]}));
+  journal=new EncryptedChatJournal({directory:root,key:Buffer.alloc(32,2)});const queue=new DurableBatchCandidate(journal);
+  const {session}=createTransportBoundMessageCandidate({enabled:true,queue,bot,sealKey}).accept(await message);
+  const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'},directory=path.join(root,'store');
+  initializeManagedStore(directory);
+  const store=createManagedMemoryBrain({directory,scope,sources:['qq-private-message'],trustedProcess:true,backend:'sqlite-fts'});
+  await createPreGenerationBatchCandidate({enabled:true,queue,bot,sealKey,ownerId:'123',generate:async()=>({segments:['first','second'],history:await store.chatHistory(scope)})}).form(session,1);
+  let calls=[], ambiguous=false;
+  const key=path.join(root,'tls.key'),cert=path.join(root,'tls.crt');
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});
+  const ca=fs.readFileSync(cert),pin=new X509Certificate(ca).fingerprint256.replaceAll(':','').toLowerCase();
+  server=https.createServer({key:fs.readFileSync(key),cert:ca},(req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{const data=JSON.parse(body);calls.push([`private:${data.user_id}`,data.message]);if(ambiguous)res.destroy();else res.end(JSON.stringify({status:'ok',retcode:0}));});});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  const sender=createAuthenticatedOneBotSender({url:`https://127.0.0.1:${server.address().port}/`,ca,certificateSha256:pin,ownerId:'123'});
+  const options={enabled:true,queue,bot:sender,sealKey,selectorKey,ownerId:'123',socket,store,scope};
+  await assert.rejects(startOneBotQueueBridge({...options,bot,connectionIsAuthenticated:true}),/authenticated OneBot sender required/);
+  bridge=await startOneBotQueueBridge(options);
+  let row=inspectTrustedRecovery(queue)[0], selector={id:row.id,snapshot:row.snapshot,confirm:true};
+  assert.equal((await ask(socket,selector)).status,'blocked');
+  let signed=signBridgeSelector(selectorKey,selector);
+  assert.equal((await ask(socket,{...signed,signature:'0'.repeat(64)})).status,'blocked');
+  assert.equal((await ask(socket,{...signed,segment:'evil'})).status,'blocked');
+  assert.equal((await ask(socket,{...signed,snapshot:'0'.repeat(64)})).status,'blocked');
+  const original=structuredClone(journal.rows),tampered=structuredClone(original);tampered[0].destination='private:999';journal.save(tampered);
+  row=inspectTrustedRecovery(queue)[0];assert.equal((await ask(socket,signBridgeSelector(selectorKey,{id:row.id,snapshot:row.snapshot,confirm:true}))).status,'blocked');
+  journal.save(original);
+  const keyPath=path.join(root,'selector.key');fs.writeFileSync(keyPath,selectorKey,{mode:0o600});
+  const cli=await new Promise((resolve,reject)=>{const p=spawn(process.execPath,['scripts/chat-trusted-sender-client.mjs','send','--socket',socket,'--id',selector.id,'--snapshot',selector.snapshot,'--confirm-one-segment','--selector-key',keyPath]);let out='';p.stdout.on('data',b=>out+=b);p.on('error',reject);p.on('close',code=>resolve({code,out}));});
+  assert.equal(cli.code,0);assert.equal(JSON.parse(cli.out).status,'delivered');
+  assert.equal((await ask(socket,signed)).status,'blocked');
+  assert.deepEqual(calls,[['private:123','first']]);
+  ambiguous=true;
+  row=inspectTrustedRecovery(queue)[0];signed=signBridgeSelector(selectorKey,{id:row.id,snapshot:row.snapshot,confirm:true});
+  assert.equal((await ask(socket,signed)).status,'unknown');
+  row=inspectTrustedRecovery(queue)[0];assert.equal(row.state,'unknown');
+  assert.equal((await ask(socket,signBridgeSelector(selectorKey,{id:row.id,snapshot:row.snapshot,confirm:true}))).status,'blocked');
+  assert.equal(calls.length,2);
+ } finally {if(bridge)await bridge.close();bot?.close();journal?.close();if(server)await new Promise(r=>server.close(r));fs.rmSync(root,{recursive:true,force:true});}
+});

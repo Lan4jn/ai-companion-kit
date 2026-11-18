@@ -7,19 +7,34 @@
  *   - 引用回复消息自动追溯
  */
 import fs from 'node:fs';
+import tls from 'node:tls';
+import http from 'node:http';
+import {createHash, timingSafeEqual} from 'node:crypto';
 import path from 'node:path';
 import { checkOutput, cleanAllToolArtifacts } from './safety.js';
+import { safeTransportMessage } from './chat-concise-delivery.js';
 
+// CQ escaping is decoded once, after splitting fields (escaped commas are data).
+function unescapeCQ(s) {
+  return String(s).replace(/&#44;/g, ',').replace(/&#91;/g, '[').replace(/&#93;/g, ']').replace(/&amp;/g, '&');
+}
+function cqFields(raw) {
+  const fields = {};
+  for (const part of raw.split(',')) {
+    const i = part.indexOf('=');
+    if (i > 0 && !(part.slice(0, i) in fields)) fields[part.slice(0, i)] = unescapeCQ(part.slice(i + 1));
+  }
+  return fields;
+}
 /** 从消息段里提取所有图片 URL / 本地文件路径（支持段对象与 CQ 码字符串） */
 function extractImages(segs) {
   if (!Array.isArray(segs)) {
     if (typeof segs === 'string') {
       const urls = [];
-      const urlMatches = segs.matchAll(/\[CQ:image,[^\]]*url=([^,\]]+)/g);
-      for (const m of urlMatches) urls.push(m[1]);
-      const fileMatches = segs.matchAll(/\[CQ:image,[^\]]*file=([^,\]]+)/g);
-      for (const m of fileMatches) {
-        if (!urls.includes(m[1])) urls.push(m[1]);
+      for (const m of segs.matchAll(/\[CQ:(?:image|mface),([^\]]*)\]/g)) {
+        const fields = cqFields(m[1]);
+        const value = fields.url || fields.file;
+        if (value && !urls.includes(value)) urls.push(value);
       }
       return urls;
     }
@@ -29,6 +44,9 @@ function extractImages(segs) {
   for (const s of segs) {
     if (!s) continue;
     if (s.type === 'image') {
+      const u = s.data?.url || s.data?.file;
+      if (u) urls.push(String(u));
+    } else if (s.type === 'mface') {
       const u = s.data?.url || s.data?.file;
       if (u) urls.push(String(u));
     } else if (s.type === 'forward') {
@@ -46,7 +64,7 @@ function extractImages(segs) {
 /** 把 OneBot 消息段数组拼成纯文本（递归支持嵌套转发） */
 function segsToText(segs, depth = 0, selfId = '', nameCache = null) {
   if (!segs) return '';
-  if (typeof segs === 'string') return segs.trim();
+  if (typeof segs === 'string') return segs.replace(/\[CQ:reply,[^\]]*\]/g, '').replace(/\[CQ:image,[^\]]*\]/g, '[图片]').replace(/\[CQ:mface,[^\]]*\]/g, '[表情包]').trim();
   if (!Array.isArray(segs)) return String(segs);
 
   const out = [];
@@ -73,8 +91,16 @@ function segsToText(segs, depth = 0, selfId = '', nameCache = null) {
         }
         break;
       }
-      case 'image':
-        out.push('[图片]');
+      case 'image': {
+        const isSticker = Number(s.data?.sub_type ?? s.data?.subType ?? 0) === 1 ||
+                          String(s.data?.file || '').toLowerCase().includes('.gif') ||
+                          Boolean(s.data?.is_animated) ||
+                          Number(s.data?.face_type ?? s.data?.faceType ?? 0) > 0;
+        out.push(isSticker ? '[表情包]' : '[图片]');
+        break;
+      }
+      case 'mface':
+        out.push('[表情包]');
         break;
       case 'face':
         out.push('[表情]');
@@ -164,13 +190,95 @@ function segsToText(segs, depth = 0, selfId = '', nameCache = null) {
 
 /** 从消息段里找引用 ID */
 function findReply(segs) {
+  if (typeof segs === 'string') {
+    const m = /\[CQ:reply,([^\]]*)\]/.exec(segs);
+    return m ? cqFields(m[1]).id || null : null;
+  }
   if (!Array.isArray(segs)) return null;
   for (const s of segs) if (s?.type === 'reply') return String(s.data?.id || '');
   return null;
 }
 
+const memoryMessageEvidence = new WeakMap();
+const durableIngressEvidence = new WeakMap();
+const authenticatedIngressEvidence = new WeakMap();
+const trustedForgetReplies = new WeakMap();
+const authenticatedGroupEvents = new WeakMap();
+// Capability exists only for the original live parser object and connection.
+export function snapshotAuthenticatedOneBotGroupMessage(bot, msg) {
+  const entry = authenticatedGroupEvents.get(msg);
+  if (!entry || entry.bot !== bot || !entry.live() || msg.isGroup !== true || msg.key !== `group:${msg.groupId}` || entry.snapshot !== JSON.stringify([msg.key,msg.groupId,msg.userId,msg.messageId,msg.text,msg.raw,msg.platform])) throw Error('untrusted group event');
+  return Object.freeze({groupId:msg.groupId,userId:msg.userId,messageId:msg.messageId,text:msg.text,instance:entry.instance,account:entry.account});
+}
+// The auxiliary API uses the same literal-local trust boundary as durable ingress.
+// Do not use fetch here: its dispatcher may be proxied and redirects may forward credentials.
+function loopbackApiRequest(endpoint, action, headers, params) {
+  if (!/^[a-z_]+$/.test(action)) throw Error('invalid OneBot action');
+  const body = JSON.stringify(params);
+  return new Promise((resolve, reject) => {
+    const req = http.request(new URL('/' + action, endpoint), {method:'POST', agent:false, headers:{'content-type':'application/json', ...headers}}, res => {
+      const chunks=[]; let size=0;
+      res.on('data', chunk => { size += chunk.length; if (size > 1048576) req.destroy(Error('response too large')); else chunks.push(chunk); });
+      res.on('error', reject);
+      res.on('end', () => resolve({ok:res.statusCode >= 200 && res.statusCode < 300, text:async()=>Buffer.concat(chunks).toString('utf8')}));
+    });
+    req.setTimeout(30000, () => req.destroy(Error('timeout')));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+// The result is issued only by the live parser after get_msg verification; it
+// cannot be reconstructed from a quoted display string or a copied object.
+export function trustedForgetReplyId(msg) {
+  return isTrustedMemoryMessage(msg) ? trustedForgetReplies.get(msg) || null : null;
+}
+export function snapshotAuthenticatedOneBotPrivateMessage(bot, msg, ownerId) {
+  if (typeof ownerId !== 'string' || authenticatedIngressEvidence.get(msg)?.bot !== bot || authenticatedIngressEvidence.get(msg)?.ownerId !== ownerId) throw Error('untrusted authenticated OneBot message');
+  const snapshot = snapshotOneBotPrivateMessage(bot, msg);
+  if (snapshot.sender !== ownerId) throw Error('untrusted authenticated OneBot message');
+  return snapshot;
+}
+// Snapshot only messages produced by this transport instance; never reissue a
+// trusted event from stored data. The connection itself still needs an audited
+// authenticated endpoint before this candidate can be used in production.
+export function snapshotOneBotDurableIdentity(bot, msg) {
+  snapshotOneBotPrivateMessage(bot,msg);
+  const evidence=durableIngressEvidence.get(msg);
+  if (!evidence?.instance || !evidence.account) throw Error('durable transport instance and account required');
+  if (!Array.isArray(msg.raw) || !msg.raw.length || msg.raw.some(s=>!s || s.type!=='text' || typeof s.data?.text!=='string')) throw Error('durable ingress requires pure text');
+  return Object.freeze({instance:evidence.instance,account:evidence.account,content:JSON.stringify(msg.raw)});
+}
+export function snapshotOneBotPrivateMessage(bot, msg) {
+  if (!isTrustedMemoryMessage(msg) || durableIngressEvidence.get(msg)?.bot !== bot || !(bot instanceof OneBot) || msg.isGroup !== false || msg.platform !== 'qq' || !/^[1-9]\d*$/.test(msg.userId) || !/^-?\d+$/.test(msg.messageId) || msg.key !== `private:${msg.userId}` || typeof msg.text !== 'string' || !msg.text || Buffer.byteLength(msg.text, 'utf8') > 32768) throw Error('untrusted OneBot message');
+  return Object.freeze({transport:'onebot-qq',conversation:msg.key,sender:msg.userId,messageId:msg.messageId,text:msg.text});
+}
+// Only messages created by the OneBot event parser can carry this capability.
+// Compare the security-relevant fields again because batching retains the object.
+export function isTrustedMemoryMessage(msg) {
+  const original = memoryMessageEvidence.get(msg);
+  if (!original) return false;
+  return original === JSON.stringify([msg.key, msg.isGroup, msg.userId, msg.messageId, msg.text, msg.raw, msg.replyTo, msg.platform]);
+}
+
 export class OneBot {
-  constructor({ wsUrl, httpUrl, accessToken = '', onMessage, dataDir = './data' }) {
+  #ingressAuth = null;
+  #loopbackHttp = null;
+  #durableInstance;
+  constructor({ wsUrl, httpUrl, accessToken = '', onMessage, dataDir = './data', ingressAuthentication } ) {
+    this.#durableInstance = typeof wsUrl === 'string' && wsUrl.length <= 4096 ? wsUrl : '';
+    if (ingressAuthentication !== undefined) {
+      const a = ingressAuthentication;
+      let u; try { u = new URL(wsUrl); } catch { throw Error('invalid ingress authentication'); }
+      const local = a?.trustLoopbackOneBot === true;
+      if (!a || a.enabled !== true || u.username || u.password || u.hash || typeof a.ownerId !== 'string' || !/^[1-9]\d*$/.test(a.ownerId) || (local ? (typeof wsUrl !== 'string' || !/^ws:\/\/127\.0\.0\.1(?::[0-9]+)?(?:\/|$)/.test(wsUrl) || u.protocol !== 'ws:' || u.hostname !== '127.0.0.1' || u.search) : (u.protocol !== 'wss:' || !Buffer.isBuffer(a.ca) || !a.ca.length || typeof a.certificateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.certificateSha256)))) throw Error('invalid ingress authentication');
+      if (local && httpUrl) {
+        let endpoint; try { endpoint = new URL(httpUrl); } catch { throw Error('invalid loopback HTTP endpoint'); }
+        if (typeof httpUrl !== 'string' || !/^http:\/\/127\.0\.0\.1(?::[0-9]+)?\/?$/.test(httpUrl) || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== '/') throw Error('invalid loopback HTTP endpoint');
+        this.#loopbackHttp = endpoint.href;
+      }
+      this.#ingressAuth = local ? {url:u.href,local:true,ownerId:a.ownerId} : {url:u.href, ca:Buffer.from(a.ca), pin:Buffer.from(a.certificateSha256,'hex'), ownerId:a.ownerId};
+      this.#durableInstance=JSON.stringify([u.href,local?'operator-trusted-loopback':a.certificateSha256]);
+    }
     this.wsUrl = wsUrl;
     this.httpUrl = (httpUrl || '').replace(/\/+$/, '');
     this.accessToken = accessToken;
@@ -184,6 +292,12 @@ export class OneBot {
     this.myGroupCards = new Map(); // groupId -> card
     this.ws = null;
     this.connected = false;
+    this.accountStatus = 'unknown';
+    this.accountStatusUntil = 0;
+    this.stopping = false;
+    this.pendingOperations = new Set();
+    this.groupIngressQueues = new Map();
+    this.reconnectTimer = null;
     this.#connect();
   }
 
@@ -318,14 +432,56 @@ export class OneBot {
     return h;
   }
 
+  connectionStatus() {
+    return { alive: this.connected, account: this.connected && Date.now() < this.accountStatusUntil ? this.accountStatus : 'unknown' };
+  }
+
+  stopReceiving() {
+    this.stopping = true;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  async drain() {
+    while (this.pendingOperations.size) await Promise.allSettled([...this.pendingOperations]);
+  }
+
+  close() {
+    this.stopReceiving();
+    this.connected = false;
+    if (this.ws) { try { this.ws.terminate?.(); if (!this.ws.terminate) this.ws.close(); } catch {} }
+  }
+
+  #track(promise) {
+    this.pendingOperations.add(promise);
+    promise.then(() => this.pendingOperations.delete(promise), () => this.pendingOperations.delete(promise));
+    return promise;
+  }
+
   async #connect() {
+    if (this.stopping) return;
     const { WebSocket } = await import('ws').catch(() => ({ WebSocket: globalThis.WebSocket }));
-    const sock = new WebSocket(this.wsUrl, { headers: this.#headers() });
+    if (this.stopping) return;
+    const auth=this.#ingressAuth;
+    // A peer that accepts TCP but never completes the upgrade otherwise leaves
+    // ws CONNECTING forever, so the close-driven retry is never scheduled.
+    const options={headers:this.#headers(), handshakeTimeout:10000};
+    let peerVerified=Boolean(auth?.local);
+    if (auth?.local) Object.assign(options,{followRedirects:false,agent:false});
+    if (auth && !auth.local) Object.assign(options,{ca:auth.ca,rejectUnauthorized:true,followRedirects:false,agent:false,checkServerIdentity(host,cert) {
+      const error=tls.checkServerIdentity(host,cert);
+      if (error) return error;
+      if (!cert.raw || !timingSafeEqual(createHash('sha256').update(cert.raw).digest(),auth.pin)) return Error('ingress certificate pin mismatch');
+      peerVerified=true;
+    }});
+    const sock = new WebSocket(auth ? auth.url : this.wsUrl, options);
     this.ws = sock;
 
     sock.on?.('open', async () => {
+      this.accountStatus = 'unknown';
+      this.accountStatusUntil = 0;
       this.connected = true;
-      console.log('[onebot] 已连接 ' + this.wsUrl);
+      console.log('[onebot] 已连接');
       try {
         const login = await this.api('get_login_info');
         if (login.ok && login.data?.data?.user_id) {
@@ -336,15 +492,32 @@ export class OneBot {
     });
     sock.on?.('close', () => {
       this.connected = false;
-      console.log('[onebot] 断开，5 秒后重连');
-      setTimeout(() => this.#connect(), 5000);
+      if (!this.stopping) {
+        console.log('[onebot] 断开，5 秒后重连');
+        this.reconnectTimer = setTimeout(() => this.#connect(), 5000);
+      }
     });
-    sock.on?.('error', (e) => console.log('[onebot] 出错 ' + (e?.message || e)));
+    sock.on?.('error', () => console.log('[onebot] 连接出错'));
     sock.on?.('message', async (data) => {
       let ev;
       try { ev = JSON.parse(String(data)); } catch { return; }
-      if (process.env.ONEBOT_DEBUG) console.log('[RAW] ' + String(data).slice(0, 300));
-      try { await this.#handle(ev); } catch (e) { console.error('[handle 出错] ' + (e?.stack || e)); }
+      if (process.env.ONEBOT_DEBUG) console.log('[onebot] 收到事件');
+      if (this.stopping || sock !== this.ws || !this.connected) return;
+      if (ev.post_type === 'meta_event' && ev.meta_event_type === 'heartbeat') {
+        const online = ev.status?.online;
+        this.accountStatus = online === false ? 'offline' : online === true ? 'online' : 'unknown';
+        // A silent but still-open socket must not keep old account status forever.
+        const interval = Number.isFinite(ev.interval) && ev.interval > 0 ? ev.interval : 60000;
+        this.accountStatusUntil = Date.now() + Math.min(Math.max(interval * 3, 60000), 300000);
+      }
+      const run = () => this.stopping || sock !== this.ws || !this.connected ? undefined : this.#handle(ev, auth && peerVerified && sock === this.ws ? auth.ownerId : null, () => !!auth && peerVerified && !this.stopping && this.connected && sock === this.ws);
+      // Preserve ingress order within a group without blocking other groups or API responses.
+      const groupKey = ev.post_type === 'message' && ev.message_type === 'group' && ev.group_id != null ? String(ev.group_id) : null;
+      const prior = groupKey && this.groupIngressQueues.get(groupKey);
+      const operation = prior ? prior.catch(() => {}).then(run) : run();
+      if (groupKey) this.groupIngressQueues.set(groupKey, operation);
+      try { await this.#track(operation); } catch (e) { console.error('[handle 出错] 事件处理失败'); }
+      finally { if (groupKey && this.groupIngressQueues.get(groupKey) === operation) this.groupIngressQueues.delete(groupKey); }
     });
   }
 
@@ -436,7 +609,7 @@ export class OneBot {
     return { text: '', images: [] };
   }
 
-  async #handle(ev) {
+  async #handle(ev, authenticatedOwner = null, liveAuthenticatedConnection = () => false) {
     if (ev.post_type === 'meta_event' && ev.meta_event_type === 'lifecycle') {
       this.selfId = String(ev.self_id || '');
       return;
@@ -478,7 +651,7 @@ export class OneBot {
       const userId = String(ev.user_id || '');
       const comment = String(ev.comment || '');
       const flag = String(ev.flag || '');
-      console.log(`[onebot] 收到好友申请: ${userId}, 验证: "${comment}"`);
+      console.log('[onebot] 收到好友申请');
 
       // 老爸（578021239）或验证消息带老爸暗号直接免审通过
       if (userId === '578021239' || comment.includes('我是老爸') || comment.includes('织梦行云')) {
@@ -551,14 +724,27 @@ export class OneBot {
     collectAts(segs);
 
     let replyRef = null;
+    let replyVerified = false;
     if (replyId) {
       try {
         const replyRes = await this.api('get_msg', { message_id: replyId });
-        if (replyRes.ok && replyRes.data?.data) {
-          replyRef = replyRes.data.data;
+        const ref = replyRes?.data?.data;
+        const sameId = (a, b) => a != null && b != null && /^(?:-?(?:0|[1-9]\d*))$/.test(String(a)) && String(a) === String(b) && (typeof a !== 'number' || Number.isSafeInteger(a)) && (typeof b !== 'number' || Number.isSafeInteger(b));
+        const sameScope = isGroup
+          ? ref?.message_type === 'group' && sameId(ref.group_id, ev.group_id)
+          : ev.message_type === 'private' && ref?.message_type === 'private' && ref.group_id == null && ref.temp_source == null && ev.group_id == null && ev.temp_source == null && sameId(ref.self_id, ev.self_id) && sameId(ref.user_id, ev.user_id);
+        if (!replyRes?.ok || replyRes.data?.status !== 'ok' || replyRes.data?.retcode !== 0 || !ref) {
+          console.warn('[onebot] quote stage=get_msg_failed');
+        } else if (!sameId(ref.message_id, replyId) || !sameScope) {
+          console.warn('[onebot] quote stage=scope_rejected');
+        } else {
+          replyRef = ref;
+          replyVerified = true;
           collectAts(replyRef.message);
         }
-      } catch (e) {}
+      } catch {
+        console.warn('[onebot] quote stage=get_msg_error');
+      }
     }
 
     if (atUids.size > 0) {
@@ -605,7 +791,7 @@ export class OneBot {
       userId: String(ev.user_id),
       name: String(ev.sender?.card || ev.sender?.nickname || ev.user_id),
       text: baseText,
-      images,
+      images: [...new Set(images)],
       raw: segs,
       isAtMe: atMe,
       isAtOthers: atOthers,
@@ -617,13 +803,55 @@ export class OneBot {
       messageId: String(ev.message_id || ''),
       time: (ev.time || Math.floor(Date.now() / 1000)) * 1000,
     };
+    if (isGroup && authenticatedOwner && liveAuthenticatedConnection() && Number.isSafeInteger(ev.self_id) && ev.self_id > 0 && /^[1-9]\d*$/.test(String(ev.group_id)) && /^[1-9]\d*$/.test(String(ev.user_id)) && Number.isSafeInteger(ev.group_id) && Number.isSafeInteger(ev.user_id) && Number.isSafeInteger(ev.message_id) && Array.isArray(segs) && segs.length && segs.every(s => s?.type === 'text' && typeof s.data?.text === 'string') && msg.text && Buffer.byteLength(msg.text,'utf8') <= 32768) {
+      msg.platform = 'qq';
+      authenticatedGroupEvents.set(msg,{bot:this,live:liveAuthenticatedConnection,instance:this.#durableInstance,account:String(ev.self_id),snapshot:JSON.stringify([msg.key,msg.groupId,msg.userId,msg.messageId,msg.text,msg.raw,msg.platform])});
+    }
+    if (ev.message_type === 'private') {
+      msg.platform = 'qq';
+      memoryMessageEvidence.set(msg, JSON.stringify([msg.key, msg.isGroup, msg.userId, msg.messageId, msg.text, msg.raw, msg.replyTo, msg.platform]));
+      const replies = Array.isArray(segs) ? segs.filter(s => s?.type === 'reply') : [];
+      const canonicalId = value => {
+        if (typeof value === 'number' && !Number.isSafeInteger(value)) return null;
+        if (typeof value !== 'number' && typeof value !== 'string') return null;
+        const id = String(value);
+        return /^-?(?:0|[1-9]\d*)$/.test(id) && id !== '-0' ? id : null;
+      };
+      const owner = canonicalId(ev.user_id);
+      const account = canonicalId(ev.self_id);
+      const id = replies.length === 1 ? canonicalId(replies[0]?.data?.id) : null;
+      const typed = Array.isArray(segs) && segs.every(s => s?.type === 'reply' || (s?.type === 'text' && typeof s.data?.text === 'string'))
+        ? segs.filter(s => s.type === 'text').map(s => s.data.text).join('').trim() : '';
+      if (replyVerified && id && owner && account && /^[1-9]\d*$/.test(owner) && /^[1-9]\d*$/.test(account) && owner !== account && canonicalId(replyRef.self_id) === account && ev.sub_type === 'friend' && ev.group_id == null && ev.temp_source == null && ev.sender?.group_id == null &&
+          /^(?:忘记|忘掉|删除|删掉|清除|清掉)这条聊天记忆[。！!]?$/u.test(typed) &&
+          replyRef.message_type === 'private' && replyRef.sub_type === 'friend' && replyRef.group_id == null && replyRef.temp_source == null && replyRef.sender?.group_id == null &&
+          canonicalId(replyRef.message_id) === id && canonicalId(replyRef.user_id) === owner &&
+          canonicalId(replyRef.sender?.user_id) === owner)
+        trustedForgetReplies.set(msg, id);
+      const safeId = value => (typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^-?\d+$/.test(value));
+      if (safeId(ev.user_id) && safeId(ev.message_id)) {
+        const account = safeId(ev.self_id) && /^[1-9]\d*$/.test(String(ev.self_id)) ? String(ev.self_id) : '';
+        durableIngressEvidence.set(msg, {bot:this,instance:this.#durableInstance,account});
+        if (authenticatedOwner && String(ev.user_id) === authenticatedOwner) authenticatedIngressEvidence.set(msg,{bot:this,ownerId:authenticatedOwner});
+      }
+    }
     this.onMessage?.(msg);
   }
 
-  async api(action, params = {}) {
-    if (!this.httpUrl) return { ok: false, error: '没配 httpUrl' };
+  api(action, params = {}) {
+    return this.#track(this.#api(action, params));
+  }
+
+  async #api(action, params = {}) {
+    const isSend = action === 'send_group_msg' || action === 'send_private_msg';
+    if (isSend && !safeTransportMessage(params.message)) {
+      console.warn('[Concise] stage=transport_blocked');
+      return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_BLOCKED'};
+    }
+    if (this.#ingressAuth?.local && !this.#loopbackHttp) return {ok:false, error:'loopback HTTP endpoint not configured', ...(isSend ? {outcome:'permanent'} : {})};
+    if (!this.httpUrl && !this.#loopbackHttp) return { ok: false, error: '没配 httpUrl', ...(isSend ? { outcome: 'permanent' } : {}) };
     try {
-      const r = await fetch(this.httpUrl + '/' + action, {
+      const r = this.#loopbackHttp ? await loopbackApiRequest(this.#loopbackHttp, action, this.#headers(), params) : await fetch(this.httpUrl + '/' + action, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...this.#headers() },
         body: JSON.stringify(params),
@@ -631,9 +859,19 @@ export class OneBot {
       });
       const t = await r.text();
       let j; try { j = JSON.parse(t); } catch { j = { raw: t }; }
+      if (isSend) {
+        // HTTP success alone is not evidence that OneBot accepted the message.
+        const valid = j && typeof j === 'object' && !Array.isArray(j);
+        if (valid && j.status === 'async') return { ok: false, outcome: 'unknown', data: j, error: 'OneBot send is asynchronous and unconfirmed' };
+        const rejected = valid && (j.status === 'failed' || (typeof j.retcode === 'number' && j.retcode !== 0));
+        if (rejected) return { ok: false, outcome: 'permanent', data: j, error: j.message || j.wording || 'OneBot rejected send' };
+        const confirmed = r.ok && valid && j.status === 'ok' && j.retcode === 0;
+        if (!confirmed) return { ok: false, outcome: 'unknown', data: j, error: j?.message || j?.wording || 'OneBot send result unknown' };
+        return { ok: true, data: j, error: j.message || j.wording };
+      }
       return { ok: r.ok && j.status !== 'failed', data: j, error: j.message || j.wording };
     } catch (e) {
-      return { ok: false, error: String(e.message || e) };
+      return { ok: false, error: String(e.message || e), ...(isSend ? { outcome: 'unknown' } : {}) };
     }
   }
 
@@ -652,11 +890,46 @@ export class OneBot {
     // 终极安全防线：物理发包前校验，如果含敏感涉政/控评，坚决不向 QQ 发送！
     const safeCheck = checkOutput(message);
     if (!safeCheck.ok) {
-      console.error(`   [OneBot Guard] 物理终极拦截：阻止向 ${key} 发送敏感内容！(${safeCheck.why}) -> "${message.slice(0, 50)}"`);
-      return Promise.resolve({ ok: false, error: 'BLOCKED_BY_SAFETY_GUARD' });
+      console.error('   [OneBot Guard] 输出已拦截');
+      return Promise.resolve({ ok: false, outcome: 'permanent', error: 'BLOCKED_BY_SAFETY_GUARD' });
     }
 
     if (atUserId) message = '[CQ:at,qq=' + atUserId + '] ' + message;
+
+    // 含有 [CQ:image,...]（如大体积 base64 表情包）时，转为 OneBot 标准段数组发送，
+    // 防止 CQ 字符串在解析或长文本链路中被截断而直接发出原始代码
+    if (/\[CQ:image,[^\]]+\]/.test(message)) {
+      const segs = [];
+      const re = /\[CQ:(image|at),([^\]]+)\]/g;
+      let lastIdx = 0;
+      let m;
+      while ((m = re.exec(message)) !== null) {
+        if (m.index > lastIdx) {
+          const txt = message.slice(lastIdx, m.index);
+          if (txt) segs.push({ type: 'text', data: { text: txt } });
+        }
+        const kind = m[1];
+        const kv = m[2];
+        if (kind === 'image') {
+          const fm = kv.match(/(?:^|,)file=([^,]+)/);
+          if (fm && fm[1]) segs.push({ type: 'image', data: { file: fm[1] } });
+        } else if (kind === 'at') {
+          const qm = kv.match(/(?:^|,)qq=([^,]+)/);
+          if (qm && qm[1]) segs.push({ type: 'at', data: { qq: qm[1] } });
+        }
+        lastIdx = m.index + m[0].length;
+      }
+      if (lastIdx < message.length) {
+        const tail = message.slice(lastIdx);
+        if (tail) segs.push({ type: 'text', data: { text: tail } });
+      }
+      if (segs.length > 0) {
+        return isGroup
+          ? this.api('send_group_msg', { group_id: id, message: segs })
+          : this.api('send_private_msg', { user_id: id, message: segs });
+      }
+    }
+
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });
@@ -673,7 +946,7 @@ export class OneBot {
         ref = 'base64://' + buf.toString('base64');
       }
     } catch (e) {
-      console.log('[onebot] 发图读不到文件：' + (e?.message || e) + ' → ' + file);
+      console.log('[onebot] 发图读不到文件');
       return Promise.resolve(null);
     }
     const message = [{ type: 'image', data: { file: ref } }];

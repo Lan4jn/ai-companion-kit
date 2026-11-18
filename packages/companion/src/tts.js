@@ -1,14 +1,11 @@
 // 小鱼的声音：优先使用豆包语音大模型 2.0 (seed-tts-2.0)，异常时自动回退到 edge-tts
 // 输出 MP3 base64，交给 OneBot.sendVoice 发成 QQ 语音条。
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import https from 'node:https';
-
-const run = promisify(execFile);
 
 /**
  * 用 curl 走可选代理取回二进制（fish.audio 在墙外，直连 100% 超时）。
@@ -29,10 +26,11 @@ function curlToBuffer(args, input, timeoutMs) {
     p.on('close', (code) => {
       clearTimeout(timer);
       const buf = Buffer.concat(out);
-      if (code !== 0) return reject(new Error(`curl exit ${code}: ${Buffer.concat(err).toString().slice(0, 120)}`));
-      if (buf.length < 512) return reject(new Error(`fish 返回内容过短(${buf.length}B): ${Buffer.concat(err).toString().slice(0, 120)}`));
+      if (code !== 0) return reject(new Error(`fish transport failure (exit ${code})`));
+      if (buf.length < 512 || !(buf.subarray(0, 3).toString() === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0))) return reject(new Error('fish invalid audio'));
       resolve(buf);
     });
+    p.stdin.on('error', () => {});
     p.stdin.end(input);
   });
 }
@@ -41,6 +39,29 @@ function curlToBuffer(args, input, timeoutMs) {
  * fish.audio 兜底音色（zero-shot voice clone）。
  * 跨境 + 免费档排队，正常 3~5 秒，超时给到 30 秒。
  */
+// Only fixed, locally chosen tags may reach Fish as controls. Never relay mood text.
+export function fishText(text, { emotion = '', intensity = '' } = {}) {
+  const speech = extractEmotionAndCleanText(String(text || '')).cleanText
+    .replace(/\((?:angry|annoyed|crying|sad|happy|excited|whispering|laughing|sobbing|calm|surprised|scared|disgusted|shouting|soft|gentle|neutral|furious|weeping|screaming|laugh|sigh|breathing|cough|chuckle|gasp|groan|sniffle|silence|break)[^)]*\)/gi, '')
+    .replace(/\[[a-z][a-z\s,.'-]{0,80}\]/gi, '').trim();
+  const e = String(emotion).trim();
+  const level = ['mild', 'medium', 'strong', 'stronger'].includes(intensity) ? intensity : 'mild';
+  const modifiers = { mild: 'slightly ', medium: '', strong: 'very ', stronger: 'extremely ' };
+  let tag = '';
+  if (/^(愤怒|生气|angry)$/.test(e)) tag = modifiers[level] + 'angry';
+  else if (/^(喊叫|shout)$/.test(e)) tag = level === 'stronger' || level === 'strong' ? 'extremely angry][shouting' : modifiers[level] + 'angry';
+  else if (/^(哭|cry)$/.test(e)) {
+    if (level === 'medium') tag = 'sad][sobbing';
+    else if (level === 'strong') tag = 'very sad][sobbing';
+    else if (level === 'stronger') tag = 'extremely sad][sobbing';
+    else tag = 'slightly sad][softly sobbing';
+  }
+  else if (/^(难过|伤心|sad)$/.test(e)) tag = modifiers[level] + 'sad';
+  else if (/^(开心|高兴|happy)$/.test(e)) tag = level === 'stronger' ? 'excited][laughing' : modifiers[level] + 'happy';
+  else if (/^(温柔|轻声|gentle)$/.test(e)) tag = 'with gentle warmth';
+  return speech && tag ? `[${tag}] ${speech}` : speech;
+}
+
 async function synthesizeFish(text, fishCfg, timeoutMs = 30000) {
   if (!fishCfg?.apiKey || !fishCfg?.referenceId) throw new Error('fish not configured');
   const model = fishCfg.model || 's2.1-pro-free';
@@ -52,16 +73,16 @@ async function synthesizeFish(text, fishCfg, timeoutMs = 30000) {
     mp3_bitrate: 128,
     model,
   });
-  const args = [
-    '-sS', '--max-time', String(Math.ceil(timeoutMs / 1000)),
-    '-X', 'POST', `${base}/tts`,
-    '-H', `Authorization: Bearer ${fishCfg.apiKey}`,
-    '-H', 'Content-Type: application/json',
-    '-H', `model: ${model}`,
-    '--data-binary', '@-',
-  ];
+  if (/[\r\n]/.test(fishCfg.apiKey + model)) throw new Error('invalid fish configuration');
+  const quote = value => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  // curl config is delivered through stdin: neither key nor speech appears in argv.
+  const config = [`header = ${quote(`Authorization: Bearer ${fishCfg.apiKey}`)}`,
+    'header = "Content-Type: application/json"', `header = ${quote(`model: ${model}`)}`,
+    `data-binary = ${quote(payload)}`].join('\n');
+  const args = ['-sS', '--fail', '--max-time', String(Math.ceil(timeoutMs / 1000)),
+    '-X', 'POST', `${base}/tts`, '--config', '-'];
   if (fishCfg.proxy) args.unshift('-x', fishCfg.proxy);
-  const buf = await curlToBuffer(args, payload, timeoutMs);
+  const buf = await curlToBuffer(args, config, timeoutMs);
   return { ok: true, base64: buf.toString('base64'), bytes: buf.length, voice: `fish:${fishCfg.referenceId.slice(0, 8)}` };
 }
 
@@ -77,8 +98,8 @@ const EDGE_VOICES = {
   gentle: 'zh-CN-XiaoxiaoNeural',
 };
 const EDGE_RATES = {
-  cute: '+8%',
-  gentle: '-3%',
+  cute: '+0%',
+  gentle: '-8%',
 };
 
 export const TTS_STYLES = Object.keys(DOUBAO_VOICES);
@@ -110,10 +131,12 @@ export function extractEmotionAndCleanText(rawText) {
   const contextTexts = [];
 
   const tagRegex = /(?:\[([^\[\]]+)\]|\(([^\(\)]+)\)|（([^（）]+)）)/g;
-  let match;
-  while ((match = tagRegex.exec(text)) !== null) {
-    const rawTag = (match[1] || match[2] || match[3] || '').trim();
-    if (!rawTag) continue;
+  // Only unmistakable short stage directions are control tags; ordinary
+  // parentheticals are part of the words the user asked to hear.
+  const direction = /^(?:轻笑|嗤笑|笑|笑出声|吸鼻|吸鼻子|抽泣|哭|哽咽|叹气|无语|哼|轻哼|傲娇|打哈欠|哈欠|犯困|困|累|小声|低声|轻声|温柔|撒娇)$/;
+  text = text.replace(tagRegex, (whole, square, ascii, fullwidth) => {
+    const rawTag = (square || ascii || fullwidth || '').trim();
+    if (!direction.test(rawTag)) return whole;
     if (rawTag.includes('吸鼻') || rawTag.includes('抽泣') || rawTag.includes('哭') || rawTag.includes('哽咽')) {
       contextTexts.push('用受委屈、抽泣、带哭腔和吸鼻子的语气说');
     } else if (rawTag.includes('轻笑') || rawTag.includes('嗤笑') || rawTag.includes('笑')) {
@@ -125,15 +148,12 @@ export function extractEmotionAndCleanText(rawText) {
     } else if (rawTag.includes('打哈欠') || rawTag.includes('哈欠') || rawTag.includes('困') || rawTag.includes('累')) {
       contextTexts.push('用犯困、打哈欠的语气说');
     } else {
-      contextTexts.push(rawTag.startsWith('用') ? rawTag : `用${rawTag}的语气说`);
+      contextTexts.push(`用${rawTag}的语气说`);
     }
-  }
+    return '';
+  });
 
-  // 严格从朗读文本中剥离所有标记，防止 TTS 引擎念出字面
   const cleanText = text
-    .replace(/\[[^\[\]]+\]/g, '')
-    .replace(/\([^\(\)]+\)/g, '')
-    .replace(/（[^（）]+）/g, '')
     .replace(/^[，。！？\s]+/, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -161,10 +181,13 @@ async function synthesizeDoubao(text, style, cfg, emotion = '') {
     }
   }
 
+  const configuredSpeed = Number(cfg?.speedRatio ?? 0.9);
+  const speedRatio = Number.isFinite(configuredSpeed) ? configuredSpeed : 0.9;
+  const speechRate = Math.max(-50, Math.min(100, Math.round((speedRatio - 1) * 100)));
   const reqParams = {
     text: actualText,
     speaker,
-    audio_params: { format: 'mp3', sample_rate: 24000, bit_rate: 64000 }
+    audio_params: { format: 'mp3', sample_rate: 24000, bit_rate: 64000, speech_rate: speechRate }
   };
 
   // 确保 contextTexts 绝不为空！否则火山引擎会退化成没有感情的死板念稿
@@ -178,10 +201,10 @@ async function synthesizeDoubao(text, style, cfg, emotion = '') {
 
   // 通过 context_texts 引导 2.0 / ICL 渲染呼吸、哭腔与语气，不污染朗读正文
   if (contextTexts.length > 0 && (resourceId === 'seed-tts-2.0' || resourceId === 'seed-icl-2.0')) {
-    reqParams.additions = JSON.stringify({ context_texts: contextTexts });
+    reqParams.additions = JSON.stringify({ context_texts: [contextTexts.join('；')] });
   }
 
-  console.log(`[TTS] 发起合成: speaker=${speaker}, text="${actualText}", context_texts=${JSON.stringify(contextTexts)}`);
+  console.log(`[TTS] 发起合成: speaker=${speaker}, textLength=${actualText.length}, hasEmotion=${contextTexts.length > 0}`);
 
   const payload = JSON.stringify({ req_params: reqParams });
 
@@ -247,11 +270,14 @@ async function synthesizeEdge(clean, style, dir, timeoutMs) {
   const out = path.join(dir, `v_${Date.now()}_${crypto.randomBytes(3).toString('hex')}.mp3`);
 
   try {
-    await run(
-      'edge-tts',
-      [`--voice=${voice}`, `--rate=${rate}`, `--text=${cleanForEdge}`, `--write-media=${out}`],
-      { timeout: timeoutMs },
-    );
+    await new Promise((resolve, reject) => {
+      const child = spawn('edge-tts', [`--voice=${voice}`, `--rate=${rate}`, '--file=-', `--write-media=${out}`], { stdio: ['pipe', 'ignore', 'ignore'] });
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('edge timeout')); }, timeoutMs);
+      child.on('error', err => { clearTimeout(timer); reject(err); });
+      child.on('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('edge failed')); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(cleanForEdge);
+    });
     const buf = await fs.readFile(out);
     await fs.unlink(out).catch(() => {});
     if (!buf.length) return { ok: false, error: 'empty audio' };
@@ -284,8 +310,30 @@ function boostAudio(buffer) {
       }
     });
     ff.on('error', () => resolve(buffer));
+    ff.stdin.on('error', () => {});
     ff.stdin.end(buffer);
   });
+}
+
+// Conservative request budget in UTF-8 bytes; leaves room for provider emotion tags.
+export function splitSpeechText(text, maxBytes = 600) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 4) throw new RangeError('invalid speech chunk limit');
+  const parts = [];
+  let remaining = String(text);
+  while (Buffer.byteLength(remaining) > maxBytes) {
+    let size = 0, end = 0, preferred = 0;
+    for (const char of remaining) {
+      const n = Buffer.byteLength(char);
+      if (size + n > maxBytes) break;
+      size += n; end += char.length;
+      if (/[。！？!?；;，,\n]/u.test(char)) preferred = end;
+    }
+    const cut = preferred >= end / 2 ? preferred : end;
+    parts.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
+  }
+  if (remaining) parts.push(remaining);
+  return parts;
 }
 
 /**
@@ -295,43 +343,49 @@ function boostAudio(buffer) {
  * @returns {Promise<{ok: boolean, base64?: string, bytes?: number, voice?: string, error?: string}>}
  */
 export async function synthesize(text, opts = {}) {
-  const { style = 'cute', emotion = '', dir = './data/voice', timeoutMs = 45000 } = opts;
-  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+  const { style = 'cute', emotion = '', voiceEmotion = '', intensity = '', dir = './data/voice', timeoutMs = 45000 } = opts;
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return { ok: false, error: 'empty text' };
+  const spokenText = extractEmotionAndCleanText(clean).cleanText;
+  if (!spokenText) return { ok: false, error: 'empty text after removing voice directions' };
 
-  const cfg = loadConfig();
+  const cfg = opts._ttsConfig ?? loadConfig();
+  const provider = opts.provider;
+  if (provider && !['fish', 'doubao', 'edge'].includes(provider)) return { ok: false, error: 'invalid voice provider' };
   const doubaoCfg = cfg?.tts?.provider === 'doubao' ? cfg.tts : null;
 
   let rawRes = null;
 
-  // 1. 尝试豆包语音合成 2.0
-  if (doubaoCfg?.apiKey) {
+  // The user-approved Fish voice is primary when configured.
+  if ((!provider || provider === 'fish') && cfg?.tts?.fish?.apiKey && cfg.tts.fish.referenceId) {
     try {
-      const res = await synthesizeDoubao(clean, style, doubaoCfg, emotion);
+      const fishSpeech = fishText(spokenText, { emotion: voiceEmotion, intensity });
+      if (!fishSpeech) return { ok: false, error: 'empty text after removing voice directions' };
+      rawRes = await synthesizeFish(fishSpeech, cfg.tts.fish, Math.min(timeoutMs, 30000));
+      console.log('[TTS] provider=fish fallback=false');
+    } catch {
+      console.warn('[TTS] provider=fish failed; fallback changes voice and may lose emotion');
+    }
+  }
+  if (!rawRes && (!provider || provider === 'doubao') && doubaoCfg?.apiKey) {
+    try {
+      const safeFallbackEmotions = { angry: '生气', sad: '伤心', happy: '开心', gentle: '温柔', natural: '' };
+      const fallbackEmotion = cfg?.tts?.fish?.apiKey ? (safeFallbackEmotions[voiceEmotion] || '') : emotion;
+      const res = await synthesizeDoubao(cfg?.tts?.fish?.apiKey ? spokenText : clean, style, doubaoCfg, fallbackEmotion);
       if (res && res.ok && res.bytes > 0) {
         rawRes = res;
+        console.warn('[TTS] provider=doubao fallback=true; voice and emotional rendering may differ');
       }
     } catch (e) {
-      console.warn(`[TTS] 豆包语音合成异常，尝试次级兜底: ${e?.message || e}`);
+      console.warn('[TTS] provider=doubao failed; trying edge');
     }
   }
 
-  // 2. 兜底 fish.audio（跨境的克隆音色，只在豆包失败时用）
-  if (!rawRes && cfg?.tts?.fish?.apiKey) {
-    try {
-      const res = await synthesizeFish(clean, cfg.tts.fish, Math.min(timeoutMs, 30000));
-      if (res && res.ok && res.bytes > 0) {
-        rawRes = res;
-        console.warn(`[TTS] 豆包不可用，已回退 fish.audio (${res.voice})`);
-      }
-    } catch (e) {
-      console.warn(`[TTS] fish.audio 兜底失败，继续回退 edge-tts: ${e?.message || e}`);
-    }
-  }
-
-  // 3. 最后兜底 edge-tts
-  if (!rawRes) {
-    rawRes = await synthesizeEdge(clean, style, dir, timeoutMs);
+  // Last resort changes both voice and emotional rendering.
+  if (!rawRes && (!provider || provider === 'edge')) {
+    console.warn('[TTS] provider=edge fallback=true; voice changed, emotion not preserved');
+    rawRes = await synthesizeEdge(spokenText, style, dir, timeoutMs);
+    if (!rawRes.ok) rawRes = { ok: false, error: 'all configured voice providers failed' };
   }
 
   if (rawRes && rawRes.ok && rawRes.base64) {
@@ -340,16 +394,48 @@ export async function synthesize(text, opts = {}) {
       const boostedBuf = await boostAudio(inBuf);
       return {
         ...rawRes,
+        spokenText,
         base64: boostedBuf.toString('base64'),
         bytes: boostedBuf.length
       };
     } catch (e) {
-      return rawRes;
+      return { ...rawRes, spokenText };
     }
   }
 
   return rawRes;
 }
 
+export async function synthesizeChunks(text, opts = {}, synthesizePart = synthesize, providerOverride) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  const spoken = extractEmotionAndCleanText(normalized).cleanText;
+  if (!spoken) return { ok: false, error: 'empty text' };
+  const parts = splitSpeechText(spoken, opts.maxChunkBytes ?? 600);
+  const directions = extractEmotionAndCleanText(normalized).contextTexts.join('；');
+  const chunkOpts = { ...opts, emotion: [opts.emotion, directions].filter(Boolean).join('；') };
+  // Snapshot configuration for the whole utterance. Each provider gets at most
+  // one sequential pass; no segment is exposed until a complete pass succeeds.
+  const cfg = synthesizePart === synthesize ? loadConfig() : null;
+  const providers = providerOverride ?? (cfg ? [
+    ...(cfg?.tts?.fish?.apiKey && cfg.tts.fish.referenceId ? ['fish'] : []),
+    ...(cfg?.tts?.provider === 'doubao' && cfg.tts.apiKey ? ['doubao'] : []),
+    'edge'
+  ] : [undefined]);
+  for (const provider of providers) {
+    const chunks = [];
+    let voice;
+    for (const part of parts) {
+      let result;
+      try { result = await synthesizePart(part, { ...chunkOpts, ...(cfg ? { _ttsConfig: cfg } : {}), provider }); }
+      catch { break; }
+      if (!result?.ok || !result.base64 || !result.voice || (voice && result.voice !== voice)) break;
+      voice = result.voice;
+      chunks.push({ ...result, spokenText: part });
+    }
+    if (chunks.length === parts.length) return { ok: true, chunks, spokenText: spoken };
+  }
+  return { ok: false, error: 'speech chunk synthesis failed' };
+}
+
 export { synthesizeFish };
-export default { synthesize, synthesizeFish, TTS_STYLES };
+export default { synthesize, synthesizeChunks, synthesizeFish, TTS_STYLES };

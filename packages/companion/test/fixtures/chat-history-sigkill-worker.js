@@ -1,0 +1,33 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {createHmac,createHash} from 'node:crypto';
+import {EncryptedChatJournal} from '../../src/chat-durable-journal-candidate.js';
+import {DurableBatchCandidate,createBoundBatchProcessorCandidate} from '../../src/chat-durable-batch-candidate.js';
+import {createManagedMemoryBrain} from '../../src/memory-brain-trust.js';
+import {Memory} from '../../src/memory.js';
+
+const [dir,phase]=process.argv.slice(2);
+const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'};
+const journal=new EncryptedChatJournal({directory:path.join(dir,'journal'),key:Buffer.alloc(32,31)});
+const sealKey=createHmac('sha256',journal.key).update('main-local-onebot-seal-v1').digest();
+const h=(domain,data)=>createHmac('sha256',sealKey).update(domain+'\0').update(JSON.stringify(data)).digest('hex');
+const message={transport:'onebot-qq',conversation:scope.session,sender:'123',messageId:'1',text:'synthetic question'};
+const session='transport-bound-v1:'+createHash('sha256').update(JSON.stringify([message.transport,message.conversation])).digest('hex');
+const input={kind:'transport-bound-v1',message,tag:h('companion-transport-bound-v1',message)};
+const row={kind:'batch-candidate-v1',version:1,type:'batch',id:'fixture',session,state:'ready',inputIds:['input'],inputs:[input],destination:scope.session,segments:['first','second'],index:0,attempt:null};
+row.history={version:1,commitments:[]};
+row.outputTags=row.segments.map((s,i)=>h('companion-generated-batch-v1',[row.id,row.session,row.inputIds,row.inputs,row.destination,row.segments,i,s,row.history]));
+row.positionTag=h('companion-batch-position-v1',[row.id,row.session,row.state,row.attempt,row.index,row.outputTags]);
+journal.save([row]);
+const queue=new DurableBatchCandidate(journal);
+const sender={send:async(_destination,text)=>{fs.appendFileSync(path.join(dir,'sends'),text+'\n');return {ok:true,data:{status:'ok',retcode:0}};}};
+const delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot:{},sender,sealKey,ownerId:'123',retainAcknowledged:true});
+const store=createManagedMemoryBrain({backend:'sqlite-fts',directory:path.join(dir,'store'),scope,sources:['qq-private-message'],trustedProcess:true,...(phase==='after-ack-capacity'?{maxChatHistoryTurns:1}:{})});
+await delivery.reserveHistory(session,{store,scope});
+for (let i=0;i<2;i++) if ((await delivery.process(session,{store,scope})).status!=='delivered') throw Error('delivery failed');
+if (queue.list(session)[0].state!=='history-pending') throw Error('missing acknowledgement');
+if (phase==='after-ack' || phase==='after-ack-capacity') process.kill(process.pid,'SIGKILL');
+// This hook executes only after the real SQLite commit returned, immediately before journal retirement.
+journal.save=()=>process.kill(process.pid,'SIGKILL');
+await delivery.recordHistory(session,new Memory({dir:path.join(dir,'memory')}),{store,scope});
+throw Error('fault was not reached');

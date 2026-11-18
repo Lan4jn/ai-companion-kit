@@ -20,6 +20,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import Database from 'better-sqlite3';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const validDependencies = deps => Array.isArray(deps) && deps.length > 0 && deps.length <= 20 &&
+  deps.every(e => typeof e === 'string' && /^onebot-message:\d+$/.test(e)) && new Set(deps).size === deps.length;
+const trustedTurns = new AsyncLocalStorage();
+import { isVideoDiary, validBiliFeeling, renderBiliFeeling, isGeneralBiliFeelingQuery } from './bili-feeling-memory.js';
 
 export class Memory {
   /**
@@ -28,7 +36,11 @@ export class Memory {
    * @param {number} [opts.maxTopics]    每人最多留多少条话题
    * @param {number} [opts.maxTurns]     共享对话流最多留多少条
    */
-  constructor({ dir, maxTopics = 50, maxTurns = 5000 } = {}) {
+  constructor({ dir, maxTopics = 50, maxTurns = 5000, maxDurableTurns = 5000 } = {}) {
+    if (!Number.isSafeInteger(maxDurableTurns) || maxDurableTurns < 1) throw Error('invalid durable capacity');
+    this.maxDurableTurns = maxDurableTurns;
+    // Timing only, never used as conversational history or persisted.
+    this.recentSessionActivity = new Map();
     this.dir = dir;
     this.peopleFile = path.join(dir, 'people.json');
     this.turnsFile = path.join(dir, 'turns.jsonl');
@@ -53,6 +65,8 @@ export class Memory {
       all[key] = {
         name: name || key,
         traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
         interactions: 0,
         firstSeenAt: Date.now(),
         lastSeenAt: Date.now(),
@@ -62,6 +76,9 @@ export class Memory {
     const p = all[key];
     // 补字段（老数据兼容）
     for (const k of ['traits', 'facts', 'topics', 'pending']) if (!Array.isArray(p[k])) p[k] = [];
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    if (typeof p.messagesSeen !== 'number') p.messagesSeen = Number(p.interactions) || 0;
+    p.interactions = p.dialogues;
     if (name && p.name !== name) { p.name = name; this.#writeAll(all); }
     return p;
   }
@@ -71,10 +88,20 @@ export class Memory {
     const all = this.#readAll();
     const key = String(id);
     if (!all[key]) {
-      all[key] = { name: name || key, traits: [], facts: [], topics: [], pending: [], interactions: 0, firstSeenAt: Date.now(), lastSeenAt: Date.now() };
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
     }
     const p = all[key];
     for (const k of ['traits', 'facts', 'topics', 'pending']) if (!Array.isArray(p[k])) p[k] = [];
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    if (typeof p.messagesSeen !== 'number') p.messagesSeen = Number(p.interactions) || 0;
     if (name) p.name = String(name).slice(0, 40);
 
     const put = (arr, v) => {
@@ -87,7 +114,11 @@ export class Memory {
 
     if (trait) put(p.traits, trait);
     if (fact) put(p.facts, fact);
-    if (topic) put(p.topics, topic);
+    if (topic) {
+      put(p.topics, topic);
+      p.dialogues = (Number(p.dialogues) || 0) + 1;
+      p.interactions = p.dialogues;
+    }
     if (pending) put(p.pending, pending);
 
     while (p.topics.length > this.maxTopics) p.topics.shift();
@@ -96,18 +127,65 @@ export class Memory {
     while (p.pending.length > 12) p.pending.shift();
 
     p.lastSeenAt = Date.now();
-    p.interactions = (Number(p.interactions) || 0) + 1;
     this.#writeAll(all);
     return p;
   }
 
-  /** 记一次互动（不加内容，只涨计数） */
+  /** 记录群聊潜水见证消息（只涨水群露脸次数，不涨真实对话） */
+  touchSeen(id, { name } = {}) {
+    const all = this.#readAll();
+    const key = String(id);
+    if (!all[key]) {
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
+    }
+    const p = all[key];
+    p.lastSeenAt = Date.now();
+    p.messagesSeen = (Number(p.messagesSeen) || 0) + 1;
+    if (typeof p.dialogues !== 'number') p.dialogues = Math.max(0, p.topics?.length || 0);
+    p.interactions = p.dialogues;
+    if (name) p.name = String(name).slice(0, 40);
+    this.#writeAll(all);
+    return p;
+  }
+
+  /** 记一次与小鱼的真实对话 */
+  recordDialogue(id, { name, count = 1 } = {}) {
+    const all = this.#readAll();
+    const key = String(id);
+    if (!all[key]) {
+      all[key] = {
+        name: name || key,
+        traits: [], facts: [], topics: [], pending: [],
+        dialogues: 0,
+        messagesSeen: 0,
+        interactions: 0,
+        firstSeenAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
+    }
+    const p = all[key];
+    p.lastSeenAt = Date.now();
+    p.dialogues = (Number(p.dialogues) || 0) + count;
+    p.interactions = p.dialogues;
+    if (name) p.name = String(name).slice(0, 40);
+    this.#writeAll(all);
+    return p;
+  }
+
+  /** 刷新最近出现时间（不加计数） */
   touch(id, { name } = {}) {
     const all = this.#readAll();
     const key = String(id);
-    if (!all[key]) return this.remember(key, { name });
+    if (!all[key]) return this.touchSeen(key, { name });
     all[key].lastSeenAt = Date.now();
-    all[key].interactions = (Number(all[key].interactions) || 0) + 1;
     if (name) all[key].name = String(name).slice(0, 40);
     this.#writeAll(all);
   }
@@ -116,7 +194,19 @@ export class Memory {
   /**
    * 记一轮对话。where 用来说明发生在哪（'private' / 'group:123' / 任意标记）
    */
-  logTurn({ where, who, text, reply }) {
+  withTrustedTurn({identity, deps}, callback) {
+    const snapshot = validDependencies(deps) && identity ? {memory:this, identity:JSON.stringify(identity), deps:[...deps], active:true} : null;
+    return trustedTurns.run(snapshot, () => {
+      try {
+        const result = callback();
+        if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { if (snapshot) snapshot.active = false; });
+        if (snapshot) snapshot.active = false;
+        return result;
+      } catch (error) { if (snapshot) snapshot.active = false; throw error; }
+    });
+  }
+
+  logTurn({ where, who, text, reply, identity, deps }) {
     const rec = {
       t: Date.now(),
       where: String(where || ''),
@@ -124,9 +214,20 @@ export class Memory {
       text: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 300),
       reply: String(reply || '').replace(/\s+/g, ' ').trim().slice(0, 300),
     };
+    if (identity && identity.platform === 'qq' && typeof identity.text === 'string' && /^[1-9]\d*$/.test(identity.user || '') && rec.where === `private:${identity.user}` && Array.isArray(identity.evidence) && identity.evidence.length > 0 && identity.evidence.length <= 100 && identity.evidence.every(e => /^onebot-message:\d+$/.test(e))) {
+      rec.identity = {platform:'qq', user:identity.user, evidence:[...new Set(identity.evidence)], text:identity.text.replace(/\s+/g, ' ').trim().slice(0,300)};
+    }
+    const trusted = trustedTurns.getStore();
+    if (rec.identity && trusted?.active && trusted.memory === this && trusted.identity === JSON.stringify(identity) &&
+        (deps === undefined || (validDependencies(deps) && JSON.stringify(deps) === JSON.stringify(trusted.deps)))) {
+      rec.dependencies = [...trusted.deps];
+    }
     if (!rec.text && !rec.reply) return;
     try {
       fs.appendFileSync(this.turnsFile, JSON.stringify(rec) + '\n', 'utf8');
+      this.recentSessionActivity.delete(rec.where);
+      this.recentSessionActivity.set(rec.where, rec.t);
+      if (this.recentSessionActivity.size > 1024) this.recentSessionActivity.delete(this.recentSessionActivity.keys().next().value);
       // 太长就裁
       const lines = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n');
       if (lines.length > this.maxTurns) {
@@ -135,28 +236,142 @@ export class Memory {
     } catch { /* 写失败不影响主流程 */ }
   }
 
+  // Explicit scoped store only; legacy callers remain fail-closed.
+  logDurableTurn(batchId, {where, who, text, reply, evidence, store, scope}) {
+    if (!store || typeof store.commitChatHistory !== 'function' || !scope || where !== `private:${who}` || scope.session !== where || scope.user !== who || scope.platform !== 'qq' || scope.type !== 'private') throw Error('durable history forget barrier unavailable');
+    return store.commitChatHistory(scope, {turnId:batchId, events:evidence, text, reply});
+  }
+
+  #durableTurns() {
+    // Legacy durable records lack a verified, transactional forget barrier.
+    return [];
+  }
+
+  // A snapshot of this scope's actual forget ledger, not directory existence.
+  // null means unsafe/unreadable and must not authorize delivery.
+  privateForgetRevision(key) {
+    if (!/^private:[1-9]\d*$/.test(key || '')) return null;
+    const user = key.slice(8);
+    const scope = {tenant:'companion', platform:'qq', type:'private', session:key, user};
+    const directory = path.join(this.dir, 'memory-brain-scoped');
+    const hash = createHash('sha256').update(JSON.stringify([scope, 'qq-private-message'])).digest('hex');
+    try {
+      const dir = fs.lstatSync(directory);
+      if (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== process.getuid() || (dir.mode & 0o077)) return null;
+      const revisions = [];
+      for (const backend of ['legacy', 'ame', 'sqlite-fts']) {
+        const dbPath = path.join(directory, `${backend === 'ame' ? 'ame-v1-' : backend === 'sqlite-fts' ? 'sqlite-fts-v1-' : ''}${hash}.sqlite3`);
+        if (fs.existsSync(`${dbPath}.revoked`)) return null;
+        let stat;
+        try { stat = fs.lstatSync(dbPath); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.nlink !== 1) return null;
+        const db = new Database(dbPath, {readonly:true, fileMustExist:true});
+        try {
+          const prefix = backend === 'ame' ? 'ame' : 'local';
+          const policy = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(backend !== 'legacy' ? `${prefix}_identity` : 'adapter_policy');
+          if (backend !== 'legacy') {
+            if (!policy) return null;
+            const identities = db.prepare(`SELECT identity, retention, revoked FROM ${prefix}_identity`).all();
+            if (identities.length !== 1 || identities[0].revoked !== 0 || !Number.isSafeInteger(identities[0].retention) || identities[0].retention <= 0) return null;
+            let identity;
+            try { identity = JSON.parse(identities[0].identity); } catch { return null; }
+            if (!Array.isArray(identity) || identity.length !== 2 || identity[1] !== 'qq-private-message' || !identity[0] || Object.keys(scope).some(k => identity[0][k] !== scope[k]) || Object.keys(identity[0]).length !== Object.keys(scope).length) return null;
+          } else if (policy && db.prepare('SELECT 1 FROM adapter_policy WHERE revoked != 0 LIMIT 1').get()) return null;
+          const table = backend !== 'legacy' ? `${prefix}_tombstones` : 'adapter_forget_tombstones';
+          const column = backend !== 'legacy' ? 'digest' : 'evidence_hash';
+          const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
+          if (backend !== 'legacy' && !exists) return null;
+          const rows = exists ? db.prepare(`SELECT ${column} AS evidence_hash FROM ${table} ORDER BY ${column}`).all() : [];
+          if (rows.some(r => typeof r.evidence_hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.evidence_hash))) return null;
+          if (rows.length) revisions.push([backend, rows]);
+        } finally { db.close(); }
+      }
+      return revisions.length ? createHash('sha256').update(JSON.stringify(revisions)).digest('hex') : 'empty';
+    } catch (error) { return error.code === 'ENOENT' ? 'empty' : null; }
+  }
+
+  // Inspect only this QQ private scope/source; an unrelated store is not a
+  // reason to suppress history. Errors fail closed for this scope.
+  privateForgetBarrier(key) {
+    if (!/^private:[1-9]\d*$/.test(key || '')) {
+      // Non-QQ private scopes are protected by other provenance mechanisms;
+      // retain their existing conservative behaviour here.
+      return typeof key === 'string' && key.startsWith('private:') && fs.existsSync(path.join(this.dir, 'memory-brain-scoped'));
+    }
+    return this.privateForgetRevision(key) !== 'empty';
+  }
+
+  // Legacy private rows have no reliable reply lineage. Once this scope has a
+  // forget record they must not bypass it, even if the feature is later disabled.
+  #legacyTurns({includePrivate = false} = {}) {
+    let rows;
+    try {
+      rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
+        .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+    if (!includePrivate) {
+      const barriers = new Map();
+      rows = rows.filter(r => {
+        if (typeof r.where !== 'string' || !r.where.startsWith('private:')) return true;
+        if (!barriers.has(r.where)) barriers.set(r.where, this.privateForgetBarrier(r.where));
+        return !barriers.get(r.where);
+      });
+    }
+    return rows;
+  }
+
+  // Ephemeral activity is a scheduling signal, not recall of legacy content.
+  sessionLastActivity(key) {
+    return this.recentSessionActivity.get(key) || 0;
+  }
+
   /** 取指定会话 key 的最近真实对话历史（用于连续对话上下文记忆） */
   sessionTurns(key, n = 12) {
     if (!key) return [];
-    let rows = [];
+    let rows = this.#legacyTurns();
+    return rows.concat(this.#durableTurns()).filter((r) => r.where === key).sort((a,b)=>a.t-b.t).slice(-n);
+  }
+
+  async sessionTurnsFiltered(key, n, filterEvidence) {
+    if (!/^private:[1-9]\d*$/.test(key || '') || typeof filterEvidence !== 'function') return [];
+    const user = key.slice(8);
+    const rows = this.#legacyTurns({includePrivate:true}).filter(r => r.where === key && r.identity?.platform === 'qq' && r.identity.user === user && Array.isArray(r.identity.evidence) && r.identity.evidence.length > 0 && r.identity.evidence.length <= 100 && r.identity.evidence.every(e => typeof e === 'string' && /^onebot-message:\d+$/.test(e)));
     try {
-      rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
-        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(Boolean);
+      const evidence = [...new Set(rows.flatMap(r => r.identity.evidence))];
+      const allowed = new Set();
+      for (let i = 0; i < evidence.length; i += 100) {
+        const batch = evidence.slice(i, i + 100);
+        const accepted = await filterEvidence(batch);
+        if (!Array.isArray(accepted) || accepted.some(e => !batch.includes(e))) return [];
+        accepted.forEach(e => allowed.add(e));
+      }
+      const result = [];
+      for (const r of rows.filter(r => r.identity.evidence.every(e => allowed.has(e)) && typeof r.identity.text === 'string').sort((a,b)=>a.t-b.t).slice(-n)) {
+        let reply = '';
+        if (r.reply && validDependencies(r.dependencies)) {
+          try {
+            const accepted = await filterEvidence(r.dependencies);
+            if (Array.isArray(accepted) && accepted.length === r.dependencies.length && new Set(accepted).size === r.dependencies.length && accepted.every(e => r.dependencies.includes(e))) reply = r.reply;
+          } catch { /* unverifiable dependencies fail closed */ }
+        }
+        result.push({...r, text:r.identity.text, reply});
+      }
+      return result;
     } catch { return []; }
-    return rows.filter((r) => r.where === key).slice(-n);
   }
 
   /** 取最近 n 轮（可按来源过滤） */
-  recentTurns(n = 20, { excludeWhere, sinceMs } = {}) {
-    let rows = [];
-    try {
-      rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
-        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(Boolean);
-    } catch { return []; }
+  recentTurns(n = 20, { excludeWhere, excludePrivate = false, sinceMs } = {}) {
+    let rows = this.#legacyTurns();
+    rows=rows.concat(this.#durableTurns()).sort((a,b)=>a.t-b.t);
     if (sinceMs) rows = rows.filter((r) => Date.now() - r.t < sinceMs);
     if (excludeWhere) rows = rows.filter((r) => !String(r.where || '').startsWith(excludeWhere));
+    if (excludePrivate) {
+      rows = rows.filter((r) => {
+        const w = String(r.where || '');
+        return !w.startsWith('private:') && !w.startsWith('__bili_dm') && !w.startsWith('internal:');
+      });
+    }
     return rows.slice(-n);
   }
 
@@ -185,9 +400,8 @@ export class Memory {
       }
       const words = Array.from(tokens);
       if (!words.length) return [];
-      const rows = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n')
-        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(Boolean);
+      let rows = this.#legacyTurns();
+      rows=rows.concat(this.#durableTurns()).sort((a,b)=>a.t-b.t);
       const pool = excludeRecent > 0 ? rows.slice(0, -excludeRecent) : rows;
       const scored = [];
       for (const r of pool) {
@@ -214,7 +428,8 @@ export class Memory {
     if (p.facts?.length) L.push('他告诉过你：' + p.facts.slice(-15).join('；'));
     if (p.topics?.length) L.push('你们聊过：' + p.topics.slice(-16).join('；'));
     if (p.pending?.length) L.push('⚠️ 你心里还记着没说出口的事：' + p.pending.slice(-4).join('；'));
-    if (p.interactions) L.push('你们互动过 ' + p.interactions + ' 次');
+    if (p.dialogues || p.interactions) L.push('你们直接对话过 ' + (p.dialogues || p.interactions) + ' 次');
+    if (p.messagesSeen) L.push('他在群聊里发言过 ' + p.messagesSeen + ' 次');
     if (!L.length) return '';
     return '【关于 ' + (p.name || id) + '（' + id + '）的一本账】\n' + L.join('\n') + '\n';
   }
@@ -223,7 +438,7 @@ export class Memory {
   /**
    * 记录一条生活日记/事件经历到持久化记忆中
    */
-  logDiary({ category = '日常', activity = '', details = '', mood = '' }) {
+  logDiary({ category = '日常', activity = '', details = '', mood = '', biliFeeling = null }) {
     const rec = {
       t: Date.now(),
       category: String(category).slice(0, 20),
@@ -231,14 +446,13 @@ export class Memory {
       details: String(details).slice(0, 150),
       mood: String(mood).slice(0, 150),
     };
+    if (biliFeeling && validBiliFeeling({ ...rec, biliFeeling })) rec.biliFeeling = biliFeeling;
     if (!rec.activity && !rec.details) return;
     try {
       const diaryFile = path.join(this.dir, 'diary.jsonl');
       fs.appendFileSync(diaryFile, JSON.stringify(rec) + '\n', 'utf8');
-      const lines = fs.readFileSync(diaryFile, 'utf8').trim().split('\n');
-      if (lines.length > 200) {
-        fs.writeFileSync(diaryFile, lines.slice(-150).join('\n') + '\n', 'utf8');
-      }
+      // Preserve historical diary entries; they may lack verifiable provenance,
+      // but adding a new entry must not silently delete them.
     } catch {}
   }
 
@@ -259,16 +473,36 @@ export class Memory {
   /**
    * 渲染为提示词文本注入大脑
    */
-  renderDiary(n = 6) {
-    const list = this.recentDiary(n);
+  renderDiary(n = 6, { includeBiliFeelings = false } = {}) {
+    const scopedBarrier = fs.existsSync(path.join(this.dir, 'memory-brain-scoped'));
+    const list = this.recentDiary(1000).filter(r => !isVideoDiary(r) || (includeBiliFeelings && !scopedBarrier && r.biliFeeling?.version !== 2 && validBiliFeeling(r))).slice(-n);
     if (!list.length) return '';
     const lines = list.map(r => {
-      const d = new Date(r.t);
-      const timeStr = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-      return `· ${timeStr} [${r.category}] ${r.details}（${r.mood}）`;
+      if (isVideoDiary(r)) return `· ${renderBiliFeeling(r)}`;
+      const d = new Date(r.t ?? r.at);
+      const timeStr = Number.isFinite(d.getTime()) ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '时间未知';
+      const details = r.details ?? [r.activity, r.title ? `《${r.title}》` : ''].filter(Boolean).join(' ');
+      const mood = r.mood ?? r.thought ?? '';
+      return `· ${timeStr} [${r.category || '生活'}] ${details || ''}${mood ? `（${mood}）` : ''}`;
     });
     return '【小鱼的生活经历日记（你今天真实经历过的点滴，有真实回忆）】\n' + lines.join('\n')
       + '\n（老爸或群友问起你今天干嘛了、之前在玩啥，你可以自然调取这些真实记忆如实分享）\n';
+  }
+
+  biliFeelingCandidates(query) {
+    const raw = String(query || '');
+    const q = raw.toLowerCase();
+    if (!q) return [];
+    const bvTokens = raw.match(/BV[A-Za-z0-9]*/gi) || [];
+    if (bvTokens.some(token => !/^BV[A-Za-z0-9]{10}$/.test(token))) return [];
+    const general = isGeneralBiliFeelingQuery(q);
+    return this.recentDiary(1000).filter(r => validBiliFeeling(r) &&
+      (bvTokens.length ? bvTokens.includes(r.biliFeeling.bvid) :
+        general || (r.biliFeeling.quote.length >= 4 && q.includes(r.biliFeeling.quote.toLowerCase()))));
+  }
+
+  recallBiliFeelings(query, n = 3) {
+    return this.biliFeelingCandidates(query).filter(r => r.biliFeeling?.version !== 2).slice(-n).map(renderBiliFeeling).join('\n');
   }
 
   // ── 群聊潜水与群上下文记忆 ─────────────────────────────────
@@ -334,7 +568,7 @@ export class Memory {
       const timeStr = new Date(r.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
       return `  [${timeStr}] ${r.name}：${r.text}`;
     });
-    return `【群聊前文脉络背景流（仔细看上面群友怎么打字说话的！特别是同群高活人感群友“沈鲸”，随性毒舌、抓痛点、给图片配内心戏、绝不做阅读理解复述题目！你要深度学习模仿这种真实网感，严禁长篇大论分析）：】\n` + lines.join('\n') + '\n';
+    return `【群聊前文脉络背景流（结合上下文自然接话，有分歧就事论事，不模仿挖苦或人身攻击）：】\n` + lines.join('\n') + '\n';
   }
 
   /** 把最近对话渲染成一段可注入的文字 */

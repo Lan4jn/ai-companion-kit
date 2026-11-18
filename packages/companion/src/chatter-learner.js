@@ -30,8 +30,73 @@ export class ChatterLearner {
     this.lastLearnedAt = 0;
     this.learning = false;
     this.timer = null;
+    this.stopped = false;
+    this.pendingTimers = new Set();
+    this.activeLearning = null;
 
     this.insights = this.loadInsights();
+
+    // 启动时检查近期的群聊记录，与网络梗词典比对，自主搜录群友玩过但未收录的梗
+    this.schedule(() => {
+      try {
+        const recentRows = this.memory ? this.memory.recentGroupChatter(null, 80) : [];
+        const texts = recentRows.map((r) => r.text || '');
+        this.absorbMemesFromDictionary(texts);
+      } catch {}
+    }, 3000);
+  }
+
+  schedule(fn, delay) {
+    if (this.stopped) return;
+    const timer = setTimeout(() => {
+      this.pendingTimers.delete(timer);
+      if (!this.stopped) fn();
+    }, delay);
+    this.pendingTimers.add(timer);
+  }
+
+  /**
+   * 从网络梗词典（meme_dictionary.json）中自主检索并搜录保存到自己的黑话库中
+   * 当群友在群里聊到相关词汇时，小鱼自主对照词典搞懂含义并记录保存
+   */
+  absorbMemesFromDictionary(texts = []) {
+    try {
+      const dictFile = path.join(this.dataDir, 'meme_dictionary.json');
+      if (!fs.existsSync(dictFile)) return;
+      const dict = JSON.parse(fs.readFileSync(dictFile, 'utf8'));
+      const entries = Array.isArray(dict?.entries) ? dict.entries : [];
+      if (!entries.length) return;
+
+      const combinedText = texts.join(' ');
+      let added = 0;
+      for (const entry of entries) {
+        const matches = [entry.term, ...(entry.aliases || [])].some((alias) =>
+          combinedText.includes(alias)
+        );
+        if (matches) {
+          const idx = this.insights.slangs.findIndex((s) => s.term === entry.term);
+          if (idx >= 0) {
+            if (entry.usage && this.insights.slangs[idx].usage !== entry.usage) {
+              this.insights.slangs[idx].usage = entry.usage;
+              added++;
+            }
+          } else {
+            this.insights.slangs.unshift({
+              term: entry.term,
+              meaning: entry.meaning,
+              usage: entry.usage || '',
+            });
+            added++;
+            console.log(`[ChatterLearner] 小鱼从梗词典中自主搜录新梗: 【${entry.term}】 -> ${entry.meaning.slice(0, 45)}`);
+          }
+        }
+      }
+      if (added > 0) {
+        this.saveInsights();
+      }
+    } catch (e) {
+      console.warn('[ChatterLearner] 查阅网络梗词典异常:', e?.message || e);
+    }
   }
 
   loadInsights() {
@@ -94,14 +159,19 @@ export class ChatterLearner {
    * 记录群消息流入，积累潜水学习进度
    */
   feed(msg) {
-    if (!msg || !msg.isGroup) return;
+    if (this.stopped || !msg || !msg.isGroup) return;
     // 忽略小鱼自己的发言与过短指令
     if (msg.isSelf) return;
     this.unlearnedCount++;
 
+    // 实时比对网络梗词典，群友一玩到未收录的梗立即自主搜录保存
+    if (msg.text) {
+      this.absorbMemesFromDictionary([msg.text]);
+    }
+
     // 如果累积达到阈值，且冷却时间已过，在后台平缓触发反思
     if (this.unlearnedCount >= this.msgThreshold && Date.now() - this.lastLearnedAt > this.minGapMs) {
-      setTimeout(() => {
+      this.schedule(() => {
         this.learnOnce().catch(() => {});
       }, 5000);
     }
@@ -110,7 +180,16 @@ export class ChatterLearner {
   /**
    * 执行一次潜水自监督学习与人类对话语感提炼
    */
-  async learnOnce({ force = false } = {}) {
+  learnOnce(options = {}) {
+    if (this.stopped || this.activeLearning) return Promise.resolve(false);
+    const task = this.runLearning(options);
+    this.activeLearning = task;
+    task.then(() => { if (this.activeLearning === task) this.activeLearning = null; },
+      () => { if (this.activeLearning === task) this.activeLearning = null; });
+    return task;
+  }
+
+  async runLearning({ force = false } = {}) {
     if (this.learning) return false;
     if (!force && Date.now() - this.lastLearnedAt < this.minGapMs) return false;
     if (!this.brain || typeof this.brain.complete !== 'function') return false;
@@ -275,9 +354,10 @@ ${chatSlice}
     }
 
     if (slangs.length > 0) {
-      lines.push('【当前群里最新出现的热门话题与黑话（你已经懂了，可以自然接梗）】：');
+      lines.push('【你脑子里记得的网络流行梗与暗号（★必须像真人网友一样对暗号/接梗/反讽/玩梗！严禁像百度百科或老师一样背词条解释，真人都是接下半句或嘲讽对方被洗脑）】：');
       for (const sl of slangs) {
-        lines.push(`  · ${sl.term}：${sl.meaning}`);
+        const play = sl.usage || '';
+        lines.push(`  · 【${sl.term}】（含义：${sl.meaning}）${play ? ` → 【活人网友接法】：${play}` : ''}`);
       }
     }
 
@@ -285,7 +365,8 @@ ${chatSlice}
   }
 
   start() {
-    if (this.timer) return;
+    if (this.timer || this.activeLearning) return;
+    this.stopped = false;
     // 每 5 分钟定时巡检一次
     this.timer = setInterval(() => {
       if (this.unlearnedCount >= this.msgThreshold && Date.now() - this.lastLearnedAt > this.minGapMs) {
@@ -296,9 +377,13 @@ ${chatSlice}
   }
 
   stop() {
+    this.stopped = true;
+    for (const timer of this.pendingTimers) clearTimeout(timer);
+    this.pendingTimers.clear();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    return this.activeLearning || Promise.resolve();
   }
 }

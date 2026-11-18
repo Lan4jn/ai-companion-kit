@@ -1,0 +1,100 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {register} from 'node:module';
+import {createHash} from 'node:crypto';
+import Database from 'better-sqlite3';
+import {Memory} from '../src/memory.js';
+import {initializeManagedStore,createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {EncryptedChatJournal} from '../src/chat-durable-journal-candidate.js';
+import {DurableBatchCandidate,createTransportBoundMessageCandidate,createPreGenerationBatchCandidate,createBoundBatchProcessorCandidate} from '../src/chat-durable-batch-candidate.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+
+test('confirmed delivery retains signed history evidence across reopen without resending',async()=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'history-ack-')); let bot,journal;
+ try {
+  let receive; const received=new Promise(r=>receive=r);
+  bot=new OneBot({wsUrl:'ws://fixture',onMessage:receive});
+  while(!bot.ws) await new Promise(r=>setTimeout(r,1));
+  bot.ws.emit('open'); bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',self_id:789,user_id:123,message_id:456,message:[{type:'text',data:{text:'fixture input'}}]}));
+  const msg=await received, key=Buffer.alloc(32,8), sealKey=Buffer.alloc(32,9);
+  journal=new EncryptedChatJournal({directory:dir,key}); let queue=new DurableBatchCandidate(journal);
+  const {session}=createTransportBoundMessageCandidate({enabled:true,queue,bot,sealKey}).accept(msg);
+  await createPreGenerationBatchCandidate({enabled:true,queue,bot,sealKey,ownerId:'123',generate:async()=>({segments:['fixture output'],history:[]})}).form(session,1);
+  let sends=0; const sender={send:async()=>{sends++;return {ok:true,data:{status:'ok',retcode:0}};}};
+  let delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  const earlyMemory=new Memory({dir:path.join(dir,'memory')});
+  const directory=path.join(dir,'store'); initializeManagedStore(directory);
+  const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'};
+  const store=createManagedMemoryBrain({backend:'sqlite-fts',directory,scope,sources:['qq-private-message'],trustedProcess:true});
+  await assert.rejects(delivery.recordHistory(session,earlyMemory,{store,scope}),/not confirmed/);
+  assert.deepEqual(await store.chatHistory(scope),[]);
+  await delivery.reserveHistory(session,{store,scope});
+  assert.equal((await delivery.process(session,{store,scope})).status,'delivered');
+  assert.equal(queue.list(session)[0].state,'history-pending');
+  assert.match(queue.list(session)[0].ackTag,/^[a-f0-9]{64}$/);
+  const original=queue.journal.rows[0].ackTag; queue.journal.rows[0].ackTag='0'.repeat(64);
+  await assert.rejects(delivery.recordHistory(session,earlyMemory,{store,scope}),/acknowledgement mismatch/);
+  assert.deepEqual(await store.chatHistory(scope),[]);
+  queue.journal.rows[0].ackTag=original;
+  journal.close(); journal=new EncryptedChatJournal({directory:dir,key}); queue=new DurableBatchCandidate(journal);
+  delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  assert.equal((await delivery.process(session)).status,'blocked'); assert.equal(sends,1);
+  assert.equal(fs.readFileSync(path.join(dir,'journal.enc'),'utf8').includes('fixture input'),false);
+  assert.equal(queue.list(session)[0].destination,'private:123');
+  assert.equal(queue.list(session)[0].inputs[0].message.sender,'123');
+  const memory=new Memory({dir:path.join(dir,'memory')});
+  const save=journal.save.bind(journal); journal.save=()=>{throw Error('synthetic crash after history commit');};
+  await assert.rejects(delivery.recordHistory(session,memory,{store,scope}),/synthetic crash/);
+  assert.equal((await store.chatHistory(scope)).length,1);
+  journal.save=save;
+  journal.close(); journal=new EncryptedChatJournal({directory:dir,key}); queue=new DurableBatchCandidate(journal);
+  delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  assert.equal(await delivery.recordHistory(session,memory,{store,scope}),'duplicate');
+  assert.equal((await store.chatHistory(scope))[0].text,'fixture input');
+  assert.equal((await store.chatHistory(scope))[0].reply,'fixture output');
+  assert.equal(queue.list(session).length,0); assert.equal(sends,1);
+ } finally {bot?.close();journal?.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('cross-backend forget retires only the confirmed matching reservation',async()=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'history-forget-reservation-')); let bot,journal;
+ try {
+  let receive; const received=new Promise(r=>receive=r);
+  bot=new OneBot({wsUrl:'ws://fixture',onMessage:receive});
+  while(!bot.ws) await new Promise(r=>setTimeout(r,1));
+  bot.ws.emit('open'); bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',self_id:789,user_id:123,message_id:456,message:[{type:'text',data:{text:'fixture input'}}]}));
+  const msg=await received, key=Buffer.alloc(32,18), sealKey=Buffer.alloc(32,19);
+  journal=new EncryptedChatJournal({directory:dir,key}); let queue=new DurableBatchCandidate(journal);
+  const {session}=createTransportBoundMessageCandidate({enabled:true,queue,bot,sealKey}).accept(msg);
+  await createPreGenerationBatchCandidate({enabled:true,queue,bot,sealKey,ownerId:'123',generate:async()=>({segments:['fixture output'],history:[]})}).form(session,1);
+  let sends=0; const sender={send:async()=>{sends++;return {ok:true,data:{status:'ok',retcode:0}};}};
+  let delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  const directory=path.join(dir,'store'); initializeManagedStore(directory);
+  const scope={tenant:'companion',platform:'qq',type:'private',session:'private:123',user:'123'};
+  const store=createManagedMemoryBrain({backend:'sqlite-fts',directory,scope,sources:['qq-private-message'],trustedProcess:true,maxChatHistoryTurns:1});
+  await delivery.reserveHistory(session,{store,scope});
+  assert.equal((await delivery.process(session,{store,scope})).status,'delivered');
+  const source='qq-private-message', digest=x=>createHash('sha256').update(x).digest('hex');
+  const legacyPath=path.join(directory,`${digest(JSON.stringify([scope,source]))}.sqlite3`);
+  const fd=fs.openSync(legacyPath,'wx',0o600);fs.closeSync(fd);
+  const db=new Database(legacyPath);
+  try {db.exec('CREATE TABLE adapter_policy (id INTEGER PRIMARY KEY, revoked INTEGER NOT NULL); INSERT INTO adapter_policy VALUES (1,0); CREATE TABLE adapter_forget_tombstones (evidence_hash TEXT PRIMARY KEY)');db.prepare('INSERT INTO adapter_forget_tombstones VALUES (?)').run(digest('onebot-message:456'));} finally {db.close();}
+  journal.close();journal=new EncryptedChatJournal({directory:dir,key});queue=new DurableBatchCandidate(journal);
+  delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  const memory=new Memory({dir:path.join(dir,'memory')});
+  const save=journal.save.bind(journal);journal.save=()=>{throw Error('synthetic crash after forgotten commit');};
+  await assert.rejects(delivery.recordHistory(session,memory,{store,scope}),/synthetic crash/);
+  assert.equal(queue.list(session)[0].state,'history-pending');
+  assert.equal(await store.requireChatHistoryCapacity(scope),true);
+  journal.save=save;journal.close();journal=new EncryptedChatJournal({directory:dir,key});queue=new DurableBatchCandidate(journal);
+  delivery=createBoundBatchProcessorCandidate({enabled:true,queue,bot,sender,sealKey,ownerId:'123',retainAcknowledged:true});
+  assert.equal((await delivery.process(session)).status,'blocked');
+  assert.equal(await delivery.recordHistory(session,memory,{store,scope}),'forgotten');
+  assert.equal(queue.list(session).length,0); assert.equal(sends,1);
+  assert.deepEqual(await store.chatHistory(scope),[]);
+  assert.equal(await store.requireChatHistoryCapacity(scope),true);
+ } finally {bot?.close();journal?.close();fs.rmSync(dir,{recursive:true,force:true});}
+});

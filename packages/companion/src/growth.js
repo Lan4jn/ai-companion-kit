@@ -118,7 +118,7 @@ export function observeIncoming(msg, selfId = '') {
   saveSelfImage();
 
   const label = { praise: '被夸', criticism: '被嫌', incident: '被问身份', addressed: '被叫' }[type] || type;
-  console.log(`[Growth] ${label} ← ${ev.from.nick}：${ev.theirWords.slice(0, 40)}`);
+  console.log('[Growth] 已记录互动事件');
 
   // 3. 批评攒够就归纳成行为约束（异步，不阻塞对话）
   if (type === 'criticism') {
@@ -172,11 +172,11 @@ ${list}
         .slice(0, MAX_RULES);
       selfImage.updatedAt = Date.now();
       saveSelfImage();
-      console.log(`[Growth] 归纳出 ${rules.length} 条：${rules.join(' / ')}`);
+      console.log(`[Growth] 归纳出 ${rules.length} 条规则`);
       pendingCriticism = [];
     }
   } catch (e) {
-    console.error('[Growth] 归纳失败：' + (e?.message || e));
+    console.error('[Growth] 归纳失败');
   } finally {
     distilling = false;
   }

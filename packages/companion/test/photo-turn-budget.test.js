@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {Humanizer} from '../src/humanize.js';
+register(new URL('./memory-brain-fake-ws-loader.js', import.meta.url), import.meta.url);
+async function run(t, {reply={text:'一\n\n二'}, photo={ok:true}, voice={ok:true}, textResult={ok:true}, photoEnabled=true}={}) {
+ let resolve; const received=new Promise(r=>resolve=r);
+ const source=new OneBot({wsUrl:'ws://fixture',onMessage:m=>resolve(m)});
+ while(!source.ws) await new Promise(r=>setTimeout(r,1)); t.after(()=>source.close()); source.ws.emit('open');
+ source.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:1,message_id:11,message:[{type:'text',data:{text:'给我照片'}}]}));
+ const item=await received, sent=[]; let marked=0, replies=0;
+ const bot={sendImage:async()=>{sent.push('image');if(photo instanceof Error)throw photo;return photo},send:async(_k,m)=>{sent.push(m);return textResult},sendVoice:async()=>{sent.push('voice');return voice},setTyping:async()=>{},getMyGroupCard:async()=>''};
+ const brain={reply:async()=>{replies++;return reply}};
+ const memory={renderPerson:()=>'',renderRecent:()=>'',sessionTurns:()=>[],remember:()=>{},logTurn:()=>{},touch:()=>{}};
+ const selfPortrait={wantsPhoto:()=>photoEnabled,canSend:()=>true,pick:()=>'/synthetic/image',markSent:()=>{marked++}};
+ const result=await handleTurn({bot,brain,selfPortrait,human:new Humanizer({enabled:false}),memory,waker:{wake:()=>{}}},[item],{ownerIds:['1'],dataDir:process.env.TMPDIR});
+ return {sent,marked,replies,result};
+}
+test('photo plus three texts is suppressed before any text',async t=>{const r=await run(t,{reply:{text:'一\n\n二\n\n三'}});assert.deepEqual(r.sent,['image']);});
+test('photo plus two text bubbles succeeds',async t=>{const r=await run(t);assert.equal(r.sent.length,3);assert.equal(r.sent[0],'image');assert.equal(r.marked,1);});
+for(const photo of [{ok:false,outcome:'unknown'}, {ok:false,outcome:'permanent',sent:0},new Error('fixture'),null]) test('photo failure stops generation '+String(photo?.outcome||photo),async t=>{const r=await run(t,{photo});assert.deepEqual(r.sent,['image']);assert.equal(r.replies,0);assert.equal(r.marked,0)});
+test('photo plus two voices succeeds',async t=>{const r=await run(t,{reply:{text:'',voiceB64:'a',voiceText:'你好',voiceChunks:[{base64:'a',spokenText:'你'},{base64:'b',spokenText:'好'}]}});assert.deepEqual(r.sent,['image','voice','voice']);});
+test('photo plus three voices suppressed before voice',async t=>{const r=await run(t,{reply:{text:'',voiceB64:'a',voiceText:'你好呀',voiceChunks:[{base64:'a',spokenText:'你'},{base64:'b',spokenText:'好'},{base64:'c',spokenText:'呀'}]}});assert.deepEqual(r.sent,['image']);});
+test('voice rejection never falls back to text',async t=>{const r=await run(t,{voice:{ok:false,outcome:'permanent'},reply:{text:'你好',voiceB64:'a',voiceText:'你好'}});assert.deepEqual(r.sent,['image','voice']);});
+test('failed first text stops remaining text',async t=>{const r=await run(t,{textResult:{ok:false,outcome:'unknown'}});assert.equal(r.sent.length,2)});
+test('photo and 50 unicode code points succeed',async t=>{const r=await run(t,{reply:{text:'🐟'.repeat(50)}});assert.equal(r.sent.length,2)});
+test('photo and oversized text is silent',async t=>{const r=await run(t,{reply:{text:'🐟'.repeat(51)}});assert.deepEqual(r.sent,['image'])});
+test('photo and CQ image mixed with two paragraphs cannot bypass budget',async t=>{const r=await run(t,{reply:{text:'[CQ:image,file=x]\n\n一\n\n二'}});assert.ok(r.sent.length<=3)});
+test('voice unknown stops without text',async t=>{const r=await run(t,{voice:{ok:false,outcome:'unknown'},reply:{text:'你好',voiceB64:'a',voiceText:'你好'}});assert.deepEqual(r.sent,['image','voice'])});

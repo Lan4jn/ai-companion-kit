@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {Memory} from '../src/memory.js';
+import {createMemoryBrain} from '../src/memory-brain-adapter.js';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {OneBot} from '../src/transport-onebot.js';
+register('./memory-brain-fake-ws-loader.js', import.meta.url);
+
+test('private history remains available with an empty scoped directory, but not after an applicable forget', async t => {
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'chat-scoped-default-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const directory=path.join(dir,'memory-brain-scoped'); fs.mkdirSync(directory,{mode:0o700});
+ const memory=new Memory({dir});
+ for (const id of ['1','2']) memory.logTurn({where:`private:${id}`,who:id,text:`synthetic ${id}`,reply:`reply ${id}`});
+ assert.equal(memory.sessionTurns('private:1').length,1);
+ const store=createMemoryBrain({enabled:true,backend:'sqlite-fts',directory,authorize:async()=>true,recoveryAuthorization:async()=>true});
+ const scope=id=>({tenant:'companion',platform:'qq',type:'private',session:`private:${id}`,user:id});
+ await store.forget(scope('1'),{source:'qq-private-message',evidence:'onebot-message:11'});
+ assert.equal(memory.sessionTurns('private:1').length,0);
+ assert.equal(memory.sessionTurns('private:2').length,1);
+ assert.deepEqual(memory.recentTurns().map(r=>r.where),['private:2']);
+ assert.equal(memory.recallTurns('synthetic',{excludeRecent:0}).some(r=>r.where==='private:1'),false);
+});
+
+test('ordinary trusted chat keeps history with memory brain disabled and an unrelated forget', async t => {
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'chat-default-entry-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const directory=path.join(dir,'memory-brain-scoped'); fs.mkdirSync(directory,{mode:0o700});
+ const store=createMemoryBrain({enabled:true,backend:'sqlite-fts',directory,authorize:async()=>true,recoveryAuthorization:async()=>true});
+ const scope={tenant:'companion',platform:'qq',type:'private',session:'private:2',user:'2'};
+ await store.forget(scope,{source:'qq-private-message',evidence:'onebot-message:99'});
+ const memory=new Memory({dir});
+ memory.logTurn({where:'private:1',who:'1',text:'earlier synthetic',reply:'earlier reply'});
+ let prompt, resolve; const receiver=new OneBot({wsUrl:'ws://fixture',onMessage:m=>resolve(m)});
+ receiver.api=async()=>({ok:false}); receiver.getMyGroupCard=async()=>'';
+ while(!receiver.ws) await new Promise(r=>setTimeout(r,1)); t.after(()=>receiver.close());
+ receiver.ws.emit('open');
+ const pending=new Promise(r=>resolve=r);
+ receiver.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:1,message_id:11,message:[{type:'text',data:{text:'new synthetic'}}]}));
+ await handleTurn({memory,brain:{reply:async p=>{prompt=p;return {text:''};}},bot:{},human:{},waker:{}},[await pending],{ownerIds:['1'],dataDir:dir,memoryBrain:{enabled:false}});
+ assert.equal(prompt.history[0].text,'earlier synthetic');
+ assert.equal(prompt.history[0].reply,'earlier reply');
+ await store.forget({tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'}, {source:'qq-private-message',evidence:'onebot-message:11'});
+ const second=new Promise(r=>resolve=r);
+ receiver.ws.emit('open');
+ receiver.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:1,message_id:12,message:[{type:'text',data:{text:'another synthetic'}}]}));
+ await handleTurn({memory,brain:{reply:async p=>{prompt=p;return {text:''};}},bot:{},human:{},waker:{}},[await second],{ownerIds:['1'],dataDir:dir,memoryBrain:{enabled:false}});
+ assert.deepEqual(prompt.history,[]);
+});

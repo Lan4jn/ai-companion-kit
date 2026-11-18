@@ -1,0 +1,37 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { createTiebaReader } from '../src/tieba-reader.js';
+import { createTiebaScheduler, recallTiebaForOwner } from '../src/tieba-scheduler.js';
+import { handleTurn } from '../src/index.js';
+import { tiebaMessage } from './tieba-trusted-message-fixture.js';
+
+test('autonomous read preserves specific source excerpt through owner-only recall', async t => {
+  const dir = await mkdtemp(path.join(process.env.TMPDIR, 'tieba-closed-loop-'));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const url = 'https://tieba.baidu.com/p/12345';
+  const source = { list: async () => [{url}], read: async () => ({url,forum:'肥鱼避难所吧',title:'农场日常',body:'星露谷物语，喜欢在冬天整理农场'}) };
+  let calls = 0;
+  const brain = {complete: async () => ++calls === 1 ? '{"browse":true}' : JSON.stringify({action:'continue',record:true,keywords:[],excerpt:'星露谷物语，喜欢在冬天整理农场'})};
+  const reader = createTiebaReader({enabled:true,source,brain,dir});
+  assert.deepEqual(await createTiebaScheduler({enabled:true,reader,brain}).tick(), {status:'completed',read:1,saved:1});
+  const params = {reader,query:'星露谷物语',channel:'private',senderId:'123',ownerId:'123'};
+  const rows = await recallTiebaForOwner(params);
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].url,url);
+  assert.equal(rows[0].excerpt,'星露谷物语，喜欢在冬天整理农场');
+  assert.match(rows[0].source,/不可信/);
+  assert.deepEqual(await recallTiebaForOwner({...params,senderId:'456'}),[]);
+  assert.deepEqual(await recallTiebaForOwner({...params,channel:'group'}),[]);
+  let captured;
+  const item = await tiebaMessage({userId:123});
+  const cfg = {ownerIds:['123'],dataDir:dir,tieba:{enabled:true}};
+  const deps = {brain:{reply:async p=>{captured=p;return {text:''};}},memory:{dir},bot:{},human:{},waker:{}};
+  await handleTurn(deps,[item],cfg);
+  assert.match(captured.situation,/星露谷物语，喜欢在冬天整理农场/);
+  assert.match(captured.situation,/tieba\.baidu\.com\/p\/12345/);
+  assert.equal(captured.tools,false);
+  await handleTurn(deps,[await tiebaMessage({userId:123,type:'group',groupId:1})],cfg);
+  assert.doesNotMatch(captured.situation,/星露谷物语，喜欢在冬天整理农场/);
+});

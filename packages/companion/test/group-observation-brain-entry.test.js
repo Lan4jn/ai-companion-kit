@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import {spawn} from 'node:child_process';
+import {WebSocketServer} from 'ws';
+import {OneBot} from '../src/transport-onebot.js';
+import {createGroupObservationStore} from '../src/group-observation-store.js';
+import {initializeManagedStore} from '../src/memory-brain-trust.js';
+import {handleTurn} from '../src/index.js';
+import {Brain} from '../src/brain.js';
+import {Humanizer} from '../src/humanize.js';
+
+test('real OneBot and Brain: current group only, tool, forget and delivery guard',async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'group-entry-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true})); initializeManagedStore(path.join(dir,'memory-brain-scoped'));
+ const server=new WebSocketServer({host:'127.0.0.1',port:0}); await new Promise(r=>server.once('listening',r)); let peer; const connected=new Promise(r=>server.once('connection',s=>{peer=s;r()}));
+ const sent=[]; const httpServer=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{if(req.url==='/send_group_msg'){const p=JSON.parse(body);sent.push([`group:${p.group_id}`,p.message]);}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({status:'ok',retcode:0,data:{}}));});});await new Promise(r=>httpServer.listen(0,'127.0.0.1',r));t.after(()=>httpServer.close());
+ let receive; const bot=new OneBot({wsUrl:`ws://127.0.0.1:${server.address().port}`,httpUrl:`http://127.0.0.1:${httpServer.address().port}`,dataDir:dir,ingressAuthentication:{enabled:true,trustLoopbackOneBot:true,ownerId:'1'},onMessage:m=>receive(m)});bot.getMyGroupCard=async()=>'';bot.setTyping=async()=>{};await connected;t.after(()=>{bot.close();server.close()});
+ const repo=createGroupObservationStore({dataDir:dir,bot,account:'99',allowedGroups:['10','20']}); t.after(()=>repo.close());
+ const event=async(g,id,text)=>{const p=new Promise(r=>receive=r);peer.send(JSON.stringify({post_type:'message',message_type:'group',self_id:99,group_id:g,user_id:2,message_id:id,message:[{type:'text',data:{text}}]}));return p};
+ const a=await event(10,1,'群十秘密苹果');const evidence=await repo.observe(a); const b=await event(20,2,'群二十秘密香蕉');await repo.observe(b);const c=await event(10,3,'聊什么');
+ let requests=[];let calls=0;let gate=null;let started=null;
+ t.mock.method(globalThis,'fetch',async(_u,o)=>{const p=JSON.parse(o.body);requests.push(p);calls++; if(gate){started();await gate;} const msg=calls%2?{content:null,tool_calls:[{id:'x',type:'function',function:{name:'read_group_chat',arguments:JSON.stringify({group_id:'10'})}}]}:{content:'群里正在聊苹果。'}; const x={choices:[{finish_reason:'stop',message:msg}]};return {ok:true,text:async()=>JSON.stringify(x),json:async()=>x}});
+ const memory={dir,renderPerson:()=>'',renderRecent:()=>'',sessionTurns:()=>[],remember:()=>{},logTurn:()=>{},touch:()=>{}}; const brain=new Brain({apiKey:'fixture',baseUrl:'https://fixture.invalid/v1',model:'fixture',memory,role:{build:()=>''},ownerIds:['1']}); const deps={bot,brain,memory,human:new Humanizer({enabled:false}),waker:{wake(){}},groupStore:repo};const cfg={ownerIds:['1'],dataDir:dir,groupObservation:{enabled:true}};
+ await repo.observe(c); await repo.withObserved(c,(rows,guard)=>{assert.equal(rows.length,2);assert.equal(typeof guard,'function')}); await repo.observe(c); await repo.withObserved(c,()=>{});
+ const result=await handleTurn(deps,[c],cfg);assert.ok(requests.length>=2); const all=JSON.stringify(requests);assert.ok(all.includes('群十秘密苹果'));assert.ok(!all.includes('群二十秘密香蕉'));assert.ok(requests[0].tools.some(x=>x.function.name==='read_group_chat'));assert.ok(sent.length);assert.ok(sent.every(([k])=>k==='group:10'));assert.ok(sent.length<=3);assert.ok([...sent.map(x=>x[1]).join('')].length<=50);
+ requests=[];sent.length=0;calls=0;let release;gate=new Promise(r=>release=r);const ready=new Promise(r=>started=r);const d=await event(10,4,'继续聊');const pending=handleTurn(deps,[d],cfg);await ready;
+ const child=spawn(process.execPath,['--input-type=module','-e',`import {createManagedMemoryBrain} from './src/memory-brain-trust.js'; const [dir,evidence]=process.argv.slice(1);const scope={tenant:'companion',platform:'qq',type:'group',session:'group:10',user:'group:10'};const s=createManagedMemoryBrain({directory:dir,scope,sources:['qq-group-observation'],trustedProcess:true,backend:'sqlite-fts'});await s.forget(scope,{source:'qq-group-observation',evidence});`,path.join(dir,'memory-brain-scoped'),evidence],{stdio:['ignore','ignore','pipe']});let errors='';child.stderr.on('data',x=>errors+=x);const exit=await new Promise(r=>child.on('close',(code,signal)=>r({code,signal})));assert.deepEqual(exit,{code:0,signal:null},errors);release();await pending;assert.equal(sent.length,0);
+ gate=null;requests=[];calls=0;await handleTurn(deps,[await event(10,5,'接着聊')],cfg);assert.ok(!JSON.stringify(requests).includes('群十秘密苹果'));
+ requests=[];await handleTurn(deps,[{...c}],cfg);assert.equal(requests.length,0);
+});

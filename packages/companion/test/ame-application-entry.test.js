@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {handleTurn,loadConfig} from '../src/index.js';
+import {browseWebTopic} from '../src/web-living.js';
+import {initializeManagedStore,createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+import {tiebaMessage} from './tieba-trusted-message-fixture.js';
+const python=process.env.AME_TEST_PYTHON;
+test('application AME entry filters forgotten evidence and preserves unrelated evidence', {skip:!python,timeout:60000}, async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'ame-entry-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const scope={tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'};
+ const directory=path.join(dir,'memory-brain-scoped'); initializeManagedStore(directory);
+ const urls=['https://example.com/forgotten','https://example.com/kept'], quotes=['怪物猎人荒野包含一段合成测试内容甲','怪物猎人荒野包含一段合成测试内容乙'];
+ for(let i=0;i<2;i++) await browseWebTopic({topic:'怪物猎人荒野',memory:{dir},search:async()=>({success:true,text:`1. 怪物猎人荒野相关介绍\n(来源: web ${urls[i]})`}),readEvidence:async()=>({url:urls[i],text:quotes[i]}),brain:{complete:async({prompt})=>prompt.includes('想不想再花')?{deep:true,why:'想了解'}:prompt.includes('页面证据')?{relevant:true,quote:quotes[i]}:prompt.includes('作为自己的兴趣记录')?{interested:true}:{details:'摘要',mood:'看看'}}});
+ const store=createManagedMemoryBrain({directory,scope,sources:['web-source-page'],trustedProcess:true,backend:'ame',python});
+ await store.forget(scope,{source:'web-source-page',evidence:urls[0]});
+ const file=path.join(dir,'config.json');fs.writeFileSync(file,JSON.stringify({ownerIds:['1'],dataDir:dir,memoryBrain:{enabled:true,backend:'ame',trustedProcess:true,trustedScope:scope,authorizedSources:['web-source-page'],python}}));
+ const cfg=loadConfig(file); let captured;
+ const turn=async config=>{await handleTurn({brain:{reply:async p=>{captured=p;return {text:''}}},memory:{dir},bot:{},human:{},waker:{}},[await tiebaMessage()],config);return captured.situation;};
+ const text=await turn(cfg);assert.ok(!text.includes(quotes[0]));assert.ok(text.includes(quotes[1]));
+ const denied=await turn({...cfg,memoryBrain:{...cfg.memoryBrain,authorizedSources:[]}});assert.ok(!denied.includes(quotes[0]));assert.ok(!denied.includes(quotes[1]));
+});

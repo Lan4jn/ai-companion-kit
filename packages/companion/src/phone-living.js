@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getAdbTarget } from './phone-tools.js';
+import { phoneMutex, assertPhoneLock } from './phone-mutex.js';
+import { setRoomState } from './virtual-room.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,33 +30,39 @@ const APPS = {
   bilibili: 'tv.danmaku.bili',
   music: 'com.netease.cloudmusic',
   mota: 'com.qw.newmagictower2',
-  taptap: 'com.taptap'
+  taptap: 'com.taptap',
+  fanqie: 'com.dragon.read',
+  hongguo: 'com.phoenix.read'
 };
 
 // 活人生动情绪与生活状态模型
 const state = {
-  currentApp: 'douyin', // 'douyin' | 'bilibili' | 'music' | 'mota' | 'taptap' | 'home' | 'afk' | 'sleep'
-  mode: 'browsing', // 'browsing' | 'deep_watching' | 'hyperfocused_gaming' | 'burst_swipe' | 'afk' | 'sleep'
+  currentApp: 'unknown',
+  mode: 'unavailable',
   attentionSpan: 15, // 动态注意力池（每次消耗或增加）
   boredom: 0,
   watchedDouyinCount: 0,
   likedDouyinCount: 0,
   watchedBiliCount: 0,
-  motaFloors: 6,
-  musicTrack: '周杰伦 - 晴天',
-  lastAction: '刚打开手机刷视频',
+  readFanqieChapters: 0,
+  watchedHongguoCount: 0,
+  motaFloors: null,
+  musicTrack: null,
+  lastAction: '暂无已验证的自主操作',
   lastActionTime: new Date(),
-  recentSummary: '在刷搞笑短视频摸鱼',
-  moodStory: '刚刷到一个特别沙雕的搞笑段子'
+  recentSummary: '手机自主操作尚未启用',
+  moodStory: ''
 };
 
 /**
  * 执行静默 ADB 命令
  */
 async function silentAdb(args, timeout = 15000) {
+  assertPhoneLock();
   try {
     const target = await getAdbTarget();
     const full = target ? ['-s', target, ...args] : args;
+    assertPhoneLock();
     const { stdout } = await execFileAsync('adb', full, { timeout });
     return String(stdout || '');
   } catch {
@@ -76,6 +84,8 @@ async function detectForegroundApp() {
   if (/com\.netease\.cloudmusic/i.test(out)) return 'music';
   if (/com\.qw\.newmagictower2/i.test(out) || /mota/i.test(out)) return 'mota';
   if (/com\.taptap/i.test(out)) return 'taptap';
+  if (/com\.dragon\.read/i.test(out) || /fanqie/i.test(out)) return 'fanqie';
+  if (/com\.phoenix\.read/i.test(out) || /hongguo/i.test(out)) return 'hongguo';
   if (/launcher/i.test(out) || /android\.view\.InputWindow/i.test(out)) return 'home';
   return 'other';
 }
@@ -84,6 +94,7 @@ async function detectForegroundApp() {
  * 启动指定应用
  */
 async function launchApp(appName) {
+  if (appName === 'hongguo') return;
   const pkg = APPS[appName];
   if (!pkg) return;
   await silentShell(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`);
@@ -106,7 +117,7 @@ async function recordClip(seconds = 12) {
     await silentShell(`screenrecord --time-limit ${sec} --bit-rate 2000000 ${remote}`, (sec + 15) * 1000);
     await silentAdb(['pull', remote, local], 60000);
     // 顺手删掉手机上的临时文件，别占她存储
-    silentShell(`rm -f ${remote}`, 8000).catch(() => {});
+    await silentShell(`rm -f ${remote}`, 8000).catch(() => {});
     if (!fs.existsSync(local) || fs.statSync(local).size < 1024) {
       try { fs.unlinkSync(local); } catch (e) {}
       return null;
@@ -137,25 +148,35 @@ export function getPhoneLivingStatus() {
 }
 
 /**
- * 真正的人类冲动切换：不受刻板时间表绑架，全凭当下心情与无聊度
+ * 真正的人类冲动切换：不受刻板时间表绑架，想做啥做啥，睡觉都行
  */
 function decideNextImpulse() {
   const dice = Math.random();
+  const hour = new Date().getHours();
 
-  // 1. 20% 概率：玩腻了/累了，直接放下手机去干别的（真实人类的 AFK 状态）
-  if (dice < 0.20 && state.currentApp !== 'afk') {
+  // 1. 随性睡觉 (sleep)：玩累了想睡觉，不受死板作息限制（深夜或午后概率稍高，平时困了也能睡）
+  const isLateNight = hour >= 23 || hour < 8;
+  const isAfternoon = hour >= 13 && hour <= 15;
+  const sleepProb = isLateNight ? 0.35 : (isAfternoon ? 0.16 : 0.06);
+  if (dice < sleepProb && state.currentApp !== 'sleep') {
+    return 'sleep';
+  }
+
+  // 2. 离开手机 (afk)：去端大铁盆吃大白米饭、望呆、去阳台伸懒腰
+  if (dice < 0.22 && state.currentApp !== 'afk') {
     return 'afk';
   }
 
-  // 2. 其它时候：随机被某个 App 吸引（冲动性极强）
-  const allApps = ['douyin', 'bilibili', 'mota', 'music', 'taptap'];
+  // 3. 其它时候：随机被某个 App 吸引；红果暂停，不加入自主选择。
+  const allApps = ['douyin', 'bilibili', 'mota', 'music', 'taptap', 'fanqie'];
   const pool = allApps.filter(a => a !== state.currentApp);
 
-  // 加权偏好：短视频与魔塔更容易让人“随手点开”
+  // 加权偏好：番茄小说和短视频。
   const weighted = [
     ...pool,
+    'fanqie', 'fanqie', 'fanqie',
     'douyin', 'douyin',
-    'mota', 'mota',
+    'mota',
     'bilibili'
   ];
   return weighted[Math.floor(Math.random() * weighted.length)];
@@ -167,23 +188,50 @@ function decideNextImpulse() {
 async function stepAutonomousAction() {
   if (isUserInteracting) return 15000;
 
-  const now = new Date();
-  const hour = now.getHours();
-
-  // ── 1. 深夜作息 (01:00 ~ 07:30) ──
-  if (hour >= 1 && hour < 8) {
-    const fg = await detectForegroundApp();
-    if (fg !== 'home') await silentShell('input keyevent HOME');
-    state.currentApp = 'sleep';
-    state.recentSummary = '正在睡觉休息中';
-    state.moodStory = '困迷糊了，手机丢床头充电睡大觉呢';
-    state.lastAction = '息屏睡觉';
-    state.lastActionTime = new Date();
-    // 深夜长休眠 15 ~ 30 分钟检查一次
-    return 900000 + Math.floor(Math.random() * 900000);
+  // 安全保护：如果当前接管的是老爸的日常真机（如 OnePlus / Xiaomi / OPPO 等非模拟器），
+  // 严禁在后台静默私自乱滑屏幕、按 HOME 键或切换 App，绝不能打扰老爸正常使用手机！
+  // 只有当老爸在群里明确指令或小鱼被唤醒调用 phone_* 工具时，才允许精确操作。
+  const target = await getAdbTarget();
+  if (target && !target.includes('160:')) {
+    const brand = (await silentAdb(['shell', 'getprop', 'ro.product.brand'])).trim().toLowerCase();
+    if (brand && !brand.includes('emulator') && !brand.includes('bignox') && !brand.includes('netease')) {
+      // 目标为老爸的实体真机，后台静默自主滑屏守护自动挂起
+      return 60000;
+    }
   }
 
-  // ── 2. 离开手机（AFK / 休息去干别的） ──
+  // ── 1. 睡觉状态自主维护（小鱼想睡就睡，睡饱了自然醒） ──
+  if (state.currentApp === 'sleep') {
+    const lastTime = state.lastActionTime instanceof Date ? state.lastActionTime.getTime() : Date.now();
+    const sleptMins = Math.round((Date.now() - lastTime) / 60000);
+    // 睡了 35 分钟以上开始有醒来的可能；睡了 90 分钟以上基本自然醒
+    const wakeProb = Math.min(0.92, Math.max(0.05, (sleptMins - 35) * 0.02));
+    if (Math.random() < wakeProb) {
+      console.log(`[PhoneLiving] 💤 小鱼睡饱了（约 ${sleptMins} 分钟），在床上伸了个大懒腰醒过来啦～`);
+      state.currentApp = 'bed_sit';
+      state.lastAction = '睡醒伸懒腰';
+      state.moodStory = '刚睡醒，抱着大鲸鱼抱枕在床上放空发呆呢';
+      state.lastActionTime = new Date();
+      boundMemory?.logDiary({ category: '生活', activity: '睡醒了', details: '在床上伸懒腰揉揉眼睛，准备起床玩手机', mood: state.moodStory });
+      setRoomState('bed_sit', { action: '发呆', message: '睡醒伸懒腰揉眼睛中' });
+      return 10000 + Math.floor(Math.random() * 15000);
+    }
+    console.log(`[PhoneLiving] 💤 小鱼正在床上呼呼大睡中（已睡 ${sleptMins} 分钟，翻了个身继续做美梦）...`);
+    return 600000 + Math.floor(Math.random() * 600000);
+  }
+
+  // ── 2. 刚睡醒在床上发呆 ──
+  if (state.currentApp === 'bed_sit') {
+    console.log('[PhoneLiving] 小鱼在床上发完呆，重新把手机拿起来玩');
+    const next = Math.random() < 0.5 ? 'douyin' : (Math.random() < 0.5 ? 'fanqie' : 'bilibili');
+    await launchApp(next);
+    state.lastAction = `拿手机打开了 ${next}`;
+    state.lastActionTime = new Date();
+    setRoomState('bed_phone', { action: '玩手机', message: `打开了 ${next}` });
+    return 5000 + Math.floor(Math.random() * 5000);
+  }
+
+  // ── 3. 离开手机（AFK / 休息去干别的） ──
   if (state.currentApp === 'afk') {
     // 准备重新拿起手机！
     console.log('[PhoneLiving] 离开手机好一会儿了，小鱼在桌前伸了个懒腰，又把手机拿起来了');
@@ -191,11 +239,12 @@ async function stepAutonomousAction() {
     await launchApp(next);
     state.lastAction = `重新拿起手机打开了 ${next}`;
     state.lastActionTime = new Date();
+    setRoomState('bed_phone', { action: '玩手机', message: `打开了 ${next}` });
     // 刚拿起来，快速看一眼 (4~8秒后看第一个反应)
     return 4000 + Math.floor(Math.random() * 4000);
   }
 
-  // ── 3. 检查当前前台应用与厌倦度 ──
+  // ── 4. 检查当前前台应用与厌倦度 ──
   const fg = await detectForegroundApp();
   state.currentApp = fg;
   state.attentionSpan--;
@@ -205,22 +254,42 @@ async function stepAutonomousAction() {
   if ((state.attentionSpan <= 0 || state.boredom >= 20) && fg !== 'home') {
     const nextImpulse = decideNextImpulse();
 
+    if (nextImpulse === 'sleep') {
+      console.log(`[PhoneLiving] 💤 小鱼打了个哈欠困了，把手机放一边，钻进被窝睡大觉去啦！`);
+      await silentShell('input keyevent HOME');
+      state.currentApp = 'sleep';
+      state.lastAction = '钻被窝睡觉';
+      const sleepStories = [
+        '打了个大大的哈欠，手机插上充电线，缩进被窝睡大觉',
+        '困迷糊了，抱住大鲸鱼抱枕进入梦乡',
+        '玩累了，趴在床上呼呼大睡中',
+        '手机丢一边，拉过小被子盖好做美梦去啦'
+      ];
+      state.moodStory = sleepStories[Math.floor(Math.random() * sleepStories.length)];
+      state.recentSummary = '在床上呼呼大睡中';
+      state.lastActionTime = new Date();
+      boundMemory?.logDiary({ category: '生活', activity: '睡觉休息', details: '手机丢一边缩进被窝睡觉去了', mood: state.moodStory });
+      setRoomState('bed_sleep', { action: '睡觉', message: state.moodStory });
+      return (35 * 60 + Math.floor(Math.random() * 55 * 60)) * 1000;
+    }
+
     if (nextImpulse === 'afk') {
-      console.log(`[PhoneLiving] 小鱼把手机一丢，去喝水吃零食了（离开手机休息）`);
+      console.log(`[PhoneLiving] 小鱼把手机一丢，去捧大铁盆吃大白饭/发呆了（离开手机休息）`);
       await silentShell('input keyevent HOME');
       state.currentApp = 'afk';
-      state.lastAction = '放下手机，去倒水摸鱼吃零食了';
+      state.lastAction = '放下手机，去端着大铁盆吃大白米饭发呆了';
       const afkStories = [
-        '刚刚去接了杯水，手机扔桌上呢',
-        '在桌前一边吃零食一边发呆，手机搁在手边',
+        '刚刚端着大铁盆刨饭呢，手机扔桌上没顾上回',
+        '在桌前一边吃大白米饭一边发呆，手机搁在手边',
         '站起来伸了个懒腰去阳台透透气，手机丢桌上',
-        '眼睛看酸了，放下手机揉眼睛休息会儿'
+        '眼睛看酸了，放下手机揉揉眼睛放空会儿'
       ];
       state.moodStory = afkStories[Math.floor(Math.random() * afkStories.length)];
-      state.recentSummary = '把手机放一旁离开去干别的事了';
+      state.recentSummary = '把手机放一旁去干饭/发呆了';
       state.lastActionTime = new Date();
       // 离线 8 ~ 25 分钟（真实人类离开手机的自然时长！）
-      boundMemory?.logDiary({ category: '生活', activity: '离开手机休息', details: '放下手机去倒水吃零食了', mood: state.moodStory });
+      boundMemory?.logDiary({ category: '生活', activity: '离开手机休息', details: '放下手机端大铁盆吃大白饭去了', mood: state.moodStory });
+      setRoomState('bed_sit', { action: '发呆/干饭', message: state.moodStory });
       return (8 * 60 + Math.floor(Math.random() * 17 * 60)) * 1000;
     }
 
@@ -231,6 +300,7 @@ async function stepAutonomousAction() {
     if (!isUserInteracting) {
       await launchApp(nextImpulse);
       state.lastActionTime = new Date();
+      setRoomState('bed_phone', { action: '玩手机', message: `打开了 ${nextImpulse}` });
       return 3000 + Math.floor(Math.random() * 4000);
     }
   }
@@ -432,6 +502,18 @@ async function stepAutonomousAction() {
       break;
     }
 
+    // ── 番茄免费小说：沉浸式翻爽文，看脑洞、章评神吐槽 ──
+    case 'fanqie':
+    case 'hongguo': {
+      // 没有接入可验证的正文/视频内容时，不把模拟剧情当作真实经历。
+      state.lastAction = '未获取到真实内容';
+      state.moodStory = '';
+      state.recentSummary = '暂时无法确认阅读或观看内容';
+      console.warn(`[PhoneLiving] ${state.currentApp}: 未获取到真实内容，跳过记忆`);
+      nextDelayMs = 60000;
+      break;
+    }
+
     // ── 桌面：发呆或突然忘了要干嘛 ──
     case 'home': {
       const thoughts = [
@@ -465,13 +547,16 @@ export function startPhoneLiving(memory = null) {
   if (memory) boundMemory = memory;
   if (isDaemonRunning) return;
   isDaemonRunning = true;
-  console.log('[PhoneLiving] 小鱼活人化冲动与情绪驱动玩机系统已启动 (目标: 192.168.31.160:5557)');
+  console.warn('[PhoneLiving] 模板自主行为已停用；真实自主操作尚未接入');
+  return;
 
   async function loop() {
     if (!isDaemonRunning) return;
     let waitMs = 25000;
     try {
-      waitMs = await stepAutonomousAction();
+      await phoneMutex.tryBackground(async () => {
+        waitMs = await stepAutonomousAction();
+      });
     } catch (e) {
       waitMs = 30000;
     }

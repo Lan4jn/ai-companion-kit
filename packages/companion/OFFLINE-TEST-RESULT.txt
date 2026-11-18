@@ -1,0 +1,78 @@
+TAP version 13
+# [工具调用] 第 1 轮，小鱼触发了 1 个操作：web_search([已隐藏])
+# Subtest: serious current question searches before answering and reports unavailable search honestly
+ok 1 - serious current question searches before answering and reports unavailable search honestly
+  ---
+  duration_ms: 7.472195
+  ...
+# Subtest: only current standalone question is searched and snippets are labelled
+ok 2 - only current standalone question is searched and snippets are labelled
+  ---
+  duration_ms: 7.233545
+  ...
+# Subtest: casual chat is not searched; sensitive and disabled paths fail closed
+ok 3 - casual chat is not searched; sensitive and disabled paths fail closed
+  ---
+  duration_ms: 2.527984
+  ...
+# Subtest: model search cannot exfiltrate history in a generated query
+ok 4 - model search cannot exfiltrate history in a generated query
+  ---
+  duration_ms: 2.317899
+  ...
+# Subtest: 长回复不丢失标点后的内容
+ok 5 - 长回复不丢失标点后的内容
+  ---
+  duration_ms: 2.744231
+  ...
+# Subtest: 超长无标点文本完整保留
+ok 6 - 超长无标点文本完整保留
+  ---
+  duration_ms: 0.672114
+  ...
+# Subtest: 超限换行和 CQ 图片及 @ 按原顺序合并
+ok 7 - 超限换行和 CQ 图片及 @ 按原顺序合并
+  ---
+  duration_ms: 0.372962
+  ...
+# Subtest: 模拟 say 发送完整长内容
+ok 8 - 模拟 say 发送完整长内容
+  ---
+  duration_ms: 0.912761
+  ...
+# Subtest: 默认发送不主动增删或替换正文
+ok 9 - 默认发送不主动增删或替换正文
+  ---
+  duration_ms: 0.405381
+  ...
+# Subtest: 换行及 CQ 码按原样保留
+ok 10 - 换行及 CQ 码按原样保留
+  ---
+  duration_ms: 0.19727
+  ...
+# Subtest: 分句处的空格不被删除
+ok 11 - 分句处的空格不被删除
+  ---
+  duration_ms: 0.196856
+  ...
+# Subtest: 普通空格、粗体标记及字面零宽字符不丢失
+ok 12 - 普通空格、粗体标记及字面零宽字符不丢失
+  ---
+  duration_ms: 0.214031
+  ...
+# [TTS] 发起合成: speaker=test-voice, textLength=2, hasEmotion=true
+# [TTS] provider=doubao fallback=true; voice and emotional rendering may differ
+# Subtest: configured speed and all emotional instructions reach the Doubao request
+ok 13 - configured speed and all emotional instructions reach the Doubao request
+  ---
+  duration_ms: 43.206897
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1070.161909

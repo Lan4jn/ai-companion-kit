@@ -1,0 +1,3 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {selectAndOpen} from '../src/fanqie-navigation.js';
+test('选书后界面变化则不点击',async()=>{let n=0,clicks=0;const a=[{title:'甲',description:'简介',x:3,y:4}];const r=await selectAndOpen({observe:async()=>++n===1?a:[],choose:async()=>a[0],click:async()=>clicks++,enter:async()=>true});assert.equal(r.ok,false);assert.equal(clicks,0)});
+test('选择并确认阅读成功',async()=>{const a=[{title:'甲',description:'简介',x:3,y:4}];const r=await selectAndOpen({observe:async()=>a,choose:async()=>a[0],click:async()=>true,enter:async()=>true});assert.equal(r.ok,true);assert.equal(r.title,'甲')});

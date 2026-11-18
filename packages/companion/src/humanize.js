@@ -1,3 +1,5 @@
+import { splitBurstPreserving } from './burst-split.js';
+
 /**
  * 拟人化发送 · 让它打字不像机器
  * ─────────────────────────────────────────────────────────────
@@ -14,6 +16,83 @@
 const NIGHT = { from: 2, to: 7 };
 /** 打字速度：每字毫秒。中文手打大概 80~140ms/字，这里给个偏快的值 */
 const DEFAULT_MS_PER_CHAR = 85;
+
+// Preserve protected tokens and split only at conservative grapheme boundaries.
+// Limits are measured in Unicode code points, not UTF-16 code units.
+const SEGMENT_LIMIT = 1000;
+export const CHAT_CAPACITY_NOTICE = '这部分我暂时没法完整说清楚，你想先了解哪一点？';
+export function prepareChatParts(text, human = new Humanizer()) {
+  try {
+    let parts = Array.isArray(text) ? text.flatMap(s => human.split(String(s), 3)) : human.split(text, 3);
+    // Preferred punctuation breaks can create an unnecessary fourth message.
+    if (parts.length > 3 && (!Array.isArray(text) || text.length === 1)) parts = splitLongReply(String(Array.isArray(text) ? text[0] : text), false);
+    if (parts.length > 3 || parts.some(p => [...p].length > SEGMENT_LIMIT)) throw new RangeError('capacity exceeded');
+    return {parts, capacityExceeded: false};
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return {parts: [CHAT_CAPACITY_NOTICE], capacityExceeded: true, error: error.message};
+  }
+}
+function splitLongReply(text, preferBreaks = true) {
+  const limit = SEGMENT_LIMIT;
+  const protectedRanges = [];
+  const tokens = /(`{3,}|~{3,})[^\r\n]*(?:[\s\S]*?\1|[\s\S]*$)|\[CQ:[^\]]*\]|!?\[[^\]\n]*\]\([^\s)]*(?:\([^\s()]*\)[^\s)]*)*\)|https?:\/\/[^\s<>]+|www\.[^\s<>]+|`[^`\r\n]+`/gi;
+  for (const match of text.matchAll(tokens)) protectedRanges.push([match.index, match.index + match[0].length]);
+  // Avoid Intl.Segmenter here: the deployed Node/ICU build can segfault.
+  // Keep combining marks, variation selectors, emoji modifiers, ZWJ chains,
+  // CRLF and regional-indicator flag pairs together.
+  const boundaries = [0];
+  const cps = [...text];
+  let offset = 0, regionalRun = 0, previous = '';
+  for (const cp of cps) {
+    const regional = /\p{Regional_Indicator}/u.test(cp);
+    const hangulType = (c) => {
+      const n = c.codePointAt(0);
+      if ((n >= 0x1100 && n <= 0x115f) || (n >= 0xa960 && n <= 0xa97c)) return 'L';
+      if ((n >= 0x1160 && n <= 0x11a7) || (n >= 0xd7b0 && n <= 0xd7c6)) return 'V';
+      if ((n >= 0x11a8 && n <= 0x11ff) || (n >= 0xd7cb && n <= 0xd7fb)) return 'T';
+      if (n >= 0xac00 && n <= 0xd7a3) return (n - 0xac00) % 28 ? 'LVT' : 'LV';
+      return '';
+    };
+    const a = previous && hangulType(previous), b = hangulType(cp);
+    const hangul = (a === 'L' && ['L', 'V', 'LV', 'LVT'].includes(b)) || (['LV', 'V'].includes(a) && ['V', 'T'].includes(b)) || (['LVT', 'T'].includes(a) && b === 'T');
+    const joins = offset > 0 && (hangul || /\p{Mark}|\p{Emoji_Modifier}|[\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u{E0020}-\u{E007F}\u200D]/u.test(cp)
+      || (/\p{Mark}/u.test(previous) && /[^\x00-\x7f]/u.test(cp))
+      || previous === '\u200d' || (previous === '\r' && cp === '\n') || (regional && regionalRun % 2 === 1));
+    if (!joins && offset > 0) boundaries.push(offset);
+    offset += cp.length;
+    regionalRun = regional ? regionalRun + 1 : 0;
+    previous = cp;
+  }
+  boundaries.push(offset);
+  const parts = [];
+  let start = 0, pos = 0, range = 0;
+  while (start < text.length) {
+    let last = start, preferred = start, count = 0;
+    while (pos + 1 < boundaries.length && count < limit) {
+      const next = boundaries[pos + 1];
+      const width = [...text.slice(boundaries[pos], next)].length;
+      if (count + width > limit) break;
+      pos++;
+      while (range < protectedRanges.length && protectedRanges[range][1] <= next) range++;
+      const inside = range < protectedRanges.length && protectedRanges[range][0] < next && next < protectedRanges[range][1];
+      count += width;
+      if (!inside) {
+        last = next;
+        if (count >= limit / 2 && /[\n。！？；，!?;\s]/u.test(text.slice(boundaries[pos - 1], next))) preferred = next;
+      }
+    }
+    if (last === start) {
+      throw new RangeError(`存在超过 ${limit} 个字符的不可分割内容（链接、CQ、代码或字素），无法安全发送`);
+    }
+    const end = preferBreaks && preferred > start ? preferred : last;
+    parts.push(text.slice(start, end));
+    start = end;
+    while (boundaries[pos] > start) pos--;
+    while (range > 0 && protectedRanges[range - 1][1] > start) range--;
+  }
+  return parts;
+}
 
 export class Humanizer {
   /**
@@ -38,10 +117,10 @@ export class Humanizer {
     this.gapRange = opts.gapRange ?? [700, 2600];
     this.longGapChance = opts.longGapChance ?? 0.25;
     this.longGapRange = opts.longGapRange ?? [3000, 9000];
-    // 刻意留语病：真人手打每千字大概 1.6 个，设 0 可关掉
-    this.typoRate = opts.typoRate ?? 0.0016;
-    // 句尾句号是中文聊天里最重的 AI 指纹，默认去掉
-    this.stripPeriod = opts.stripPeriod !== false;
+    // 默认保留正文；显式配置 typoRate 才启用模拟错字。
+    this.typoRate = opts.typoRate ?? 0;
+    // 默认保留原文标点；仅在明确启用时做聊天风格处理。
+    this.stripPeriod = opts.stripPeriod === true;
   }
 
   /**
@@ -143,14 +222,42 @@ export class Humanizer {
   /**
    * 把一段长回复切成"像人打出来的"若干条
    * - 保护 [CQ:image,...] 码不被切散
-   * - 核心原则：由小鱼自己决定分条（按换行 \n 切分）
-   * - 去掉逗号/分号/顿号/破折号机械拆句机制，保全完整语义与神转折包袱
-   * - 单次发送最多 burstMax 条（超量部分自然合并回最后一条，绝不物理截断丢失）
-   * - 句尾句号自动清理，去除 AI 腔
+   * - 短消息和已有换行保持原有行为；长单行优先在句末分条
+   * - 很长的单句可在中文逗号或分号处分条；代码、CQ 码和链接保守处理
+   * - 单次发送最多 burstMax 条；长单行按句子尽量均衡分配，绝不物理截断
+   * - 默认保留句尾标点；显式启用 stripPeriod 时才做清理
    */
   split(text, max = this.burstMax) {
-    const raw = String(text || '').trim();
+    const source = String(text ?? '');
+    if (!source) return [];
+    if ([...source].length > SEGMENT_LIMIT) return splitLongReply(source);
+    if (/\n\s*\n/.test(source) && !/[`\\]|\[CQ:|https?:\/\/|www\.|^\s*(?:[-*+] |\d+[.)] |>|#{1,6} )/im.test(source)) {
+      const chunks = source.match(/[\s\S]*?(?:\r?\n[ \t]*\r?\n|$)/g)?.filter(Boolean) || [source];
+      if (chunks.every(x => x.trim())) {
+        const count = Math.min(Math.max(1, Math.floor(max) || 1), 3);
+        return chunks.length <= count ? chunks : [...chunks.slice(0, count - 1), chunks.slice(count - 1).join('')];
+      }
+    }
+    // Keep legacy sentence bubbles only when the output reconstructs the input.
+    // Technical material and line breaks remain in a single unmodified message.
+    if (/[\r\n\u2028\\`]|https?:\/\/|www\.|__CQ_/i.test(source)) return [source];
+    const count = Math.min(this.burstMax, max, 3);
+    const parts = splitBurstPreserving(source, { maxParts: count });
+    if (parts.length > 1 || /\[CQ:/i.test(source)) return parts;
+    const legacy = this._splitLegacy(source, count);
+    return legacy.join('') === source ? legacy : [source];
+  }
+
+  _splitLegacy(text, max) {
+    const source = String(text ?? '');
+    // Long replies must bypass the legacy newline normalization and burst limit:
+    // those transform content or can leave an arbitrarily large final message.
+    if ([...source].length > 1000) return splitLongReply(source);
+    const raw = source.trim();
     if (!raw) return [];
+
+    // 代码块的换行和转义均属于正文，不能作消息分隔或规范化。
+    if (raw.includes('```')) return [raw];
 
     // 兼容模型输出的字面量反斜杠换行 \n 与真实换行
     const normalized = raw.replace(/\\{1,3}n/g, '\n').replace(/\r\n?/g, '\n').replace(/\u2028/g, '\n');
@@ -164,34 +271,41 @@ export class Humanizer {
       return kind === 'image' ? `\n${token}\n` : token;
     });
 
-    // 保护英文单词、数字、中英文混排之间的普通空格，避免把 Hello World / RTX 4070 拆碎！
-    const protectedText = sanitized
-      .replace(/([a-zA-Z0-9_.-])[ \t]+([a-zA-Z0-9_.-])/g, '$1\u200B$2')
-      .replace(/([\u4e00-\u9fa5])[ \t]+([a-zA-Z0-9])/g, '$1\u200B$2')
-      .replace(/([a-zA-Z0-9])[ \t]+([\u4e00-\u9fa5])/g, '$1\u200B$2');
-
-    // 1) 先按换行切 —— 由小鱼自己决定是否分条发送（每一行代表一条独立气泡）
-    const lines = protectedText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
-    const out = [];
-
-    for (const p of lines) {
-      if (p.startsWith('__CQ_IMAGE_')) {
-        out.push(p);
-        continue;
+    // 只按换行分条，不转换行内空格，避免损坏原文。
+    const lines = sanitized.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    // 单行优先在完整句末分段；过长的单句才尝试中文逗号或分号。
+    // 技术内容整体保留，避免切开链接、代码、CQ 码或 Markdown。
+    if (lines.length === 1 && Math.max(1, Math.floor(max) || 1) > 1
+        && [...lines[0]].length > 60
+        && !/`|\[CQ:|__CQ_(?:IMAGE|AT)_|https?:\/\/|www\./i.test(lines[0])) {
+      let sentences = lines[0].match(/.*?[。！？!?]+[”’」』）)]*(?:\s*|$)|.+$/gu) || [lines[0]];
+      if (sentences.length === 1 && [...lines[0]].length > 120) {
+        sentences = lines[0].match(/.*?[，；]+[”’」』）)]*\s*|.+$/gu) || [lines[0]];
       }
-
-      // 仅在单行异常冗长（> 45 字）且带有句末独立终结标点（。！？!?）时做自然分句兜底，
-      // 坚决不用逗号、分号、破折号拆句，保护句子前后完整意思
-      if ([...p].length > 45 && /[。！？!?]/.test(p)) {
-        const segs = p
-          .split(/(?<=[。！？!?]+)(?![。！？!?])/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        out.push(...(segs.length ? segs : [p]));
-      } else {
-        out.push(p);
+      if (sentences.length > 1) {
+        const limit = Math.max(1, Math.floor(max) || 1);
+        const parts = [];
+        let rest = sentences.join('');
+        let current = '';
+        for (let i = 0; i < sentences.length; i++) {
+          const sentence = sentences[i];
+          current += sentence;
+          rest = rest.slice(sentence.length);
+          const slots = limit - parts.length;
+          const target = ([...current].length + [...rest].length) / slots;
+          const currentLength = [...current].length;
+          const nextLength = [...(sentences[i + 1] || '')].length;
+          if (slots > 1 && rest && (currentLength >= target || i === sentences.length - 2
+              || Math.abs(target - currentLength) <= Math.abs(target - currentLength - nextLength))) {
+            parts.push(current);
+            current = '';
+          }
+        }
+        if (current) parts.push(current);
+        if (parts.length > 1) return parts;
       }
     }
+    const out = lines;
 
     // 2) 合并极短无意义碎片（例如单独残留的标点或 < 3 字的碎片，与相邻句子合并）
     const merged = [];
@@ -210,39 +324,16 @@ export class Humanizer {
       }
     }
 
-    // 3) 超量处理（限制单次最多 max 条，默认 3 条）：
-    // 关键改造：把多余的分句自然合并进最后一条，绝对不物理丢弃！保全所有反转和包袱！
-    let res = merged;
-    if (merged.length > max) {
-      const textParts = merged.filter((p) => !p.startsWith('__CQ_IMAGE_'));
-      const imgParts = merged.filter((p) => p.startsWith('__CQ_IMAGE_'));
-      const textLimit = Math.max(1, max - imgParts.length);
+    // 3) 合并超量部分，保持文字和图片的原始顺序。
+    const limit = Math.max(1, Math.floor(max) || 1);
+    const res = merged.length > limit
+      ? [...merged.slice(0, limit - 1), merged.slice(limit - 1).join('\n')]
+      : merged;
 
-      const head = textParts.slice(0, textLimit - 1);
-      const rest = textParts.slice(textLimit - 1).join(' ');
-      if (rest) head.push(rest);
-      res = [...head.filter(Boolean), ...imgParts];
-    }
-
-    // 4) 还原 CQ 码与空格，去掉句尾句号与 AI Markdown 痕迹
-    return res.map((part) => {
-      let back = part.replace(/\u200B/g, ' ');
-      back = back.replace(/__CQ_(?:IMAGE|AT)_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
-      // 去掉 Markdown 粗体 ** 痕迹
-      back = back.replace(/\*\*([^*]+)\*\*/g, '$1');
-      back = this.stripTail(back);
-      if (back.startsWith('[CQ:')) return back;
-      const chars = [...back.trim()];
-      // 带 @ 或图片的句子不参与超长截断，否则会把 CQ 码切碎
-      if (back.includes('[CQ:')) return back.trim();
-      if (chars.length <= 36) return back.trim();
-      // 超长单句温和保护（>=36字），优先在后半段标点停顿处自然截断，绝不倒退过深腰斩
-      const head36 = chars.slice(0, 36).join('');
-      const pMatch = head36.match(/^(.{18,36}?)[，,；;、。！？!?\s][^，,；;、。！？!?\s]*$/);
-      if (pMatch && pMatch[1]) {
-        return pMatch[1].trim();
-      }
-      return head36.trim();
+    // 4) 还原 CQ 码，只规范整段回复的末尾句号。
+    return res.map((part, i) => {
+      const back = part.replace(/__CQ_(?:IMAGE|AT)_(\d+)__/g, (_, idx) => cqImages[Number(idx)] || '');
+      return i === res.length - 1 ? this.stripTail(back) : back;
     }).filter(Boolean);
   }
 
@@ -255,30 +346,28 @@ export class Humanizer {
    * @param {(msg:string)=>Promise<any>}  io.send          真正发一条
    * @param {(ms:number)=>Promise<void>}  [io.sleep]       等待（默认 setTimeout，测试时可注入）
    * @returns {Promise<{sent:number, parts:string[]}>}\n   */
-  async say(text, { setTyping, send, sleep } = {}) {
+  async say(text, { setTyping, send, sleep, prepared = false } = {}) {
     const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
-    const parts = Array.isArray(text) ? text.map((s) => String(s)) : this.split(text);
+    if (prepared && (!Array.isArray(text) || text.length > 3 || text.some(p => typeof p !== 'string' || !p || [...p].length > SEGMENT_LIMIT))) throw new RangeError('invalid prepared messages');
+    if (!prepared && Array.isArray(text) && text.some(p => typeof p !== 'string' || [...p].length > SEGMENT_LIMIT)) return {sent: 0, parts: [], ok: false, error: '消息过长，无法安全发送'};
+    const {parts, capacityExceeded, error} = prepared ? {parts: text} : prepareChatParts(text, this);
+    if (capacityExceeded && error && error !== 'capacity exceeded') return {sent: 0, parts: [], ok: false, error};
     if (!parts.length) return { sent: 0, parts: [] };
-
-    if (!this.enabled) {
-      for (const p of parts) await send(p);
-      return { sent: parts.length, parts };
-    }
 
     let sent = 0;
     for (let i = 0; i < parts.length; i++) {
-      const p = this.typoize(parts[i]);
-      // 1) 先"正在输入"
-      if (setTyping) { try { await setTyping(true); } catch { /* 有些平台不支持，忽略 */ } }
-      await wait(this.typingMsFor(p));
-      if (setTyping) { try { await setTyping(false); } catch {} }
-      // 2) 发出去
-      await send(p);
+      const p = parts[i];
+      if (this.enabled) {
+        if (setTyping) { try { await setTyping(true); } catch { /* 有些平台不支持，忽略 */ } }
+        await wait(this.typingMsFor(p));
+        if (setTyping) { try { await setTyping(false); } catch {} }
+      }
+      const result = await send(p);
+      if (result?.ok === false || result?.blocked === true || (result?.outcome != null && result.outcome !== 'confirmed')) return { sent, parts, ok: false, error: result.error || result.reason || 'SEND_NOT_CONFIRMED' };
       sent++;
-      // 3) 条间停顿
-      if (i < parts.length - 1) await wait(this.gapMs());
+      if (this.enabled && i < parts.length - 1) await wait(this.gapMs());
     }
-    return { sent, parts };
+    return { sent, parts, ...(capacityExceeded ? {capacityExceeded: true} : {}) };
   }
 }
 

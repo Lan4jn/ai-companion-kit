@@ -1,0 +1,7 @@
+# Scoped transactional chat history (development only)
+
+The scoped memory-brain SQLite database now offers `commitChatHistory` and `chatHistory`; the existing `Memory.logDurableTurn` interface accepts an explicit scoped store and evidence. Turn identity, event identity and forget tombstones are checked under the same source lock and SQLite transaction. Forget removes the whole dependent turn body while retaining hashes. A duplicate turn with differing contents and an event reused by another turn are rejected. A forgotten event cannot be backfilled.
+
+This is not connected to the main durable queue: its startup remains deliberately disabled, and its current acknowledgement and synchronous recordHistory call do not supply the scoped store or stable event evidence. The encrypted journal and legacy logs are separate stores and are not erased by this operation. SQLite secure_delete does not guarantee erasure from pre-existing WAL files, snapshots, filesystem copies or backups. This is logical deletion, not a physical erasure guarantee. Restoring an old whole store can resurrect forgotten material; no independent anti-rollback authority exists. Do not enable production durable chat or claim end-to-end forgetting from this candidate. Unknown delivery remains blocked and is not automatically resent.
+
+Test only with synthetic data: `node --test test/chat-sqlite-atomic-history.test.js test/chat-durable-forget-barrier.test.js test/memory-brain-forget-redelivery.test.js test/memory-brain-readonly-history.test.js`.

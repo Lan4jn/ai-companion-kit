@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import * as web from '../src/web-living.js';
+const {browseWebTopic, decideWebSurfing} = web;
+import {initializeManagedStore, createManagedMemoryBrain} from '../src/memory-brain-trust.js';
+const createWebBackgroundFilter = web.createWebBackgroundFilter || (() => async () => []);
+
+test('background history filters each evidenced interest against the owner forget ledger', async t => {
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'web-background-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const scope={tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'};
+ const cfg={ownerIds:['1'],dataDir:dir,memoryBrain:{enabled:true,backend:'sqlite-fts',trustedProcess:true,trustedScope:scope,authorizedSources:['web-source-page']}};
+ const directory=path.join(dir,'memory-brain-scoped'); initializeManagedStore(directory);
+ const webScope=web.createWebScope(cfg,dir);
+ const urls=['https://example.com/a','https://example.com/b'];
+ const quotes=['怪物猎人荒野合成证据甲内容','怪物猎人荒野合成证据乙内容'];
+ for(let i=0;i<2;i++) await browseWebTopic({topic:'怪物猎人荒野',memory:{dir},webScope,search:async()=>({success:true,text:`怪物猎人荒野介绍\n(来源: web ${urls[i]})`}),readEvidence:async()=>({url:urls[i],text:quotes[i]}),brain:{complete:async({prompt})=>prompt.includes('想不想再花')?{deep:true}:prompt.includes('页面证据')?{relevant:true,quote:quotes[i]}:prompt.includes('作为自己的兴趣记录')?{interested:true}:{details:'摘要',mood:'看看'}}});
+ await createManagedMemoryBrain({directory,scope,sources:['web-source-page'],trustedProcess:true,backend:'sqlite-fts'}).forget(scope,{source:'web-source-page',evidence:urls[0]});
+ let prompt=''; const brain={complete:async p=>{prompt=p.prompt;return {want:false}}};
+ await decideWebSurfing({brain,memory:{dir},webScope,backgroundFilter:createWebBackgroundFilter(cfg,dir)});
+ assert.doesNotMatch(prompt,/合成证据甲/); assert.match(prompt,/合成证据乙/);
+ await decideWebSurfing({brain,memory:{dir},webScope,backgroundFilter:createWebBackgroundFilter({...cfg,memoryBrain:{...cfg.memoryBrain,authorizedSources:[]}},dir)});
+ assert.doesNotMatch(prompt,/合成证据[甲乙]/);
+ fs.writeFileSync(path.join(dir,'web-knowledge.jsonl'),JSON.stringify({topic:'怪物猎人荒野',learned:['无来源旧摘要不能出现']})+'\n');
+ await decideWebSurfing({brain,memory:{dir},webScope,backgroundFilter:async()=>{throw new Error('offline')}});
+ assert.doesNotMatch(prompt,/合成证据[甲乙]|无来源旧摘要/);
+ assert.doesNotMatch(web.renderWebKnowledge(dir),/无来源旧摘要/);
+ assert.equal((await decideWebSurfing({brain,memory:{dir},webScope,backgroundFilter:createWebBackgroundFilter(cfg,dir)})).want,false);
+});

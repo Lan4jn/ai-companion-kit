@@ -1,0 +1,36 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+for (const signal of ['SIGTERM', 'SIGINT']) test(`standalone panel closes keep-alive sockets on ${signal}`, {timeout:10000}, async t => {
+  const dir=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'standalone-panel-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  fs.mkdirSync(path.join(dir,'scripts')); fs.mkdirSync(path.join(dir,'data'));
+  fs.cpSync(path.join(root,'src'),path.join(dir,'src'),{recursive:true});
+  fs.copyFileSync(path.join(root,'scripts/panel.mjs'),path.join(dir,'scripts/panel.mjs'));
+  fs.writeFileSync(path.join(dir,'package.json'),'{"type":"module"}');
+  const events=['SIGTERM','SIGINT','uncaughtException','unhandledRejection'];
+  const before=events.map(e=>process.listenerCount(e));
+  await import(pathToFileURL(path.join(dir,'scripts/panel.mjs')).href);
+  assert.deepEqual(events.map(e=>process.listenerCount(e)),before);
+  const reservation=net.createServer(); await new Promise((r,j)=>reservation.once('error',j).listen(0,'127.0.0.1',r));
+  const port=reservation.address().port; await new Promise(r=>reservation.close(r));
+  const child=spawn(process.execPath,[path.join(dir,'scripts/panel.mjs'),String(port)],{cwd:dir,stdio:['ignore','pipe','pipe']});
+  let out=''; child.stdout.on('data',x=>out+=x); child.stderr.on('data',x=>out+=x);
+  const exited=new Promise((r,j)=>{child.once('error',j);child.once('exit',(code,sig)=>r({code,sig}))});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await exited}});
+  const deadline=Date.now()+5000; while(!out.includes('[panel] http')&&Date.now()<deadline&&child.exitCode===null) await new Promise(r=>setTimeout(r,20));
+  assert.ok(out.includes('[panel] http'),out);
+  const socket=net.connect(port,'127.0.0.1'); await new Promise((r,j)=>{socket.once('connect',r);socket.once('error',j)});
+  socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n');
+  await new Promise((r,j)=>{socket.once('data',r);socket.once('error',j)});
+  const closed=new Promise(r=>socket.once('close',r)); child.kill(signal);
+  assert.deepEqual(await exited,{code:0,sig:null}); await closed;
+  const probe=net.createServer(); await new Promise((r,j)=>probe.once('error',j).listen(port,'127.0.0.1',r)); await new Promise(r=>probe.close(r));
+});

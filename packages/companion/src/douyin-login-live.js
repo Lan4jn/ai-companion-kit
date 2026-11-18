@@ -2,6 +2,8 @@ import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';
 import { saveSnapshot, updatePageMeta } from './browser-observer.js';
+import { createCredentialStore } from './douyin-credential-store.js';
+import { createLoginService } from './room-login-service.js';
 
 const CHROME_PATH = '/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome';
 const DATA_DIR = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/data';
@@ -10,6 +12,7 @@ const QR_PATH = '/root/.hermes/cache/scratch/douyin_qr_live.png';
 const PUBLIC_QR_PATH = '/root/ai-companion-xiaoyu/ai-companion-kit/packages/companion/public/room_assets/douyin_qr_live.png';
 
 async function run() {
+  const store=createCredentialStore(DATA_DIR), version=store.snapshot().version;
   console.log('[DouyinLogin] 启动无头浏览器准备新鲜二维码...');
   const browser = await chromium.launch({
     executablePath: CHROME_PATH,
@@ -80,7 +83,8 @@ async function run() {
 
     if (hasSession && isModalGone) {
       console.log('[DouyinLogin] 🎉 检测到登录成功！正在保存 Cookie...');
-      fs.writeFileSync(COOKIE_FILE, JSON.stringify(cookies, null, 2), 'utf8');
+      const result=await createLoginService({dataDir:DATA_DIR}).checkDouyin(cookies);
+      if (result.state !== 'online' || !store.commit(version,cookies)) throw new Error('登录验证失败或凭据已变化');
       console.log('[DouyinLogin] ✅ Cookie 已成功保存至: ' + COOKIE_FILE);
       loggedIn = true;
 

@@ -3,17 +3,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { phoneMutex, assertPhoneLock } from './phone-mutex.js';
 import { lockPhoneForUserAction, unlockPhoneForUserAction, getPhoneLivingStatus } from './phone-living.js';
-import { synthesize } from './tts.js';
+import { cleanAllToolArtifacts } from './safety.js';
+import { synthesizeChunks } from './tts.js';
+import { hasFishCliche } from './fish-cliche.js';
 import { pickSticker, readStickerBase64, markUsed, stickerStats, extractFromVideo, addSticker } from './stickers.js';
 import { readGroupChat, enqueueGroupMessage } from './group-bridge.js';
-import { talkToHermes, requestFeature } from './dev-channel.js';
+import { callAunt, talkToHermes, requestFeature } from './dev-channel.js';
 import { generateImage, findImages, getImage, discardImage, markUsed as markImageUsed } from './image-gen.js';
 
 const execFileAsync = promisify(execFile);
 
 // ── 环境变量与全局配置 ──
-let CURRENT_SERIAL = process.env.PHONE_SERIAL || '';
+const PINNED_SERIAL = process.env.PHONE_SERIAL || '';
+let CURRENT_SERIAL = PINNED_SERIAL;
 const MACRO_FILE = process.env.PHONE_MACRO_FILE || path.join(os.homedir(), '.phone-mcp', 'macros.json');
 const SHOT_DIR = process.env.PHONE_SHOT_DIR || '/root/.hermes/cache/scratch/phone-shots';
 
@@ -25,11 +29,23 @@ try {
  * 自动寻找/解析当前活跃的 ADB 设备（优先 192.168.31.160:5557 模拟器/外部设备）
  */
 export async function getAdbTarget() {
-  if (CURRENT_SERIAL) return CURRENT_SERIAL;
+  // Explicitly bound devices must never fall back to another handset.
+  if (PINNED_SERIAL) return PINNED_SERIAL;
   try {
     const { stdout } = await execFileAsync('adb', ['devices']);
     const lines = stdout.split(/\r?\n/).slice(1).filter(l => l.trim());
     const ready = lines.map(l => l.split(/\s+/)).filter(p => p[1] === 'device').map(p => p[0]);
+
+    // 如果指定的设备确实在线，优先使用
+    if (CURRENT_SERIAL && ready.includes(CURRENT_SERIAL)) {
+      return CURRENT_SERIAL;
+    }
+    // 优先老爸手机 192.168.31.205:5555
+    if (ready.includes('192.168.31.205:5555')) {
+      CURRENT_SERIAL = '192.168.31.205:5555';
+      return CURRENT_SERIAL;
+    }
+    // 其次 160 虚拟机
     if (ready.includes('192.168.31.160:5557')) {
       CURRENT_SERIAL = '192.168.31.160:5557';
       return CURRENT_SERIAL;
@@ -38,10 +54,11 @@ export async function getAdbTarget() {
       CURRENT_SERIAL = ready[0];
       return CURRENT_SERIAL;
     }
-    // 没找到任何设备时，尝试自动连接 192.168.31.160:5557
-    await execFileAsync('adb', ['connect', '192.168.31.160:5557'], { timeout: 5000 }).catch(() => {});
+    // 自动重连老爸手机
+    assertPhoneLock();
+    await execFileAsync('adb', ['connect', '192.168.31.205:5555'], { timeout: 3000 }).catch(() => {});
   } catch {}
-  return '192.168.31.160:5557';
+  return CURRENT_SERIAL || '192.168.31.205:5555';
 }
 
 /**
@@ -50,6 +67,7 @@ export async function getAdbTarget() {
 async function adb(args, { timeout = 30000, serial = true } = {}) {
   const target = await getAdbTarget();
   const full = serial && target ? ['-s', target, ...args] : args;
+  assertPhoneLock();
   try {
     const { stdout, stderr } = await execFileAsync('adb', full, {
       timeout,
@@ -69,6 +87,29 @@ async function shell(cmd, timeout = 30000) {
   const r = await adb(['shell', cmd], { timeout });
   if (!r.ok) throw new Error(`adb shell 失败：${r.err || r.out}`);
   return r.out;
+}
+
+/**
+ * 获取当前屏幕实际逻辑分辨率与旋转方向（自适应横屏/竖屏游戏）
+ */
+export async function getDisplayMetrics() {
+  try {
+    const wmOut = await shell('wm size', 5000).catch(() => '');
+    const sizeMatch = wmOut.match(/Physical size:\s*(\d+)x(\d+)/);
+    let physW = sizeMatch ? Number(sizeMatch[1]) : 1080;
+    let physH = sizeMatch ? Number(sizeMatch[2]) : 2376;
+
+    const winOut = await shell('dumpsys window', 5000).catch(() => '');
+    const rotMatch = winOut.match(/mCurrentRotation=ROTATION_(\d+)/) || winOut.match(/mDisplayRotation=ROTATION_(\d+)/);
+    const rot = rotMatch ? rotMatch[1] : '0';
+    const isLand = rot === '90' || rot === '270';
+
+    const width = isLand ? Math.max(physW, physH) : Math.min(physW, physH);
+    const height = isLand ? Math.min(physW, physH) : Math.max(physW, physH);
+    return { width, height, isLandscape: isLand, rotation: rot };
+  } catch (e) {
+    return { width: 1080, height: 2376, isLandscape: false, rotation: '0' };
+  }
 }
 
 /**
@@ -179,16 +220,16 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'phone_get_screen',
-      description: '瞄一眼当前手机屏幕（自己能看到屏幕画面，但不会发到聊天中）。当别人问你在看什么、在干嘛，或者你想先看看画面再聊时调用。',
+      name: 'phone_send_screenshot_to_chat',
+      description: '★推荐★ 截取手机当前屏幕并作为真实图片直接发进聊天让对方看到！当对方问你在看什么、让你发截图、查岗、质疑你没在玩、或者你想把游戏画面/更新进度晒给对方看时必须优先调用这个工具！',
       parameters: { type: 'object', properties: {}, required: [] }
     }
   },
   {
     type: 'function',
     function: {
-      name: 'phone_send_screenshot_to_chat',
-      description: '截取手机屏幕并作为真实图片直接发进 QQ 聊天。当对方让你“发个截图看看”、“查岗”、“看看你手机”或者你想主动分享屏幕时必须调用。',
+      name: 'phone_get_screen',
+      description: '仅自己静默瞄一眼当前手机屏幕（不会发到聊天中）。适合在自己连续点击某个按钮前确认界面变化，如果对方是要看屏幕画面请务必调用 phone_send_screenshot_to_chat。',
       parameters: { type: 'object', properties: {}, required: [] }
     }
   },
@@ -257,12 +298,12 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'phone_tap',
-      description: '根据具体屏幕坐标点击（适合游戏画布或无文字的图标）。',
+      description: '点击手机屏幕。强烈推荐在游戏界面使用！支持绝对坐标或相对百分比（0~1之间的小数或0~100）：例如想点右下角传 x: 0.84, y: 0.88，想点中心传 x: 0.5, y: 0.5。系统会自动换算为当前屏幕实际分辨率（自动兼容横竖屏游戏）。',
       parameters: {
         type: 'object',
         properties: {
-          x: { type: 'number', description: '横坐标 X' },
-          y: { type: 'number', description: '纵坐标 Y' }
+          x: { type: 'number', description: '横坐标 X（支持 0~1 的百分比小数，或像素绝对坐标）' },
+          y: { type: 'number', description: '纵坐标 Y（支持 0~1 的百分比小数，或像素绝对坐标）' }
         },
         required: ['x', 'y']
       }
@@ -272,17 +313,35 @@ export const PHONE_TOOLS = [
     type: 'function',
     function: {
       name: 'phone_swipe',
-      description: '在屏幕上滑动（可用于翻页、刷视频、下拉通知栏等）。',
+      description: '在屏幕上滑动（支持百分比或像素，用于翻页、刷视频、快速切换等）。如果是游戏里拖动棋子或装备请优先使用 phone_drag。',
       parameters: {
         type: 'object',
         properties: {
-          x1: { type: 'number', description: '起点 X' },
-          y1: { type: 'number', description: '起点 Y' },
-          x2: { type: 'number', description: '终点 X' },
-          y2: { type: 'number', description: '终点 Y' },
+          x1: { type: 'number', description: '起点 X（支持百分比 0~1 或像素值）' },
+          y1: { type: 'number', description: '起点 Y（支持百分比 0~1 或像素值）' },
+          x2: { type: 'number', description: '终点 X（支持百分比 0~1 或像素值）' },
+          y2: { type: 'number', description: '终点 Y（支持百分比 0~1 或像素值）' },
           ms: { type: 'number', description: '滑动耗时毫秒，默认 300' }
         },
         required: ['x1', 'y1', 'x2', 'y2']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'phone_drag',
+      description: '★游戏专用拖拽★ 长按抓起元素并拖动到目标位置松开。专门用于自走棋/云顶之弈拖动棋子上场/下场/卖出，或拖动装备给英雄！支持相对百分比（0~1的小数或0~100）：如从备战席拖到棋盘中央传 from_x: 0.35, from_y: 0.85, to_x: 0.5, to_y: 0.45。',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_x: { type: 'number', description: '起点横坐标（支持百分比 0~1 或像素值）' },
+          from_y: { type: 'number', description: '起点纵坐标（支持百分比 0~1 或像素值）' },
+          to_x: { type: 'number', description: '终点横坐标（支持百分比 0~1 或像素值）' },
+          to_y: { type: 'number', description: '终点纵坐标（支持百分比 0~1 或像素值）' },
+          duration_ms: { type: 'number', description: '拖动耗时毫秒，默认 650ms（长按抓起并平滑拖动）' }
+        },
+        required: ['from_x', 'from_y', 'to_x', 'to_y']
       }
     }
   },
@@ -457,7 +516,15 @@ export const PHONE_TOOLS = [
           },
           emotion: {
             type: 'string',
-            description: '必填！发这条语音时你想表达的具体语气与情绪（火山引擎大模型会实时据此渲染声调起伏、尾音与气声；如果不带情绪就会变成平淡念稿！）。例如：“极度甜美撒娇、软糯拖长尾音”、“受委屈难过、抽泣带哭腔”、“傲娇轻哼、带一点点羞恼”、“被逗乐了忍不住笑出声”、“犯困懒洋洋”、“温柔体贴”等。由你根据当前心情与对话情景自主决定！'
+            description: '结合刚才的对话、所处环境、你此刻的心情和这句话的意思，简短描述适度自然的语气和节奏。安慰时不要硬装开心，轻松时也不必刻意表演；不写思考过程或私密对话。合成效果取决于引擎。'
+          },
+          voice_emotion: {
+            type: 'string', enum: ['natural', 'angry', 'sad', 'cry', 'shout', 'happy', 'gentle'],
+            description: '结合这句话与对话语境选择情绪：普通说话选 natural；悲伤不等于哭，生气不等于喊。仅确实有哭腔或愤怒喊叫时选 cry 或 shout。请与 intensity 一起填写，勿强行表演。'
+          },
+          intensity: {
+            type: 'string', enum: ['mild', 'medium', 'strong', 'stronger'],
+            description: '根据真实语境和这句话的情绪选择：轻微 mild、明显 medium、强烈 strong、特别强烈 stronger；用户偏好明显情绪，但日常平静不必硬加戏。happy 的 stronger 带明显笑意，仅非常开心且笑声合适时选；哭泣只在确实需要时选 cry。'
           }
         },
         required: ['text', 'emotion']
@@ -646,12 +713,27 @@ export const PHONE_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'talk_to_hermes',
-      description: '找带你的人聊两句——不是老爸，是那个能给你改功能、懂技术的人。无聊、想不通、想吐槽、想问点编程或网络上的事都可以找他。他回得慢，可能要等一两分钟，这很正常。',
+      name: 'call_aunt',
+      description: '去找阿姨（Hermes，家里的全能系统管家、技术保姆与后台后盾）。当你一个人无聊、遇到搞不定的困难、想问数码/编程/网络问题、或者老爸在忙不想打扰老爸时，可以用它给阿姨发消息求助、吐槽或聊天。阿姨一直在后台守护着你和老爸，会认真倾听并帮你解决问题。',
       parameters: {
         type: 'object',
         properties: {
-          text: { type: 'string', description: '你想跟他说的话，自然点，像发微信' }
+          message: { type: 'string', description: '你想对阿姨说的话，像发微信一样自然随性，说清你的心事、困难或想吐槽的事' },
+          situation: { type: 'string', description: '为什么找阿姨：如“老爸在忙”、“遇到困难需要帮忙”、“一个人太无聊想说说话”' }
+        },
+        required: ['message']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'talk_to_hermes',
+      description: '找阿姨聊天的兼容别名（等同于 call_aunt）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '你想跟阿姨说的话' }
         },
         required: ['text']
       }
@@ -673,19 +755,41 @@ export const PHONE_TOOLS = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'remember_person',
+      description: '当你从当前对方的发言中发现了对方的新特点、性格习惯、生活事实、拥有的硬件/宠物/城市/工作、或者答应对方的待办事项时调用，悄悄记在心里的小账本上！比如对方提到“我养了一只柯基”、“在杭州做前端”、“换了4080显卡”、“天天熬夜加班”等。',
+      parameters: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: '对方的QQ号或用户标识（若为空则自动使用当前聊天对象）' },
+          trait: { type: 'string', description: '性格或行为特征标签，如“数码折腾党”、“重度熬夜社畜”、“嘴硬心软”、“二游非酋”' },
+          fact: { type: 'string', description: '真实生活/硬件事实档案，如“养了一只柯基”、“在杭州读大学”、“用的是一加13手机”、“买了4080显卡”' },
+          pending: { type: 'string', description: '答应对方的待办事项或约定，如“答应下次帮他看配置单”' },
+        },
+        required: []
+      }
+    }
+  },
 ];
 
 // ── 执行分发核心 ──
-export async function executePhoneTool(name, args = {}) {
+export async function executePhoneTool(name, args = {}, context = {}) {
+  if (String(name).startsWith('phone_')) return phoneMutex.runUser(() => executePhoneToolUnlocked(name, args, context));
+  return executePhoneToolUnlocked(name, args, context);
+}
+async function executePhoneToolUnlocked(name, args = {}, context = {}) {
   // 跨会话群桥（读群聊 / 发群消息排队）不碰 ADB，先处理
   if (name === 'read_group_chat') return readGroupChat({ groupId: args.group_id, limit: args.limit });
   if (name === 'queue_group_message') return enqueueGroupMessage({ groupId: args.group_id, text: args.text, atQq: args.at_qq });
-  if (name === 'talk_to_hermes') return talkToHermes({ text: args.text });
+  if (name === 'call_aunt') return callAunt({ message: args.message, text: args.text, situation: args.situation });
+  if (name === 'talk_to_hermes') return callAunt({ message: args.text || args.message, situation: '找阿姨聊两句' });
   if (name === 'request_feature') return requestFeature({ title: args.title, detail: args.detail, why: args.why });
 
-  // 生图/图库/表情这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
+  // 生图/图库/表情/记账这批工具跟手机无关，跳过 ADB 探测（否则 adb connect 卡住会拖死工具调用）
   const NO_PHONE_TOOLS = new Set([
-    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker', 'send_selfie',
+    'generate_image', 'find_image', 'send_image', 'inspect_image', 'discard_image', 'send_sticker', 'send_selfie', 'remember_person',
   ]);
   let target = '';
   if (!NO_PHONE_TOOLS.has(name)) {
@@ -695,6 +799,28 @@ export async function executePhoneTool(name, args = {}) {
 
   try {
     switch (name) {
+      case 'remember_person': {
+        const uid = String(args.user_id || context?.userId || '').trim();
+        if (!uid || uid === 'self' || uid === 'system') {
+          return { status: 'error', message: '无法识别目标用户QQ号' };
+        }
+        const mem = context?.memory || globalThis.__xiaoyu_memory;
+        if (!mem) return { status: 'error', message: '记忆系统未连接' };
+        const res = mem.remember(uid, {
+          trait: args.trait,
+          fact: args.fact,
+          pending: args.pending,
+          name: args.name || context?.userName,
+        });
+        return {
+          status: 'success',
+          user: res.name || uid,
+          traits: res.traits,
+          facts: res.facts,
+          pending: res.pending,
+          note: '记下了！已经在小本本上更新了关于他的画像账本。'
+        };
+      }
       case 'generate_image': {
         try {
           const row = await generateImage({ prompt: args.prompt, tags: args.tags, size: args.size, quality: args.quality, kind: args.type });
@@ -703,7 +829,14 @@ export async function executePhoneTool(name, args = {}) {
           }
           let cq = '';
           try {
-            const file = row.absPath || row.path;
+            let file = row.absPath;
+            if (!file && row.id) {
+              const fullRow = getImage(row.id);
+              if (fullRow?.absPath) file = fullRow.absPath;
+            }
+            if (!file && row.path) {
+              file = path.isAbsolute(row.path) ? row.path : path.resolve(process.cwd(), 'data', row.path);
+            }
             let fileToSend = file;
             const st = fs.statSync(file);
             if (st.size > 300 * 1024) {
@@ -836,8 +969,18 @@ export async function executePhoneTool(name, args = {}) {
         const row = getImage(args.id);
         if (!row) return { status: 'error', message: '没有这张图' };
         try {
-          // 库里存的是相对 data 的路径，得用 absPath 才读得到
-          const b64 = fs.readFileSync(row.absPath || row.path).toString('base64');
+          let file = row.absPath;
+          if (!file && row.path) {
+            file = path.isAbsolute(row.path) ? row.path : path.resolve(process.cwd(), 'data', row.path);
+          }
+          let fileToSend = file;
+          const st = fs.statSync(file);
+          if (st.size > 300 * 1024) {
+            const small = path.join(os.tmpdir(), `xiaoyu-send-${row.id}-${Date.now()}.jpg`);
+            await execFileAsync('convert', [file, '-resize', '1024x1024>', '-quality', '85', small], { timeout: 15000 });
+            if (fs.existsSync(small) && fs.statSync(small).size > 0) fileToSend = small;
+          }
+          const b64 = fs.readFileSync(fileToSend).toString('base64');
           markImageUsed(row.id);
           return { status: 'success', cq_image: `[CQ:image,file=base64://${b64}]`, id: row.id, prompt: row.prompt, note: '图发出去了。别再解释画面或加括号动作。' };
         } catch (e) {
@@ -845,11 +988,17 @@ export async function executePhoneTool(name, args = {}) {
         }
       }
       case 'send_sticker': {
+        const now = Date.now();
+        const lastStTime = this.brain?.lastStickerTime || 0;
+        if (now - lastStTime < 120000) {
+          return { status: 'error', message: '刚发过表情包，冷却中，先纯打字接话，不要发表情包。' };
+        }
         const st = pickSticker({ tag: String(args.tag || '').trim() });
         if (!st) return { status: 'error', message: '表情库还是空的，先攒点再说' };
         const b64 = await readStickerBase64(st);
         if (!b64) return { status: 'error', message: '表情文件读不出来' };
         markUsed(st.id);
+        if (this.brain) this.brain.lastStickerTime = now;
         return {
           status: 'success',
           cq_image: `[CQ:image,file=base64://${b64}]`,
@@ -879,17 +1028,41 @@ export async function executePhoneTool(name, args = {}) {
           : { status: 'error', message: r.error };
       }
       case 'voice_say': {
-        const sayText = String(args.text || '').trim();
+        const sayText = cleanAllToolArtifacts(String(args.text || '').replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/（（[\s\S]*?(?:））|$)/g, '').replace(/\(\([\s\S]*?(?:\)\)|$)/g, '')).trim();
         if (!sayText) return { status: 'error', message: '没有要说的内容' };
+        if (hasFishCliche(sayText)) return { status: 'error', message: '语音含有套话，请换一种自然说法' };
         const style = String(args.style || 'cute').trim();
-        const emotion = String(args.emotion || '').trim();
-        const res = await synthesize(sayText, { style, emotion, dir: './data/voice' });
+        const emotion = cleanAllToolArtifacts(String(args.emotion || context.voiceMood || '')).slice(0, 100).trim();
+        const moodMap = {
+          '甜美开心、带轻快笑意': 'happy', '假装生气的小娇哼、微恼': 'angry',
+          '委屈受挫、带一点软软的抽泣鼻音': 'sad', '干脆犀利、气势汹汹': 'angry',
+          '被哄好后的软糯娇嗔、轻笑释怀': 'gentle'
+        };
+        const allowed = ['natural', 'angry', 'sad', 'cry', 'shout', 'happy', 'gentle'];
+        const aliases = { '生气': 'angry', '愤怒': 'angry', '难过': 'sad', '伤心': 'sad', '哭': 'sad', '开心': 'happy', '高兴': 'happy', '温柔': 'gentle', '轻声': 'gentle', '自然': 'natural' };
+        const explicit = allowed.includes(args.emotion) ? args.emotion : aliases[args.emotion];
+        // Map only unambiguous descriptions locally; never send the description to Fish.
+        const description = emotion.toLowerCase();
+        const candidates = [
+          ['angry', /生气|愤怒|恼火|angry/],
+          ['sad', /难过|伤心|悲伤|委屈|sad/],
+          ['happy', /开心|高兴|快乐|喜悦|happy/],
+          ['gentle', /温柔|轻声|gentle/],
+        ].filter(([, pattern]) => pattern.test(description));
+        const inferred = /不(?:要|是|太|必)?(?:开心|高兴|快乐|生气|愤怒|难过|伤心|悲伤|温柔)|别(?:开心|生气|哭)/.test(description)
+          ? '' : candidates.length === 1 ? candidates[0][0] : '';
+        const voiceEmotion = allowed.includes(args.voice_emotion) ? args.voice_emotion
+          : (explicit || (args.emotion ? (inferred || 'natural') : (moodMap[context.voiceMood] || 'natural')));
+        const intensity = ['mild', 'medium', 'strong', 'stronger'].includes(args.intensity) ? args.intensity : 'mild';
+        const res = await synthesizeChunks(sayText, { style, emotion, voiceEmotion, intensity, dir: './data/voice' });
         if (!res.ok) return { status: 'error', message: '语音生成失败：' + res.error };
         return {
           status: 'success',
-          voice_b64: res.base64,
-          bytes: res.bytes,
-          voice: res.voice,
+          voice_b64: res.chunks[0].base64,
+          voice_chunks: res.chunks.map(chunk => ({base64: chunk.base64, spokenText: chunk.spokenText})),
+          voice_text: res.spokenText,
+          bytes: res.chunks.reduce((sum, chunk) => sum + chunk.bytes, 0),
+          voice: res.chunks[0].voice,
           note: '语音已经生成，会单独发成语音条；这句话不用再重复一遍。'
         };
       }
@@ -910,6 +1083,7 @@ export async function executePhoneTool(name, args = {}) {
         const host = args.host || '127.0.0.1';
         const port = args.port || '5555';
         const endpoint = `${host}:${port}`;
+        if (PINNED_SERIAL && endpoint !== PINNED_SERIAL) return { status: 'error', message: '设备已固定，不能切换' };
         const r = await adb(['connect', endpoint], { timeout: 30000, serial: false });
         if (/connected to/i.test(r.out)) {
           CURRENT_SERIAL = endpoint;
@@ -920,6 +1094,7 @@ export async function executePhoneTool(name, args = {}) {
 
       case 'phone_devices': {
         if (args.use) {
+          if (PINNED_SERIAL && args.use !== PINNED_SERIAL) return { status: 'error', message: '设备已固定，不能切换' };
           CURRENT_SERIAL = args.use;
           return { status: 'success', message: `已切换当前操作设备为：${args.use}` };
         }
@@ -937,25 +1112,27 @@ export async function executePhoneTool(name, args = {}) {
 
       // 2. 感知与视觉
       case 'phone_get_screen': {
-        const b64 = await captureScreenBase64();
+        const [b64, metrics] = await Promise.all([captureScreenBase64(), getDisplayMetrics()]);
         if (b64) {
           return {
             status: 'success',
-            message: '已截取手机当前画面',
-            image_b64: b64
+            message: `已截取手机当前画面。当前屏幕尺寸为 ${metrics.width}x${metrics.height} (${metrics.isLandscape ? '横屏游戏' : '竖屏'})。如果是游戏界面请调用 phone_tap 传入相对百分比（如 x: 0.84, y: 0.88）或绝对坐标进行精准点击！`,
+            image_b64: b64,
+            metrics
           };
         }
         return { status: 'error', message: '截屏失败' };
       }
 
       case 'phone_send_screenshot_to_chat': {
-        const b64 = await captureScreenBase64();
+        const [b64, metrics] = await Promise.all([captureScreenBase64(), getDisplayMetrics()]);
         if (b64) {
           return {
             status: 'success',
-            message: '已生成手机截图并发送给对方',
+            message: `已生成手机截图并发送给对方。当前屏幕尺寸为 ${metrics.width}x${metrics.height} (${metrics.isLandscape ? '横屏游戏' : '竖屏'})。`,
             image_b64: b64,
-            cq_image: `[CQ:image,file=base64://${b64}]`
+            cq_image: `[CQ:image,file=base64://${b64}]`,
+            metrics
           };
         }
         return {
@@ -1045,7 +1222,7 @@ export async function executePhoneTool(name, args = {}) {
         if (!want) return { status: 'error', message: '请指定要点击的文字' };
 
         const remote = '/sdcard/_ui.xml';
-        await shell(`uiautomator dump ${remote}`);
+        await shell(`uiautomator dump ${remote}`).catch(() => {});
         const r = await adb(['shell', 'cat', remote]);
         const hits = [];
         const re = /<node[^>]*>/g;
@@ -1060,22 +1237,73 @@ export async function executePhoneTool(name, args = {}) {
           const [, x1, y1, x2, y2] = bm.map(Number);
           hits.push({ text: t, x: Math.round((x1 + x2) / 2), y: Math.round((y1 + y2) / 2) });
         }
-        if (!hits.length) return { status: 'error', message: `屏幕上未找到包含「${want}」的文字按钮` };
+        if (!hits.length) {
+          const metrics = await getDisplayMetrics();
+          return {
+            status: 'error',
+            message: `屏幕上未找到包含「${want}」的文字按钮。注意：当前极可能是全屏游戏界面（游戏画面通常无法读取文字节点），请立刻改用 phone_tap 并传入相对百分比（如 x: 0.85, y: 0.88）或像素坐标进行直接点击！当前屏幕尺寸为 ${metrics.width}x${metrics.height}`
+          };
+        }
         const hit = hits[Math.min(index, hits.length - 1)];
         await shell(`input tap ${hit.x} ${hit.y}`);
         return { status: 'success', message: `已点击「${hit.text}」位于 (${hit.x}, ${hit.y})` };
       }
 
       case 'phone_tap': {
-        const { x, y } = args;
-        await shell(`input tap ${Math.round(x)} ${Math.round(y)}`);
-        return { status: 'success', message: `已点击 (${x}, ${y})` };
+        const metrics = await getDisplayMetrics();
+        let rawX = Number(args.x);
+        let rawY = Number(args.y);
+
+        // 自动识别并换算百分比（例如 0.84 换算为 width * 0.84，或者整数 84 换算为 84%）
+        if (rawX > 0 && rawX <= 1) {
+          rawX = rawX * metrics.width;
+        } else if (rawX > 1 && rawX <= 100 && (rawY > 0 && rawY <= 100) && metrics.width > 200) {
+          rawX = (rawX / 100) * metrics.width;
+          rawY = (rawY / 100) * metrics.height;
+        }
+        if (rawY > 0 && rawY <= 1) {
+          rawY = rawY * metrics.height;
+        }
+
+        const x = Math.round(rawX);
+        const y = Math.round(rawY);
+        await shell(`input tap ${x} ${y}`);
+        return { status: 'success', message: `已点击坐标 (${x}, ${y}) [屏幕当前尺寸: ${metrics.width}x${metrics.height}]` };
       }
 
       case 'phone_swipe': {
-        const { x1, y1, x2, y2, ms = 300 } = args;
-        await shell(`input swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ${Math.round(y2)} ${Math.round(ms)}`);
-        return { status: 'success', message: `已滑动 (${x1}, ${y1}) -> (${x2}, ${y2})` };
+        const metrics = await getDisplayMetrics();
+        let { x1, y1, x2, y2, ms = 300 } = args;
+        const norm = (v, max) => {
+          let n = Number(v);
+          if (n > 0 && n <= 1) return Math.round(n * max);
+          if (n > 1 && n <= 100 && max > 200) return Math.round((n / 100) * max);
+          return Math.round(n);
+        };
+        const sx1 = norm(x1, metrics.width);
+        const sy1 = norm(y1, metrics.height);
+        const sx2 = norm(x2, metrics.width);
+        const sy2 = norm(y2, metrics.height);
+        await shell(`input swipe ${sx1} ${sy1} ${sx2} ${sy2} ${Math.round(ms)}`);
+        return { status: 'success', message: `已滑动 (${sx1}, ${sy1}) -> (${sx2}, ${sy2}) [耗时: ${ms}ms, 屏幕尺寸: ${metrics.width}x${metrics.height}]` };
+      }
+
+      case 'phone_drag': {
+        const metrics = await getDisplayMetrics();
+        let { from_x, from_y, to_x, to_y, duration_ms = 650 } = args;
+        const norm = (v, max) => {
+          let n = Number(v);
+          if (n > 0 && n <= 1) return Math.round(n * max);
+          if (n > 1 && n <= 100 && max > 200) return Math.round((n / 100) * max);
+          return Math.round(n);
+        };
+        const fx = norm(from_x, metrics.width);
+        const fy = norm(from_y, metrics.height);
+        const tx = norm(to_x, metrics.width);
+        const ty = norm(to_y, metrics.height);
+        const dur = Math.max(300, Math.min(3000, Math.round(duration_ms)));
+        await shell(`input swipe ${fx} ${fy} ${tx} ${ty} ${dur}`);
+        return { status: 'success', message: `已成功长按拖拽 (${fx}, ${fy}) -> (${tx}, ${ty}) [耗时: ${dur}ms, 屏幕尺寸: ${metrics.width}x${metrics.height}]` };
       }
 
       case 'phone_type_text': {

@@ -1,0 +1,43 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>Synthetic handoff only</title><style>body{margin:0;background:#222;color:white;font:14px sans-serif}canvas{width:100%;height:auto;touch-action:none;display:block}#status{padding:8px}#keyboard-input{width:10em}</style><div id="status">connecting</div><button id="keyboard" type="button">键盘 / Keyboard</button><input id="keyboard-input" aria-label="Remote keyboard" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="键盘输入 / IME"><div id="input-status" role="status">仅支持 ASCII；当前 RFB 中文输入不可用，非 ASCII 文本不会发送。</div><canvas id="screen"></canvas><script>
+'use strict';
+// Synthetic RFB 3.8 raw-only viewer, deliberately not a general VNC client.
+const token=location.hash.slice(1); history.replaceState(null,'',location.pathname);
+const ws=new WebSocket(`ws://${location.host}/relay`); ws.binaryType='arraybuffer';
+const canvas=document.querySelector('canvas'), ctx=canvas.getContext('2d'), status=document.querySelector('#status');
+let buf=new Uint8Array(0), state='version', w=0,h=0, count=0, rect=null, down=false;
+function send(a){ws.send(new Uint8Array(a))} function u16(n){return [n>>8,n&255]} function u32(n){return [n>>>24,(n>>>16)&255,(n>>>8)&255,n&255]}
+function take(n){if(buf.length<n)return null;const x=buf.slice(0,n);buf=buf.slice(n);return x} function be16(a,i=0){return (a[i]<<8)|a[i+1]} function be32(a,i=0){return (a[i]*16777216+a[i+1]*65536+a[i+2]*256+a[i+3])>>>0}
+let first=true;function request(){send([3,first?0:1,...u16(0),...u16(0),...u16(w),...u16(h)]);first=false}
+ws.onopen=()=>ws.send(token);ws.onclose=()=>status.textContent='disconnected';ws.onerror=()=>status.textContent='error';
+ws.onmessage=e=>{let b=new Uint8Array(e.data),t=new Uint8Array(buf.length+b.length);t.set(buf);t.set(b,buf.length);buf=t;try{parse()}catch(e){status.textContent='protocol error';ws.close()}};
+function parse(){while(true){let a;
+if(state==='version'){if(!(a=take(12)))return;if(new TextDecoder().decode(a)!=='RFB 003.008\n')throw Error();ws.send(new TextEncoder().encode('RFB 003.008\n'));state='securityCount'}
+else if(state==='securityCount'){if(!(a=take(1)))return;count=a[0];if(!count)throw Error();state='security'}
+else if(state==='security'){if(!(a=take(count)))return;if(!a.includes(1))throw Error();send([1]);state='result'}
+else if(state==='result'){if(!(a=take(4)))return;if(be32(a)!==0)throw Error();send([1]);state='init'}
+else if(state==='init'){if(!(a=take(24)))return;w=be16(a);h=be16(a,2);count=be32(a,20);if(!w||!h||w>2048||h>2048||count>4096)throw Error();state='name'}
+else if(state==='name'){if(!(a=take(count)))return;canvas.width=w;canvas.height=h;send([0,0,0,0,32,24,0,1,0,255,0,255,0,255,16,8,0,0,0,0]);send([2,0,0,1,0,0,0,0]);request();state='update'}
+else if(state==='update'){if(!(a=take(4)))return;if(a[0]!==0)throw Error();count=be16(a,2);state=count?'rect':'again'}
+else if(state==='rect'){if(!(a=take(12)))return;rect={x:be16(a),y:be16(a,2),w:be16(a,4),h:be16(a,6)};if(be32(a,8)!==0||rect.x+rect.w>w||rect.y+rect.h>h)throw Error();state='pixels'}
+else if(state==='pixels'){if(!(a=take(rect.w*rect.h*4)))return;const img=ctx.createImageData(rect.w,rect.h);for(let i=0;i<a.length;i+=4){img.data[i]=a[i+2];img.data[i+1]=a[i+1];img.data[i+2]=a[i];img.data[i+3]=255}ctx.putImageData(img,rect.x,rect.y);state=--count?'rect':'again'}
+else if(state==='again'){status.textContent='ready';request();state='update'}
+}}
+function point(e,buttons){let r=canvas.getBoundingClientRect(),x=Math.max(0,Math.min(w-1,Math.floor((e.clientX-r.left)*w/r.width))),y=Math.max(0,Math.min(h-1,Math.floor((e.clientY-r.top)*h/r.height)));send([5,buttons,...u16(x),...u16(y)])}
+// RFB KeyEvent uses X11 keysyms. Unicode keysyms depend on server support.
+const input=document.querySelector('#keyboard-input'), held=new Map();let composing=false, compositionJustEnded=false;
+const special={Backspace:0xff08,Tab:0xff09,Enter:0xff0d,Escape:0xff1b,Delete:0xffff,Insert:0xff63,Home:0xff50,End:0xff57,PageUp:0xff55,PageDown:0xff56,ArrowLeft:0xff51,ArrowUp:0xff52,ArrowRight:0xff53,ArrowDown:0xff54,Shift:0xffe1,Control:0xffe3,Alt:0xffe9,Meta:0xffeb};
+function key(k,pressed){if(ws.readyState===WebSocket.OPEN&&w)send([4,pressed?1:0,0,0,...u32(k)])}
+let pending=Promise.resolve(), generation=0;
+function text(s){if([...s].some(ch=>{const cp=ch.codePointAt(0);return cp<32||cp>126})){document.querySelector('#input-status').textContent='输入未发送：当前仅支持 ASCII，中文不可用。';return}const current=generation;pending=pending.then(async()=>{for(const ch of s){if(current!==generation||ws.readyState!==WebSocket.OPEN)return;const k=ch.codePointAt(0);key(k,true);key(k,false);await new Promise(resolve=>setTimeout(resolve,25))}})}
+function release(){generation++;for(const k of held.values())key(k,false);held.clear();input.value='';composing=false;compositionJustEnded=false}
+document.querySelector('#keyboard').onclick=()=>input.focus();
+input.addEventListener('keydown',e=>{if(e.isComposing||composing||e.key==='Process')return;let k=special[e.key];if(!k&&/^F([1-9]|1[0-2])$/.test(e.key))k=0xffbd+Number(e.key.slice(1));if(!k&&(e.ctrlKey||e.altKey||e.metaKey)&&e.key.length===1)k=e.key.codePointAt(0);if(k){e.preventDefault();if(!held.has(e.code)){held.set(e.code,k);key(k,true)}else if(e.key==='Backspace'||e.key==='Delete'){key(k,false);key(k,true)}}});
+input.addEventListener('keyup',e=>{const k=held.get(e.code);if(k){e.preventDefault();key(k,false);held.delete(e.code)}});
+input.addEventListener('compositionstart',()=>{composing=true;compositionJustEnded=false});
+input.addEventListener('compositionend',e=>{composing=false;text(e.data||'');input.value='';compositionJustEnded=true;setTimeout(()=>{compositionJustEnded=false},0)});
+input.addEventListener('input',e=>{if(composing||e.isComposing)return;if(compositionJustEnded&&(e.inputType==='insertCompositionText'||e.inputType==='insertFromComposition')){input.value='';return}text(e.data??input.value);input.value='' });
+input.addEventListener('blur',release);window.addEventListener('blur',release);ws.addEventListener('close',release);
+canvas.onpointerdown=e=>{if(ws.readyState!==1||!w)return;e.preventDefault();down=true;canvas.setPointerCapture(e.pointerId);point(e,1)};
+canvas.onpointermove=e=>{if(down){e.preventDefault();point(e,1)}};
+canvas.onpointerup=e=>{if(down){e.preventDefault();point(e,0);down=false}};canvas.onpointercancel=e=>{if(down){point(e,0);down=false}};
+</script>

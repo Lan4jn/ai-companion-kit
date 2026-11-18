@@ -17,12 +17,20 @@
  * 5. HUD 实时对话卡片：保持与 QQ 和后台动作实时 SSE 同步（打字机/渐变气泡、呼吸灯、状态标签）。
  */
 import http from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLatestScreenBuffer, getObserverStatus, frameBus } from './browser-observer.js';
 import { getDouyinLivingStatus } from './douyin-living.js';
 import { DEV_PAGE, CHAT_PAGE, listRequests, reviewRequest, listChat, triggerDev } from './dev-channel.js';
+import { handlePanelRequest } from '../scripts/panel.mjs';
+import { isPrivateLoginRequest } from './room-login-security.js';
+import { isRoomRequestAllowed } from './room-cross-site-security.js';
+import { LOGIN_PAGE } from './room-login-page.js';
+import { createDouyinHandoffServiceCandidate } from './douyin-handoff-service-candidate.js';
+import { getBiliLoginCredentials, setBiliLoginCredentials } from './bili-living.js';
+import { renderDiaryViewerHtml, listAllDiaries, generateDailyDiary } from './diary-system.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -525,6 +533,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     <div class="actions-bar">
       <button class="act-btn" onclick="triggerAction('bed')">躺平看手机</button>
       <button class="act-btn" onclick="triggerAction('desk')">去书桌工作</button>
+      <a href="/login" style="color:#93c5fd">平台登录状态与扫码</a>
       <button class="act-btn" onclick="triggerAction('douyin')">去电脑前刷抖音</button>
       <button class="act-btn" onclick="triggerAction('sit')">坐在床沿发呆</button>
       <button class="act-btn" onclick="triggerAction('sleep')">闭眼入睡</button>
@@ -1042,9 +1051,29 @@ export function startVirtualRoomServer({
   transitionMs = 2000,
   douyinLiving = null,
   getDouyinStatus = null,
+  respectGuard = null,
+  getBridgeStatus = null,
+  brain = null,
+  accessToken = undefined,
+  douyinHandoff = false,
+  // In-process synthetic fixture only; never populated from HTTP or config data.
+  douyinHandoffCandidate = null,
+  // Optional in-process capability; never accept a provider from HTTP input.
+  tiebaLoginProvider = null,
 } = {}) {
+  if (accessToken !== undefined && (typeof accessToken !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(accessToken))) {
+    throw new Error('accessToken must contain 32-256 URL-safe characters');
+  }
+  const accessDigest = accessToken === undefined ? null : createHash('sha256').update(`room:${accessToken}`).digest();
   const effectiveAssetsDir = assetsDir || DEFAULT_ASSETS_DIR;
   const effectiveDataDir = dataDir || DEFAULT_DATA_DIR;
+  const effectiveBrain = brain;
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(effectiveDataDir, 'bili-login-credentials.json'), 'utf8'));
+    if (saved?.sessdata && saved?.bili_jct) setBiliLoginCredentials(saved);
+  } catch {}
+  const handoffCandidate = createDouyinHandoffServiceCandidate({enabled:douyinHandoff === true, accessToken, launcher:douyinHandoffCandidate?.launcher, loginOptions:{dataDir: effectiveDataDir, getBiliCredentials: getBiliLoginCredentials, setBiliCredentials: setBiliLoginCredentials}});
+  const {service: loginService, bridge: handoff} = handoffCandidate;
 
   let curState = {
     version: 1,
@@ -1060,6 +1089,7 @@ export function startVirtualRoomServer({
   let transitionTimer = null;
   let transitionGeneration = 0;
   let isStopped = false;
+  const roomBrowseTasks = new Set();
 
   let crawlInitialAction = '';
   let crawlInitialMessage = '';
@@ -1183,6 +1213,84 @@ export function startVirtualRoomServer({
       return;
     }
 
+    if (!isRoomRequestAllowed(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('Forbidden');
+      return;
+    }
+    if (accessDigest) {
+      const authHeaders = req.rawHeaders.filter((v, i) => i % 2 === 0 && v.toLowerCase() === 'authorization');
+      const header = req.headers.authorization || '';
+      const match = /^Basic +([A-Za-z0-9+/]+={0,2})$/i.exec(header);
+      const supplied = match ? Buffer.from(match[1], 'base64') : Buffer.alloc(0);
+      const digest = createHash('sha256').update(supplied).digest();
+      if (authHeaders.length !== 1 || !timingSafeEqual(digest, accessDigest)) {
+        res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Companion Room", charset="UTF-8"', 'Cache-Control': 'no-store' });
+        res.end('Authentication required');
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+    }
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+
+    if (handoff.handle(req, res)) return;
+
+    // Legacy public login endpoints are permanently disabled, including static copies.
+    let decodedPath = '';
+    try { decodedPath = decodeURIComponent(url.pathname); } catch {}
+    if (url.pathname === '/qrcode' || url.pathname.startsWith('/api/douyin/') || /\/douyin_qr_live\.png$/i.test(decodedPath)) {
+      res.writeHead(404, {'Cache-Control':'no-store'}); res.end(); return;
+    }
+    if (url.pathname === '/login' || url.pathname.startsWith('/api/account/')) {
+      res.setHeader('Cache-Control','no-store');
+      res.setHeader('X-Content-Type-Options','nosniff');
+      res.setHeader('Referrer-Policy','no-referrer');
+      if (!isPrivateLoginRequest(req)) { res.writeHead(403); res.end(); return; }
+      if (url.pathname === '/login' && req.method === 'GET') {
+        res.writeHead(200, {'Content-Type':'text/html; charset=utf-8', 'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"});
+        res.end(tiebaLoginProvider ? LOGIN_PAGE.replace('<p>小鱼贴吧账号尚未接入；此入口仅打开百度官方登录页，不会同步或保存登录状态到小鱼，也无法确认登录是否成功。请只在百度官方页面操作，勿在此页面或聊天中提供二维码、密码或验证码。</p>', '<p>主人接管需要另行注入隔离会话及人工操作通道；下方官方链接不会共享会话。仅在接管通道内操作，勿在此页面或聊天中提供密码、验证码或 Cookie。</p>').replace('</section><script>', '<p id="tieba" role="status">状态未知</p><button id="tieba-start" onclick="startTieba()">我确认，发起贴吧登录</button><button id="tieba-refresh" onclick="statusTieba()">刷新状态</button><button id="tieba-cancel" onclick="cancelTieba()">结束本地会话</button></section><script>') .replace("status('bili');status('douyin');", "let tiebaVersion=0;async function cancelTieba(){++tiebaVersion;document.getElementById('tieba').textContent=labels.unknown;try{const r=await apiFetch('/api/account/tieba/cancel',{method:'POST'});if(!r.ok)throw Error()}catch{}}async function statusTieba(){const version=tiebaVersion;try{const r=await apiFetch('/api/account/tieba/status',{cache:'no-store'});if(!r.ok)throw Error();const j=await r.json();if(version===tiebaVersion)document.getElementById('tieba').textContent=labels[j.state]||labels.unknown}catch{if(version===tiebaVersion)document.getElementById('tieba').textContent=labels.unknown}}async function startTieba(){if(!confirm('确认由本人操作登录？'))return;const version=++tiebaVersion;document.getElementById('tieba-start').disabled=true;try{const r=await apiFetch('/api/account/tieba/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const j=await r.json();if(version===tiebaVersion)document.getElementById('tieba').textContent=labels[j.state]||labels.unknown}catch{if(version===tiebaVersion)document.getElementById('tieba').textContent=labels.unknown}finally{document.getElementById('tieba-start').disabled=false}}statusTieba();status('bili');status('douyin');") : LOGIN_PAGE); return;
+      }
+      if (tiebaLoginProvider && /^\/api\/account\/tieba\/(status|start|cancel)$/.test(url.pathname)) {
+        const action = url.pathname.split('/').pop();
+        if (req.method !== (action === 'status' ? 'GET' : 'POST') || typeof tiebaLoginProvider[action] !== 'function') { res.writeHead(404); res.end(); return; }
+        try {
+          const result = await tiebaLoginProvider[action]();
+          const state = ['online','offline','unknown','waiting','expired','risk'].includes(result?.state) ? result.state : 'unknown';
+          res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({state}));
+        } catch { res.writeHead(200, {'Content-Type':'application/json'}); res.end('{"state":"unknown"}'); }
+        return;
+      }
+      const m = /^\/api\/account\/(bili|douyin)\/(status|start|poll|qr)$/.exec(url.pathname);
+      if (!m || (m[2] === 'start' ? req.method !== 'POST' : req.method !== 'GET')) {res.writeHead(404);res.end();return;}
+      const [platform, action] = [m[1],m[2]];
+      // The legacy QR daemon launches an unsandboxed browser. The separate
+      // headed handoff candidate is not a production security boundary either.
+      if (platform === 'douyin' && action === 'start') {
+        res.writeHead(503, {'Content-Type':'application/json'});
+        res.end('{"state":"disabled"}');
+        return;
+      }
+      try {
+        if (action === 'qr') {
+          const image = platform === 'bili' ? loginService.biliPng() : loginService.douyinPng();
+          res.writeHead(image ? 200 : 404, {'Content-Type':'image/png'}); res.end(image || ''); return;
+        }
+        let result;
+        if (action === 'status') result = await (platform === 'bili' ? loginService.checkBili() : loginService.checkDouyin());
+        else if (action === 'start') result = await (platform === 'bili' ? loginService.startBili() : loginService.startDouyin());
+        else result = await (platform === 'bili' ? loginService.pollBili() : loginService.douyinProgress());
+        res.writeHead(200, {'Content-Type':'application/json'});res.end(JSON.stringify(result));
+      } catch {res.writeHead(503, {'Content-Type':'application/json'});res.end('{"state":"unknown"}');}
+      return;
+    }
+
+    // 0. 仿生心智总控与调节面板 (/panel)
+    if (url.pathname === '/panel' || url.pathname.startsWith('/panel/')) {
+      handlePanelRequest(req, res, { prefix: '/panel', brain: effectiveBrain, respectGuard, getBridgeStatus });
+      return;
+    }
+
     // 1. 静态主页 (2.5D 等距房间)
     if (url.pathname === '/' || url.pathname === '/index.html') {
       const vCss = getAssetVersion('character/character.css');
@@ -1205,6 +1313,52 @@ export function startVirtualRoomServer({
     if (url.pathname === '/monitor' || url.pathname === '/browser') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(MONITOR_HTML_TEMPLATE);
+      return;
+    }
+
+    // 1.11 小鱼随笔日记本独立阅读器页面 (/diary /notebook)
+    if (url.pathname === '/diary' || url.pathname === '/notebook') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(renderDiaryViewerHtml(effectiveDataDir));
+      return;
+    }
+
+    if (url.pathname === '/api/diary/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, diaries: listAllDiaries(effectiveDataDir) }));
+      return;
+    }
+
+    if (url.pathname === '/api/diary/read') {
+      const fileParam = url.searchParams.get('file') || '';
+      const safeName = path.basename(fileParam.replace(/\.md$/i, '')) + '.md';
+      const filePath = path.join(effectiveDataDir, 'notebook', '日记', safeName);
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: true, name: safeName, content }));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: '日记不存在' }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/diary/generate' && req.method === 'POST') {
+      try {
+        const result = await generateDailyDiary({ brain: effectiveBrain, dataDir: effectiveDataDir, force: true });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/aunt/chat') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, records: listChat({ limit: 60 }) }));
       return;
     }
 
@@ -1669,7 +1823,7 @@ export function startVirtualRoomServer({
 
       const contentType = MIME_MAP[ext];
       const isVariable = filePath.includes('live') || ['.js', '.css', '.json', '.md'].includes(ext);
-      const cacheControl = isVariable ? 'no-cache, no-store, must-revalidate' : 'public, max-age=86400';
+      const cacheControl = accessDigest ? 'no-store' : (isVariable ? 'no-cache, no-store, must-revalidate' : 'public, max-age=86400');
       const baseHeaders = {
         'Content-Type': contentType,
         'Cache-Control': cacheControl,
@@ -1763,7 +1917,7 @@ export function startVirtualRoomServer({
     if (url.pathname === '/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': accessDigest ? 'no-store' : 'no-cache',
         'Connection': 'keep-alive',
       });
       res.write(`data: ${JSON.stringify(curState)}\n\n`);
@@ -1779,6 +1933,24 @@ export function startVirtualRoomServer({
     if (url.pathname === '/api/status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(curState));
+      return;
+    }
+
+    // 3.5 心智、牌灵与德行十轴 API
+    if (url.pathname === '/api/mind') {
+      try {
+        const { tarotSummary } = await import('./tarot-engine.js');
+        const { readVirtue } = await import('./virtue-engine.js');
+        const { readout } = await import('./mbti-engine.js');
+        const tarot = tarotSummary(effectiveDataDir);
+        const virtue = readVirtue(path.join(effectiveDataDir, 'virtue.json'));
+        const mbti = readout();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, tarot, virtue: virtue.axes, mbti }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+      }
       return;
     }
 
@@ -1833,8 +2005,17 @@ export function startVirtualRoomServer({
         }
 
         if (action === 'douyin') {
+          if (isStopped) {
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: '居室正在停机' }));
+            return;
+          }
           if (douyinLiving && typeof douyinLiving.browseDouyinLive === 'function') {
-            douyinLiving.browseDouyinLive({ isOwner: true }).catch(console.error);
+            let task;
+            try { task = Promise.resolve(douyinLiving.browseDouyinLive({ isOwner: true })); }
+            catch (error) { task = Promise.reject(error); }
+            roomBrowseTasks.add(task);
+            task.then(() => roomBrowseTasks.delete(task), error => { roomBrowseTasks.delete(task); console.error(error); });
           } else {
             res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify({ error: '抖音平台未注入或未启用' }));
@@ -1881,6 +2062,8 @@ export function startVirtualRoomServer({
     socket.on('close', () => sockets.delete(socket));
   });
 
+  server.on('upgrade', (req, socket, head) => { if (!handoff.upgrade(req, socket, head)) socket.destroy(); });
+
   const ready = new Promise((resolve, reject) => {
     server.once('listening', () => resolve(server.address()));
     server.once('error', reject);
@@ -1920,7 +2103,7 @@ export function startVirtualRoomServer({
       activeRoomInstance = null;
     }
 
-    stopPromise = new Promise((resolve) => {
+    stopPromise = Promise.allSettled([handoffCandidate.close(), ...roomBrowseTasks, new Promise((resolve) => {
       if (!server.listening) {
         resolve();
         return;
@@ -1928,6 +2111,8 @@ export function startVirtualRoomServer({
       server.close(() => {
         resolve();
       });
+    })]).then(results => {
+      if (results.some(result => result.status === 'rejected')) throw new Error('居室停机任务失败');
     });
     return stopPromise;
   }

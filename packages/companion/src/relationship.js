@@ -31,7 +31,8 @@ function tierOf(intimacy) {
   if (intimacy <= -10) return '有点看不顺眼的人';
   if (intimacy < 20) return '眼熟的群友';
   if (intimacy < 60) return '常聊的熟人';
-  return '铁瓷';
+  if (intimacy < 80) return '铁瓷';
+  return '老铁瓷';
 }
 
 export class Relationship {
@@ -39,9 +40,11 @@ export class Relationship {
    * @param {object} opts
    * @param {string} [opts.dir]        数据目录
    * @param {boolean} [opts.enabled=true]
+   * @param {number} [opts.familiarAt=80] 熟悉的亲密度门槛
    */
-  constructor({ dir = './data', enabled = true } = {}) {
+  constructor({ dir = './data', enabled = true, familiarAt = 80 } = {}) {
     this.enabled = enabled;
+    this.familiarAt = Number.isFinite(familiarAt) ? familiarAt : 80;
     this.file = path.join(dir, 'relationships.json');
     /** @type {Record<string, any>} */
     this.book = {};
@@ -56,7 +59,6 @@ export class Relationship {
     } catch {
       this.book = {};
     }
-    this._decayAll();
   }
 
   _save() {
@@ -66,20 +68,26 @@ export class Relationship {
     } catch { /* 写不进去就算了，别影响聊天 */ }
   }
 
-  /** 长期不联系，关系自然变淡（指数衰减，半衰期 30 天） */
-  _decayAll() {
-    const now = Date.now();
-    let dirty = false;
-    for (const rec of Object.values(this.book)) {
-      if (!rec || !rec.lastSeen) continue;
-      const days = (now - rec.lastSeen) / DAY;
-      if (days < 1) continue;
-      const k = Math.pow(0.5, days / HALF_LIFE_DAYS);
-      rec.intimacy = rec.intimacy * k;
-      rec.trust = 50 + (rec.trust - 50) * k;   // 信任向 50 回归，不会归零
-      dirty = true;
-    }
-    if (dirty) this._save();
+  /** 计算截至当前时刻的关系，不改写账本，避免重复衰减 */
+  _current(rec) {
+    const days = (Date.now() - (rec.decayAt || rec.lastSeen || Date.now())) / DAY;
+    const k = days >= 1 ? Math.pow(0.5, days / HALF_LIFE_DAYS) : 1;
+    return { intimacy: rec.intimacy * k, trust: 50 + (rec.trust - 50) * k };
+  }
+
+  /** 获取指定人的实时关系与许可；陌生人或禁用账本时不开放 */
+  permissionFor(userId) {
+    const rec = this.enabled ? this.book[String(userId)] : null;
+    const current = rec ? this._current(rec) : { intimacy: 0, trust: 50 };
+    return { ...current, tier: tierOf(current.intimacy), familiar: !!rec && current.intimacy >= this.familiarAt };
+  }
+
+  /** 按实时信任判断愿不愿意交心 */
+  trustTier(userId) {
+    const { trust } = this.permissionFor(userId);
+    if (trust >= 75) return 'open';
+    if (trust >= 40) return 'normal';
+    return 'guarded';
   }
 
   _rec(userId) {
@@ -98,7 +106,9 @@ export class Relationship {
     if (!this.enabled) return { delta: 0, kind: 'none' };
     const t = String(text || '');
     const rec = this._rec(userId);
+    Object.assign(rec, this._current(rec));
     rec.lastSeen = Date.now();
+    delete rec.decayAt;
 
     let delta = 0;
     let kind = 'none';
@@ -119,7 +129,7 @@ export class Relationship {
       kind = 'thanks';
     } else {
       // 正常唠两句，慢慢升温，但有天花板
-      rec.intimacy = Math.min(80, rec.intimacy + 0.4);
+      rec.intimacy = Math.max(rec.intimacy, Math.min(80, rec.intimacy + 0.4));
       rec.trust = Math.min(95, rec.trust + 0.2);
       this._save();
       return { delta: 0.4, kind: 'talk' };
@@ -136,8 +146,8 @@ export class Relationship {
     if (!this.enabled) return '';
     const rec = this.book[String(userId)];
     if (!rec) return '';
-    const tier = tierOf(rec.intimacy);
-    return `【你和他现在的关系】${tier}（亲密度 ${rec.intimacy.toFixed(0)}/100，信任 ${rec.trust.toFixed(0)}/100）`;
+    const { tier } = this.permissionFor(userId);
+    return `【你和他现在的关系】${tier}`;
   }
 
   /**
@@ -152,8 +162,9 @@ export class Relationship {
     const rec = this.book[String(userId)];
     if (!rec) return 'normal';
     const justInsulted = Date.now() - (rec.lastInsult || 0) < 30 * 60e3;
-    if (rec.intimacy <= -40 && justInsulted) return 'ignore';
-    if (rec.intimacy <= -10) return 'cold';
+    const { intimacy } = this.permissionFor(userId);
+    if (intimacy <= -40 && justInsulted) return 'ignore';
+    if (intimacy <= -10) return 'cold';
     return 'normal';
   }
 

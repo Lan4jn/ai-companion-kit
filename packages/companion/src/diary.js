@@ -195,16 +195,10 @@ async function main() {
     let roleText = '';
     try { roleText = fs.readFileSync(cfg.roleCard, 'utf8'); } catch { /* 没有角色卡就用通用人格 */ }
 
-    let memoryText = '';
-    try {
-      const { Memory } = await import('./memory.js');
-      memoryText = new Memory({ dir: cfg.dataDir }).renderRecent(Number(a.n || 16));
-    } catch { /* 记忆没初始化过就算了 */ }
-
-    const diaryText = diary2.context(3, 3) || '';
-    const avoidText = diary2.recent(4)
-      .map((r) => (r.title ? r.title + '｜' : '') + r.text.replace(/\s+/g, ' ').slice(0, 34))
-      .join('\n');
+    // Legacy stores mix principals and have no forget lineage.
+    const memoryText = '';
+    const diaryText = '';
+    const avoidText = '';
     console.log('她在想……（模型 ' + cfg.model + '）');
 
     const row = await composeDiary({

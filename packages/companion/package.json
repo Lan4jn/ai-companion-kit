@@ -26,7 +26,8 @@
     "examples/room-demo.js",
     "role.example.md",
     "config.example.json",
-    "README.md"
+    "README.md",
+    "docs/memory-brain.md"
   ],
   "scripts": {
     "start": "node src/index.js --config ./config.json",
@@ -48,9 +49,11 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
-  "dependencies": {},
+  "dependencies": {
+    "playwright-core": "^1.58.0"
+  },
   "optionalDependencies": {
     "ws": "^8.18.0"
   }

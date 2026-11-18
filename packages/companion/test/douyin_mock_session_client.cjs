@@ -1,0 +1,14 @@
+const {chromium}=require('playwright-core');
+const assert=require('assert');
+(async()=>{const browser=await chromium.launch({executablePath:'/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome',headless:true,args:['--no-sandbox','--disable-background-networking','--disable-extensions']});
+try{const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true});const page=await context.newPage();
+await page.goto(process.env.SYNTH_URL);await page.waitForFunction(()=>document.querySelector('#status').textContent==='ready',null,{timeout:20000});
+const color=async (r,g,b)=>page.waitForFunction(([r,g,b])=>{const d=document.querySelector('canvas').getContext('2d').getImageData(400,400,1,1).data;return d[0]===r&&d[1]===g&&d[2]===b},[r,g,b],{timeout:10000});
+await color(255,0,0);
+const token=new URL(process.env.SYNTH_URL).hash.slice(1);
+const replay=()=>page.evaluate(token=>new Promise((resolve,reject)=>{const s=new WebSocket(`ws://${location.host}/relay`);let got=false;s.onopen=()=>s.send(token);s.onmessage=()=>{got=true};s.onclose=()=>resolve(got);setTimeout(()=>{s.close();reject(Error('replay timeout'))},3000)}),token);
+assert.deepStrictEqual(await Promise.all([replay(),replay()]),[false,false]);
+const box=await page.locator('canvas').boundingBox();const x=box.x+box.width*300/1024,y=box.y+box.height*300/768;
+await page.touchscreen.tap(x,y);await color(0,0,255);await page.touchscreen.tap(x,y);await color(0,255,0);
+await new Promise(resolve=>setTimeout(resolve,1200));console.log('PASS');await context.close();
+}catch(e){console.error(e);process.exitCode=1}finally{await browser.close()}})();

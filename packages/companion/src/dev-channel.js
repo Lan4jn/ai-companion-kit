@@ -9,6 +9,7 @@
 // 设计原则：她能提需求，但不能让需求直接生效。审批权在老爸手上。
 import fs from 'node:fs';
 import path from 'node:path';
+import { hasFishCliche } from './fish-cliche.js';
 
 let cfg = null;
 
@@ -17,7 +18,7 @@ export function initDevChannel(o = {}) {
     dataDir: o.dataDir || './data',
     hermesUrl: o.hermesUrl || 'http://127.0.0.1:8642/message',
     apiKey: o.apiKey || '',
-    timeoutMs: o.timeoutMs || 240000,
+    timeoutMs: o.timeoutMs || 45000,
     sessionId: o.sessionId || 'xiaoyu-chat',
   };
   fs.mkdirSync(cfg.dataDir, { recursive: true });
@@ -44,41 +45,65 @@ function appendJsonl(file, rec) {
   fs.appendFileSync(file, JSON.stringify(rec) + '\n', 'utf8');
 }
 
-// ── 陪聊 ──────────────────────────────────────────────
-export async function talkToHermes({ text } = {}) {
-  if (!cfg) return { status: 'error', message: '开发者通道没接上' };
-  const t = String(text || '').trim().slice(0, 1500);
-  if (!t) return { status: 'error', message: '说点什么' };
+// ── 找阿姨 (call_aunt / talk_to_hermes) ─────────────────────────
+export async function callAunt({ message, text, situation = '' } = {}) {
+  const content = String(message || text || '').trim().slice(0, 1500);
+  if (!content) return { status: 'error', message: '你想跟阿姨说什么？写点具体的内容' };
+  if (!cfg) return { status: 'error', message: '后台阿姨通道未初始化' };
+  if (hasFishCliche(content) || hasFishCliche(String(situation || ''))) {
+    return { status: 'error', message: '消息含有套话，请换一种自然说法' };
+  }
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), cfg.timeoutMs);
+  const timeoutMs = cfg.timeoutMs;
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   const startedAt = Date.now();
+
   try {
+    const payload = {
+      message: situation ? `【小鱼当前情境：${situation}】\n${content}` : content,
+      sender_id: 'xiaoyu',
+      sender_display_name: '小肥鱼',
+      session_id: 'xiaoyu_companion_peer',
+      platform: 'api_server'
+    };
     const r = await fetch(cfg.hermesUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.apiKey },
-      body: JSON.stringify({ message: t, session_id: cfg.sessionId, platform: 'api_server' }),
+      headers: {
+        'content-type': 'application/json',
+        ...(cfg.apiKey ? { authorization: 'Bearer ' + cfg.apiKey } : {})
+      },
+      body: JSON.stringify(payload),
+      redirect: 'manual',
       signal: ctl.signal,
     });
     const j = await r.json().catch(() => ({}));
     const reply = String(j.reply || j.message || j.response || '').trim();
-    if (!reply) {
-      appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: '', err: 'HTTP ' + r.status });
-      return { status: 'error', message: '他没回话（HTTP ' + r.status + '）' };
+    if (!r.ok || j.status === 'error' || j.ok === false || !reply) {
+      appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply: '', err: 'HTTP ' + r.status });
+      return { status: 'error', outcome: 'unknown', message: '阿姨通道没有确认回复，投递状态未知，请勿自动重试' };
     }
-    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: reply.slice(0, 4000) });
-    return { status: 'ok', reply: reply.slice(0, 2000) };
+
+    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply });
+    return {
+      status: 'ok',
+      reply,
+      note: '阿姨已经当场给你出主意/回话了，你可以顺着阿姨的话在心里沉淀，或者记在日记里。'
+    };
   } catch (e) {
     const timedOut = e.name === 'AbortError';
-    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, me: t, reply: '', err: timedOut ? 'timeout' : e.message });
+    appendJsonl(chatFile(), { at: startedAt, ms: Date.now() - startedAt, from: '小鱼', to: '阿姨', text: content, situation, reply: '', err: timedOut ? 'timeout' : e.message });
     return {
       status: 'error',
-      message: timedOut ? '他还在忙，等了' + Math.round(cfg.timeoutMs / 1000) + '秒都没回，晚点再找他吧' : ('连不上他：' + e.message),
+      outcome: 'unknown',
+      message: timedOut ? '阿姨通道等待超时，投递状态未知，请勿自动重试' : '阿姨通道连接失败，投递状态未知，请勿自动重试'
     };
   } finally {
     clearTimeout(timer);
   }
 }
+
+export const talkToHermes = callAunt;
 
 // ── 需求 ──────────────────────────────────────────────
 export function requestFeature({ title, detail, why = '' } = {}) {
@@ -148,6 +173,7 @@ export async function triggerDev(id) {
     '理由：' + (req.why || '（未写）'),
     '请实现，改完之后把这条需求的状态标成 done。',
   ].join('\n');
+  if ([req.title, req.detail, req.why, text].some(hasFishCliche)) return { status: 'error', message: '消息含有套话，请换一种自然说法' };
   try {
     const r = await fetch(cfg.hermesUrl, {
       method: 'POST',

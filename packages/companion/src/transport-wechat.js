@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import {safeTransportMessage} from './chat-concise-delivery.js';
 
 export class WeChatTransport {
   constructor(opts = {}) {
@@ -32,7 +33,7 @@ export class WeChatTransport {
             const parsed = JSON.parse(body);
             this.#handleWebhook(parsed);
           } catch (e) {
-            console.error('[wechat] 解析回调数据失败:', e.message);
+            console.error('[wechat] 解析回调数据失败');
           }
         });
       } else {
@@ -121,6 +122,10 @@ export class WeChatTransport {
   }
 
   async send(key, text) {
+    if (!safeTransportMessage(text)) {
+      console.warn('[Concise] stage=transport_blocked');
+      return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_BLOCKED'};
+    }
     const isGroup = key.startsWith('wx:group:') || key.startsWith('group:');
     const targetId = key.replace(/^(?:wx:)?(?:group|private):/, '');
 
@@ -138,7 +143,7 @@ export class WeChatTransport {
       const data = await res.json();
       return { ok: data.code === 1, error: data.message };
     } catch (e) {
-      console.error('[wechat] 发送文本失败:', e.message);
+      console.error('[wechat] 发送文本失败');
       return { ok: false, error: e.message };
     }
   }
@@ -158,14 +163,14 @@ export class WeChatTransport {
       const data = await res.json();
       return { ok: data.code === 1, error: data.message };
     } catch (e) {
-      console.error('[wechat] 发送图片失败:', e.message);
+      console.error('[wechat] 发送图片失败');
       return { ok: false, error: e.message };
     }
   }
 
   async sendVoice(key, voiceB64) {
     // 微信暂走文本降级，避免非官方语音编码导致封号
-    return { ok: false, error: 'voice fallback' };
+    return { ok: false, outcome: 'permanent', error: 'voice fallback' };
   }
 
   async setTyping() {

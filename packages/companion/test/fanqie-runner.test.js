@@ -1,0 +1,4 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {createFanqieRunner} from '../src/fanqie-runner.js';
+test('后台不能获得互斥锁时不触碰设备',async()=>{let calls=0;const r=createFanqieRunner({exclusive:async()=>false,navigate:async()=>calls++,read:async()=>calls++});assert.equal((await r()).reason,'busy');assert.equal(calls,0)});
+test('导航失败不读取',async()=>{let calls=0;const r=createFanqieRunner({exclusive:async fn=>{await fn();return true},navigate:async()=>({ok:false,reason:'offline'}),read:async()=>calls++});assert.equal((await r()).reason,'offline');assert.equal(calls,0)});
+test('导航成功进入阅读',async()=>{let calls=0;const r=createFanqieRunner({exclusive:async fn=>{await fn();return true},navigate:async()=>({ok:true}),read:async()=>{calls++;return {ok:true,stopped:true}}});assert.equal((await r()).ok,true);assert.equal(calls,1)});

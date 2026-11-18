@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {Brain} from '../src/brain.js';
+import {Humanizer} from '../src/humanize.js';
+import {initGroupBridge,startOutboxWorker,stopOutboxWorker,getOutboxStatus} from '../src/group-bridge.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+
+test('real owner turn cannot queue unbound cross-group effects; independent turn remains available',async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'bridge-turn-'));let receive;
+ const got=new Promise(r=>receive=r);const bot=new OneBot({wsUrl:'ws://fixture',onMessage:receive});
+ t.after(async()=>{await stopOutboxWorker();bot.close();fs.rmSync(dir,{recursive:true,force:true})});
+ while(!bot.ws) await new Promise(r=>setTimeout(r,5));bot.ws.emit('open');
+ bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:42,self_id:99,message_id:1,message:[{type:'text',data:{text:'你好呀'}}],sender:{nickname:'fixture'}}));
+ const item=await got;const sent=[];bot.groupMembers=new Map([['1',[]],['2',[]]]);bot.send=async(k,m)=>{sent.push([k,m]);return {ok:true}};bot.setTyping=async()=>{};bot.getMyGroupCard=async()=>'';
+ initGroupBridge({bot,dataDir:dir,limits:{maxPerCommand:5,minGapMs:0,maxGapMs:0}});
+ let req=0;const tools=[1,2].map(n=>({id:'c'+n,type:'function',function:{name:'queue_group_message',arguments:JSON.stringify({group_id:String(n),text:'群消息'})}}));
+ const toolResults=[];
+ t.mock.method(globalThis,'fetch',async(_u,o)=>{const body=JSON.parse(o.body);toolResults.push(...body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content)));const message=++req===1?{tool_calls:tools}:{content:'收到'};return {ok:true,text:async()=>JSON.stringify({choices:[{message}]})}});
+ const memory={dir,renderPerson:()=>'',renderRecent:()=>'',sessionTurns:()=>[],remember:()=>{},logTurn:()=>{},touch:()=>{}};
+ const brain=new Brain({apiKey:'fixture',baseUrl:'https://example.invalid',model:'fixture',ownerIds:['42'],memory});
+ await handleTurn({bot,brain,human:new Humanizer({enabled:false}),memory,waker:{wake(){}}},[item],{ownerIds:['42'],dataDir:dir});
+ assert.equal(getOutboxStatus().pending,0);assert.equal(toolResults.length,2);assert.ok(toolResults.every(x=>x.status==='denied'));
+ startOutboxWorker();await new Promise(r=>setTimeout(r,20));assert.ok(sent.every(([k])=>k==='private:42'));await stopOutboxWorker();
+ req=0;toolResults.length=0;
+ await brain.reply({key:'__proactive__',userId:'system',userName:'fixture',text:'你好呀',history:[],record:false});
+ assert.equal(getOutboxStatus().pending,2);assert.ok(toolResults.every(x=>x.status==='ok'));
+ startOutboxWorker();await new Promise(r=>setTimeout(r,20));assert.ok(sent.some(([k])=>k==='group:1'));
+});

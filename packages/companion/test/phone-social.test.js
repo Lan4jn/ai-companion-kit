@@ -1,0 +1,6 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {runSocialInteraction} from '../src/phone-social.js';
+const obs={platform:'fanqie',contentId:'book:chapter1',text:'他走进了空荡荡的旧屋'};
+test('没有真实内容时绝不决策和发布',async()=>{let called=0;const r=await runSocialInteraction({observe:async()=>null,decide:async()=>{called++},submit:async()=>{called++},verify:async()=>true});assert.equal(r.reason,'no-evidence');assert.equal(called,0)});
+test('自主选择不互动时不发布',async()=>{let called=0;const r=await runSocialInteraction({observe:async()=>obs,decide:async()=>({action:'skip'}),submit:async()=>{called++},verify:async()=>true});assert.equal(r.reason,'declined');assert.equal(called,0)});
+test('发布后不能确认则不能写成功记录',async()=>{let saved=0;const r=await runSocialInteraction({observe:async()=>obs,decide:async()=>({action:'comment',text:'这段有点紧张'}),submit:async()=>({ok:true}),verify:async()=>false,save:async()=>saved++});assert.equal(r.reason,'unverified');assert.equal(saved,0)});
+test('真实验证通过才保存互动结果',async()=>{let saved;const r=await runSocialInteraction({observe:async()=>obs,decide:async()=>({action:'comment',text:'这段有点紧张'}),submit:async()=>({ok:true}),verify:async()=>({ok:true,reference:'comment:1'}),save:async x=>{saved=x}});assert.equal(r.ok,true);assert.equal(saved.evidence,'comment:1')});

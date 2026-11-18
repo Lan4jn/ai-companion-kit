@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {Brain} from '../src/brain.js';
+import {Humanizer} from '../src/humanize.js';
+import {initGroupBridge,stopOutboxWorker,getOutboxStatus} from '../src/group-bridge.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+
+test('authenticated exact request sends synchronously once and replay cannot resend',async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'bridge-sync-'));let receive;
+ const got=new Promise(r=>receive=r);const bot=new OneBot({wsUrl:'ws://127.0.0.1:8765',ingressAuthentication:{enabled:true,trustLoopbackOneBot:true,ownerId:'42'},onMessage:receive});
+ t.after(async()=>{await stopOutboxWorker();bot.close();fs.rmSync(dir,{recursive:true,force:true})});
+ while(!bot.ws) await new Promise(r=>setTimeout(r,5));bot.ws.emit('open');
+ bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:42,self_id:99,message_id:119,message:[{type:'text',data:{text:'发送到群 1：大家好'}}],sender:{nickname:'fixture'}}));
+ const item=await got;const sent=[];bot.groupMembers=new Map([['1',[]]]);bot.send=async(k,m)=>{sent.push([k,m]);return {ok:true}};bot.setTyping=async()=>{};bot.getMyGroupCard=async()=>'';
+ initGroupBridge({bot,dataDir:dir,limits:{allowedGroups:['1'],minGapMs:0,maxGapMs:0}});
+ let req=0;const results=[];
+ t.mock.method(globalThis,'fetch',async(_u,o)=>{const body=JSON.parse(o.body);results.push(...body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content)));const message=++req%2?{tool_calls:[{id:'c',type:'function',function:{name:'queue_group_message',arguments:JSON.stringify({group_id:'1',text:'大家好'})}}]}:{content:'收到'};return {ok:true,text:async()=>JSON.stringify({choices:[{message}]})}});
+ const memory={dir,renderPerson:()=>'',renderRecent:()=>'',sessionTurns:()=>[],remember:()=>{},logTurn:()=>{},touch:()=>{}};
+ const brain=new Brain({apiKey:'fixture',baseUrl:'http://fixture',model:'fixture',memory,ownerIds:['42']});
+ const deps={bot,brain,human:new Humanizer({enabled:false}),memory,waker:{wake(){}}};const cfg={ownerIds:['42'],dataDir:dir};
+ await handleTurn(deps,[item],cfg);
+ assert.deepEqual(sent.filter(x=>x[0]==='group:1'),[['group:1','大家好']]);
+ assert.equal(results[0].status,'ok');assert.equal(getOutboxStatus().pending,0);
+ initGroupBridge({bot,dataDir:dir,limits:{allowedGroups:['1'],minGapMs:0,maxGapMs:0}});
+ await handleTurn(deps,[item],cfg);
+ assert.equal(sent.filter(x=>x[0]==='group:1').length,1);
+});

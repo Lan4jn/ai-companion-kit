@@ -1,0 +1,5 @@
+import {mkdtemp, rm} from 'node:fs/promises'; import os from 'node:os'; import path from 'node:path';
+async function testMutex(t){const dir=await mkdtemp(path.join(process.env.TMPDIR||os.tmpdir(),'phone-mutex-'));t.after(()=>rm(dir,{recursive:true,force:true}));return createPhoneMutex({lockPath:path.join(dir,'phone.lock')});}
+import {test} from 'node:test'; import assert from 'node:assert/strict'; import {createPhoneMutex} from '../src/phone-mutex.js';
+test('主动使用与后台使用互斥，后台不抢占',async(t)=>{const m=await testMutex(t);let done;const gate=new Promise(r=>done=r);let events=[];const a=m.runUser(async()=>{events.push('user-start');await gate;events.push('user-end')});await new Promise(r=>setImmediate(r));assert.equal(await m.tryBackground(async()=>events.push('background')),false);done();await a;assert.deepEqual(events,['user-start','user-end']);assert.equal(await m.tryBackground(async()=>events.push('background')),true)});
+test('异常后释放',async(t)=>{const m=await testMutex(t);await assert.rejects(m.runUser(async()=>{throw Error('x')}));assert.equal(await m.tryBackground(async()=>{}),true)});

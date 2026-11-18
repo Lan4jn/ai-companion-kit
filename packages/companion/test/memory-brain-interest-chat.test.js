@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {register} from 'node:module';
+import {handleTurn} from '../src/index.js';
+import {OneBot} from '../src/transport-onebot.js';
+import {Humanizer} from '../src/humanize.js';
+import {Brain} from '../src/brain.js';
+import {initializeManagedStore} from '../src/memory-brain-trust.js';
+register('./memory-brain-fake-ws-loader.js',import.meta.url);
+async function message(text,id=123,user=1) {
+ let done; const result=new Promise(r=>done=r); const bot=new OneBot({wsUrl:'ws://fixture',onMessage:done});
+ bot.api=async()=>({ok:false}); bot.getMyGroupCard=async()=>'';
+ while(!bot.ws) await new Promise(r=>setTimeout(r,1));
+ bot.ws.emit('open');
+ bot.ws.emit('message',JSON.stringify({post_type:'message',message_type:'private',user_id:user,message_id:id,message:[{type:'text',data:{text}}]}));
+ const value=await result; bot.close(); return value;
+}
+test('trusted owner chat ranks only live tieba source candidates via real core',async t=>{
+ const dir=fs.mkdtempSync(path.join(process.env.TMPDIR,'mb-interest-chat-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const row={version:3,source:'百度贴吧（外部来源）',forum:'肥鱼避难所吧',url:'https://tieba.baidu.com/p/123',keywords:['橘猫'],excerpt:'橘猫喜欢晒太阳',capturedAt:new Date().toISOString()};
+ fs.writeFileSync(path.join(dir,'tieba-interest.jsonl'),JSON.stringify(row)+'\n');
+ const seen=[];
+ const memory={dir,renderPerson:()=>'',renderRecent:()=>'',recallTurns:()=>[],remember:()=>{},logTurn:()=>{},touch:()=>{}};
+ t.mock.method(globalThis,'fetch',async (url,options)=>{if (String(url).startsWith('http://fixture/')) seen.push(JSON.parse(options.body));return {ok:true,text:async()=>JSON.stringify({choices:[{message:{content:'收到'}}]})};});
+ const brain=new Brain({apiKey:'test',baseUrl:'http://fixture',memory,role:{build:({situation})=>situation},dataDir:dir});
+ const deps={brain,memory,bot:{send:async()=>({ok:true}),setTyping:async()=>{}},human:new Humanizer({enabled:false}),waker:{wake:()=>{}}};
+ const scope={tenant:'companion',platform:'qq',type:'private',session:'private:1',user:'1'};
+ initializeManagedStore(path.join(dir,'memory-brain-scoped'));
+ const cfg={ownerIds:['1'],dataDir:dir,tieba:{enabled:true},memoryBrain:{enabled:true,backend:'sqlite-fts',trustedProcess:true,trustedScope:scope,authorizedSources:['tieba','qq-private-message']}};
+ await handleTurn(deps,[await message('橘猫')],cfg);
+ assert.match(JSON.stringify(seen.at(-1)),/memory-brain互联网兴趣索引/);
+ assert.match(JSON.stringify(seen.at(-1)),/tieba.baidu.com\/p\/123/);
+ fs.writeFileSync(path.join(dir,'tieba-interest.jsonl'),JSON.stringify({...row,capturedAt:'2000-01-01T00:00:00Z'})+'\n');
+ await handleTurn(deps,[await message('橘猫',124)],cfg);
+ assert.doesNotMatch(JSON.stringify(seen.at(-1)),/memory-brain互联网兴趣索引/);
+ fs.writeFileSync(path.join(dir,'tieba-interest.jsonl'),JSON.stringify(row)+'\n');
+ await handleTurn(deps,[await message('橘猫',125,2)],cfg);
+ assert.doesNotMatch(JSON.stringify(seen.at(-1)),/memory-brain互联网兴趣索引/);
+});

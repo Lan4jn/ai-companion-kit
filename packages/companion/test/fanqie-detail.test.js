@@ -1,0 +1,2 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {detailMatchesCandidate} from '../src/fanqie-select.js';
+test('详情页书名缺失时仅用足够长且独特的简介片段验证',()=>{const c={title:'异兽迷城',description:'【新书《逆位迷宫》开始连载了，每天晚上9点更新，请大家多多支持。】高阳是个孤儿，六岁穿越到平行世界，从此生活在温馨的五口之家。'};assert.equal(detailMatchesCandidate(c,[{text:'【新书《逆位迷宫》开始连载了，每天晚上9点更新，请大家多多支持。】高阳是个孤儿，六岁穿越到平行世界'}]),true);assert.equal(detailMatchesCandidate(c,[{text:'简介 都市小说'}]),false);assert.equal(detailMatchesCandidate(c,[{text:'完全不同的小说内容'}]),false)});

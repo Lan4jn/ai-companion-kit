@@ -64,9 +64,9 @@ export const DYNAMIC_MOODS = {
   },
   fierce: {
     key: 'fierce',
-    label: '护短开火',
-    desc: '有人在群里阴阳老爸或者找茬，火力全开，极度护短，怼人干脆利落',
-    voiceEmotion: '干脆犀利、气势汹汹',
+    label: '坚定',
+    desc: '遇到不友善的话，保持自己的态度，平和地表达边界',
+    voiceEmotion: '平静坚定',
     stickerTag: '生气',
   },
   calm: {
@@ -258,7 +258,7 @@ export function updateSessionMood(dataDir, sessionKey, { draftText = '', userTex
       // 群友阴阳老爸
       if (/(你爸|578021239|老登|姐夫).*(菜|不行|垃圾|人机|装|恶心|下饭)/.test(u)) {
         newKey = 'fierce';
-        newReason = '群里有人敢阴阳老爸，必须极度护短怼回去';
+        newReason = '群里出现不友善的话，可以就事论事表达态度';
         intensity = 3;
       }
       // 群友正面夸小鱼厉害/学霸
