@@ -70,15 +70,15 @@ export class ChatBatchQueue {
       const result = await this.run(items);
       if (result?.ok === false && result.outcome === 'permanent' && result.sent === 0) {
         this.release(items);
-        console.error('[合并消息] 已确认回复未发送；跳过此回合，不自动重试');
+        console.error(`[合并消息] 已确认回复未发送；跳过此回合（${result.error || 'unknown'}），不自动重试`);
         return;
       }
-      if (result?.ok === false) throw new Error('delivery failed or unconfirmed');
+      if (result?.ok === false) throw new Error(`delivery failed: ${result.error || '?'} outcome=${result.outcome || '?'} sent=${result.sent ?? '?'}`);
       this.release(items);
     } catch (error) {
       this.failed.set(session, Date.now());
       this.undelivered.push(items);
-      console.error('[合并消息] 处理或投递失败，结果可能未知；不自动重试');
+      console.error(`[合并消息] 处理或投递失败（${error?.name || 'Error'}: ${String(error?.message || error || '').slice(0, 200)}），结果可能未知；不自动重试`);
     }
   }
   enqueue(items) {

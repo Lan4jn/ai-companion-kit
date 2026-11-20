@@ -23,7 +23,18 @@ import { hasFishCliche } from '../src/fish-cliche.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
-const STATE = path.join(ROOT, 'data');
+// 数据目录优先跟随 config.json 的 dataDir（可能是绝对路径的外部目录）；
+// 否则退回 ROOT/data。面板曾经硬编码 ROOT/data，切到新目录后整面板会读空。
+const STATE = (() => {
+  if (process.env.PANEL_DATA_DIR) return process.env.PANEL_DATA_DIR;
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    if (typeof c?.dataDir === 'string' && c.dataDir.trim()) {
+      return path.isAbsolute(c.dataDir) ? c.dataDir : path.join(ROOT, c.dataDir);
+    }
+  } catch {}
+  return path.join(ROOT, 'data');
+})();
 const ASSETS = path.join(HERE, 'panel-assets');   // 16 只人格鱼
 // 大肥鱼的本子（小鱼的日记与惦记的事）
 const NOTEBOOK = process.env.SURFCORE_NOTEBOOK
@@ -295,6 +306,14 @@ function motiveSnapshot() {
     .slice(0, 6);
 }
 
+function activityFresh(act, now = Date.now()) {
+  const at = Number(act?.at);
+  if (!Number.isFinite(at) || at <= 0) return false;
+  const age = now - at;
+  // 太旧的不算“当前”，也防未来时间戳
+  return age >= -5 * 60 * 1000 && age < 6 * 3600 * 1000;
+}
+
 function focusSnapshot() {
   const j = readJson('focus.json') || {};
   const now = Date.now();
@@ -307,23 +326,31 @@ function focusSnapshot() {
     ageMin: j.errand.touchAt ? Math.round((now - Number(j.errand.touchAt)) / MIN) : null,
   } : null;
 
-  if (act && act.at && (now - act.at < 3600 * 1000)) {
+  // focus.json 在新版没有写入方，会一直是旧值；只要真机/浏览活动还新鲜就以它为准。
+  const actAgeMin = act && Number(act.at) ? Math.round((now - Number(act.at)) / MIN) : null;
+  const actFresh = actAgeMin !== null && activityFresh(act, now);
+  if (actFresh) {
+    sinceMin = actAgeMin;
     if (act.type === 'bili') {
       platform = 'Bilibili / 浏览器';
       current = `最近观察到播放《${act.title}》（UP主: ${act.up}）`;
-      sinceMin = null;
       errand = {
         what: `播放记录（进度 ${act.watched}s / ${act.duration}s）`,
         observation: true,
-        ageMin: Math.round((now - act.at) / MIN),
+        ageMin: actAgeMin,
       };
     } else if (act.type === 'douyin') {
       platform = '抖音 / 手机短视频';
-      current = '刷热门短视频与生活动态';
-      errand = {
-        what: '巡逻评论区与潜水互动',
-        ageMin: Math.round((now - act.at) / MIN),
-      };
+      current = act.title ? `在刷《${act.title}》` : '刷热门短视频与生活动态';
+      errand = { what: '巡逻评论区与潜水互动', ageMin: actAgeMin };
+    } else if (act.type === 'fanqie') {
+      platform = '番茄小说 / 手机阅读';
+      current = act.title ? `在看《${act.title}》` : '在番茄免费小说里看小说';
+      errand = { what: '读小说（摸鱼时间）', ageMin: actAgeMin };
+    } else {
+      platform = act.platform || act.type || platform;
+      current = act.title || act.text || act.current || current;
+      errand = { what: act.detail || '当前活动', ageMin: actAgeMin };
     }
   }
 
@@ -354,6 +381,23 @@ function intentSnapshot() {
     }
   }
 
+  // 2. 欲望引擎当前在推的心愿（新版真正在跑的目标，替换掉已停写的 intents.json）
+  const gd = readJson('goals-desires.json');
+  const desires = gd && gd.activeDesires && typeof gd.activeDesires === 'object' ? gd.activeDesires : {};
+  const envLabel = { dm_owner: '私聊老爸', group: 'QQ 群聊', douyin: '抖音', bilibili: 'B 站', web: '全网吃瓜', idle: '空闲时' };
+  for (const [key, d] of Object.entries(desires)) {
+    if (!d || typeof d !== 'object') continue;
+    const title = String(d.title || '').trim();
+    if (!title) continue;
+    out.push({
+      badge: '心愿',
+      badgeColor: '#7aa2f7',
+      text: title,
+      target: envLabel[key] || key,
+      at: now,
+    });
+  }
+
   // 活动记录不是待办意图：不从浏览行为推测发表弹幕或评论。
 
   // 3. 提给老爸审批的新功能需求待办
@@ -379,7 +423,9 @@ function intentSnapshot() {
   // 4. 读取持久化的 intents.json（如果用户或系统写入过）
   const j = readJson('intents.json');
   const list = Array.isArray(j) ? j : (Array.isArray(j?.intents) ? j.intents : []);
-  for (const x of list.filter((x) => x && !x.doneAt && !x.canceledAt)) {
+  // intents.json 在新版已无写入方，只显示 24 小时内的，避免陈年记录冒充待办
+  const intentCutoff = now - 24 * 3600 * 1000;
+  for (const x of list.filter((x) => x && !x.doneAt && !x.canceledAt && (Number(x.at) || 0) >= intentCutoff)) {
     // A LAN panel is not an authenticated private chat session. Never expose
     // private-session intent contents or identifiers through the snapshot.
     const privateTarget = isPrivateTarget(x.targetKey, x.target);

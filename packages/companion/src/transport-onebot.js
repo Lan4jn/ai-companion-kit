@@ -950,9 +950,20 @@ export class OneBot {
       return Promise.resolve(null);
     }
     const message = [{ type: 'image', data: { file: ref } }];
-    return isGroup
+    const kind = ref.startsWith('base64://') ? 'base64' : ref.startsWith('http') ? 'url' : 'file';
+    const kb = Math.round(ref.length / 1024);
+    const p = isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });
+    // 图片投递失败要留证据：只记来源类型/体积/错误码，不记图片内容和 base64
+    return p.then((r) => {
+      if (r?.ok !== true) {
+        const code = r?.data?.retcode ?? r?.data?.status ?? '';
+        const msg = String(r?.error || r?.data?.message || r?.data?.wording || '').replace(/base64:\/\/[A-Za-z0-9+/=]+/g, 'base64://…').slice(0, 120);
+        console.warn(`   [图片] NapCat 拒收 kind=${kind} size=${kb}KB retcode=${code} msg=${msg || '无'}`);
+      }
+      return r;
+    });
   }
 
   // 语音条：NapCat 只认 base64:// 或容器内路径，宿主机路径会被拒

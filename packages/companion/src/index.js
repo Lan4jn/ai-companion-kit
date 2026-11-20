@@ -1088,7 +1088,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
     + targetPrompt
     + myCardLine
     + shareCardGuide
-    + `\n【与当前发言者的边界】${last.isPoke ? '对方刚刚在 QQ 里戳了戳你（或者拍了拍你的头像）。' : ''}${rel?.permissionFor?.(last.userId)?.familiar ? '这是很亲近的人，拍你、叫你肥鱼、小肥鱼或鱼形RBQ是你默许的，不当作冒犯；可以嘴硬嫌弃但不要真翻脸，也不必解释原因。' : '你不太喜欢被这个人拍或被叫肥鱼、小肥鱼、鱼形RBQ；可以冷淡或直接说一句不喜欢，不要长篇说教。'}结合上下文自然回应，不要套用固定句式、不要模板化拒答；不想回应时可以沉默。`
+    + `\n【与当前发言者的边界】${last.isPoke ? '对方刚刚在 QQ 里戳了戳你（或者拍了拍你的头像）。' : ''}${rel?.permissionFor?.(last.userId)?.familiar ? '这是很亲近的人（老铁瓷），拍你、叫你肥鱼、小肥鱼或鱼形RBQ是你默许的，不当作冒犯；不要要求对方改口，不要说“别叫”“停掉”“换个称呼”这类话，最多嘴上嫌弃一句就顺着话题聊下去。以前说过的“别叫肥鱼”不作数。' : '你不太喜欢被这个人拍或被叫肥鱼、小肥鱼、鱼形RBQ；可以冷淡或直接说一句不喜欢，不要长篇说教。'}结合上下文自然回应，不要套用固定句式、不要模板化拒答；不想回应时可以沉默。`
     + `\n【能不能跟他说实话】${trustHint}结合上下文自然回应，不要套用固定句式、不要模板化拒答；不想回应时可以沉默。`
     + (living ? `\n【你此刻真实的手机动态】：${living}。如果老爸或群友问你在干嘛或发截图，你可以顺着这个状态自然回应或截图。` : '')
     + (learnedInsights ? `\n${learnedInsights}` : '')
@@ -1337,7 +1337,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       }});
     } catch { return {ok:false,outcome:'permanent',sent:0,error:'DIARY_GENERATION_UNAVAILABLE'}; }
   } else reply = await invokeTrustedBrain();
-  let { text: out, voiceB64, voiceText, voiceChunks, reason: replyFailure, conciseContext } = reply;
+  let { text: out, factual: replyFactual, voiceB64, voiceText, voiceChunks, reason: replyFailure, conciseContext } = reply;
   if (replyFailure) { console.warn('[Concise] stage=reply_failed'); return {ok:false, outcome:'permanent', sent:0, error:'REPLY_FAILED'}; }
   if (!draftStillValid()) return {ok:false, outcome:'permanent', error:'FORGET_DURING_GENERATION'};
   // Ordinary model generation has no verified forget receipt. Guard both text
@@ -1367,6 +1367,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   // 客套拒答/固定壳子属于失败输出：宁可这一轮不说话，也不能甩这种句子。
   if (/(?:未找到相关(?:的)?(?:结果|内容|信息)|没有(?:找到)?相关(?:的)?(?:结果|内容|信息)|我无法(?:回答|给到|提供|告知)|(?:无法|不能|没办法)(?:给到|提供|告知|回答)|无法(?:识别|理解)|不能帮助(?:你|您))/i.test(String(out || ''))) {
     console.warn('   [输出拦截] 检测到客套拒答/固定壳子，本轮不发送');
+    console.warn('   [拦截] 判定为固定拒答（CANNED_REFUSAL）');
     return { ok: false, outcome: 'permanent', sent: 0, error: 'CANNED_REFUSAL' };
   }
 
@@ -1375,7 +1376,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   const conciseBudget = createConciseBudget();
   let plannedParts = [];
   if (out) {
-    const planned = await prepareConciseReply(out, (draft, feedback) => brain.rewriteConciseDraft(draft, feedback), (draft, candidate) => brain.verifyConciseDraft(draft, candidate), {budget: conciseBudget, regenerate: draft => brain.regenerateConciseDraft(draft, conciseContext)});
+    const planned = await prepareConciseReply(out, (draft, feedback, must) => brain.rewriteConciseDraft(draft, feedback, replyFactual === true ? 80 : 50, must), (draft, candidate) => brain.verifyConciseDraft(draft, candidate), {softLimit: replyFactual === true ? 80 : 50, budget: conciseBudget, regenerate: draft => brain.regenerateConciseDraft(draft, conciseContext, replyFactual === true ? 80 : 50)});
     if (!draftStillValid()) return {ok:false, outcome:'permanent', error:'FORGET_DURING_GENERATION'};
     if (planned.failed) return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_FAILED'};
     if (planned.rewritten) { out = planned.parts.join('\n\n'); voiceB64 = undefined; voiceText = undefined; voiceChunks = undefined; }
@@ -1386,12 +1387,17 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   // image immediately ends the turn; do not send voice or text afterward.
   const plannedVoice = voiceB64 ? (Array.isArray(voiceChunks) && voiceChunks.length ? voiceChunks : [{base64:voiceB64, spokenText:voiceText || ''}]) : [];
   const remainderBubbles = plannedVoice.length || plannedParts.length;
-  const remainderText = plannedVoice.length ? [...plannedVoice.map(c => c.spokenText || '').join('')].length : [...plannedParts.join('')].length;
+  const remainderText = plannedVoice.length ? [...plannedVoice.map(c => c.spokenText || '').join('')].length : [...plannedParts.join('').replace(/\[CQ:[^\]]*\]/g, '')].length;
   if (!turnCanFit(turnImages.length + remainderBubbles, remainderText)) return {ok:false, outcome:'permanent', sent:turnBubbles, error:'TURN_LIMIT'};
   for (const image of turnImages) {
     if (!draftStillValid()) return {ok:false, outcome:'permanent', error:'FORGET_DURING_DELIVERY'};
     const result = await turnSend(() => guardedSend(() => bot.sendImage(key, image)));
-    if (turnStopped) return {ok:false, outcome:result?.outcome === 'permanent' ? 'permanent' : 'unknown', error:'IMAGE_DELIVERY_FAILED'};
+    if (turnStopped) {
+      // 图片没投递成功不该连累文字：以前这里直接 return，结果她发了图就一个字都不说
+      console.warn(`   [图片] 发送未确认（${result?.error || result?.reason || result?.outcome || 'unknown'}），跳过剩余图片，文字继续发`);
+      turnStopped = false; // 图片失败只作废图片，不该连带把文字也堵死
+      break;
+    }
   }
 
   // Any failed or ambiguous voice dispatch ends the turn without text fallback.
@@ -1422,7 +1428,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
   }
 
   // No fixed fallback on empty or failed generation.
-  if (isOwnerTurn && !out && !voiceSentSuccess) return {ok:false, outcome:'permanent', sent:0, error:'EMPTY_REPLY'};
+  if (isOwnerTurn && !out && !voiceSentSuccess) { console.warn('   [拦截] 模型返回空回复（EMPTY_REPLY）'); return {ok:false, outcome:'permanent', sent:0, error:'EMPTY_REPLY'}; }
 
   // 没有语音或语音发送失败时，才发送常规打字文本
   if (!voiceSentSuccess && out) {
@@ -1474,11 +1480,40 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
       if (!draftStillValid()) return {ok:false, outcome:'permanent', error:'FORGET_DURING_GENERATION'};
       if (delivery.failed) return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_FAILED'};
       if (!checkOutput(delivery.parts.join('\n\n'), {strict:true}).ok || claimsForget(delivery.parts.join('\n\n'))) return;
-      if (!safeReplyParts(delivery.parts)) return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_BLOCKED'};
-      if (!turnCanFit(delivery.parts.length, [...delivery.parts.join('')].length)) return {ok:false, outcome:'permanent', sent:turnBubbles, error:'CONCISE_BUBBLE_LIMIT'};
+      if (!safeReplyParts(delivery.parts, replyFactual === true ? 80 : 50)) {
+      const lens = delivery.parts.map(x => [...x].length).join('/');
+      const cq = delivery.parts.join('').match(/\[CQ:[^\]]*\]/g) || [];
+      console.warn(`   [拦截] 精简结果未通过终检（CONCISE_BLOCKED）parts=${delivery.parts.length} len=${lens} cq=${cq.length} maxcq=${cq.reduce((n,x)=>Math.max(n,x.length),0)}`);
+      return {ok:false, outcome:'permanent', sent:0, error:'CONCISE_BLOCKED'};
+    }
+      const textOnlyLen = [...delivery.parts.join('').replace(/\[CQ:[^\]]*\]/g, '')].length;
+      if (!turnCanFit(delivery.parts.length, textOnlyLen)) { console.warn(`   [预算] turnBubbles=${turnBubbles} turnText=${turnText} parts=${delivery.parts.length} textOnlyLen=${textOnlyLen}`); return {ok:false, outcome:'permanent', sent:turnBubbles, error:'CONCISE_BUBBLE_LIMIT'}; }
+      // 图片码不能当正文塞给 Humanizer：它有 1000 字符/条的硬上限，
+      // 十几万字符的 base64 会抛 RangeError('invalid prepared messages')，整轮静默。
+      // 这里把纯图片气泡摘出来用 sendImage 单独投递，文字只留文本部分。
+      const imageSegs = [];
+      const sayParts = [];
+      for (const part of delivery.parts) {
+        const imgs = part.match(/\[CQ:image,file=([^\]]*)\]/g) || [];
+        for (const im of imgs) imageSegs.push(im.slice('[CQ:image,file='.length, -1));
+        // 不做 trim：换行/空格也是码点，上游测试按真实码点算长度
+        const rest = part.replace(/\[CQ:image,[^\]]*\]/g, '');
+        if (rest.trim()) sayParts.push(rest);
+      }
+      for (const file of imageSegs) {
+        if (!turnCanFit(1, 0)) { console.warn('   [图片] 气泡预算不足，跳过'); break; }
+        const ir = await turnSend(() => guardedSend(() => bot.sendImage(key, file)));
+        if (ir?.ok !== true) { console.warn(`   [图片] 发送未确认（${ir?.error || ir?.outcome || 'unknown'}），继续发文字`); turnStopped = false; }
+      }
+      if (!sayParts.length) {
+        console.log('   发出 1 条（图片）');
+        appendBridgeLog(cfg.dataDir, '[回复] 发出 1 条（图片）');
+        textSentSuccess = true;
+        return;
+      }
       const confirmedParts = [];
       let confirmedUnsent = false;
-      const r = await human.say(delivery.parts, {
+      const r = await human.say(sayParts, {
         prepared: true,
         setTyping: (on) => bot.setTyping(key, on),
         send: async (m) => {
