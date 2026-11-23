@@ -640,7 +640,7 @@ export class OneBot {
           messageId: String(ev.time || Date.now()),
           time: (ev.time || Math.floor(Date.now() / 1000)) * 1000,
         };
-        console.log(`[onebot] 收到来自 ${senderName}(${ev.user_id}) 的拍一拍/戳一戳！`);
+        console.log(`[onebot] 收到来自 ${senderName}(${ev.user_id}) 的拍一拍/戳一戳（${isGroup ? '群 ' + ev.group_id : '私聊'}）`);
         this.onMessage?.(msg);
       }
       return;
@@ -836,6 +836,24 @@ export class OneBot {
       }
     }
     this.onMessage?.(msg);
+  }
+
+  // 回戳：NapCat 支持 friend_poke / group_poke，旧实现也叫 send_poke
+  async sendPoke(key, userId) {
+    const k = String(key || '');
+    const isGroup = k.startsWith('group:');
+    const params = { user_id: Number(userId) };
+    if (isGroup) params.group_id = Number(k.slice(6));
+    const actions = isGroup ? ['group_poke', 'send_poke'] : ['friend_poke', 'send_poke'];
+    let lastErr = '';
+    for (const action of actions) {
+      try {
+        const r = await this.api(action, params);
+        if (r && r.status !== 'failed' && r.retcode !== 100) return { ok: true, action, data: r?.data };
+        lastErr = r?.message || r?.wording || `retcode=${r?.retcode}`;
+      } catch (e) { lastErr = e?.message || String(e); }
+    }
+    return { ok: false, error: lastErr || 'POKE_FAILED' };
   }
 
   api(action, params = {}) {

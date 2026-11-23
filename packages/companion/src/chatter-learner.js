@@ -233,12 +233,14 @@ ${chatSlice}
   "diaryThought": "小鱼自己的一句潜水内心戏/日记（用小鱼的口吻写：今天潜水偷看到了什么好玩的，学到了什么接话套路）"
 }`;
 
-      const rawJson = await this.brain.complete({
+      const askJson = () => this.brain.complete({
         prompt,
         temperature: 0.6,
-        max_tokens: 2500,
+        max_tokens: 4000,
         json: true,
+        thinking: 'disabled',
       });
+      let rawJson = await askJson();
 
       if (!rawJson) {
         this.learning = false;
@@ -246,10 +248,25 @@ ${chatSlice}
       }
 
       let parsed;
-      try {
-        parsed = JSON.parse(rawJson);
-      } catch (e) {
-        console.error('[ChatterLearner] 解析模型学习 JSON 失败:', e?.message);
+      const tryParse = (raw) => {
+        try { return JSON.parse(raw); } catch { /* 下面尝试截断修复 */ }
+        const end = Math.max(raw.lastIndexOf('}'), raw.lastIndexOf(']'));
+        if (end > 0) {
+          const cut = raw.slice(0, end + 1);
+          for (const patch of [cut, cut + '}', cut.replace(/,\s*$/, '') + '}']) {
+            try { return JSON.parse(patch); } catch { /* 继续 */ }
+          }
+        }
+        return null;
+      };
+      parsed = tryParse(rawJson);
+      if (!parsed) {
+        // 被截断就再要一次，宁可多花一次也不静默丢样本
+        rawJson = await askJson().catch(() => null);
+        if (rawJson) parsed = tryParse(rawJson);
+      }
+      if (!parsed) {
+        console.error('[ChatterLearner] 解析模型学习 JSON 失败: 两次都没拿到完整 JSON');
         this.learning = false;
         return false;
       }

@@ -244,7 +244,7 @@ export async function main({ tiebaCandidateFactory = null } = {}) {
     brain,
   });
   selfPortrait.ensure().catch(() => {});
-  const rel = new Relationship({ dir: cfg.dataDir || './data', enabled: cfg.relationship?.enabled !== false, familiarAt: cfg.relationship?.familiarAt });
+  const rel = new Relationship({ dir: cfg.dataDir || './data', enabled: cfg.relationship?.enabled !== false, familiarAt: cfg.relationship?.familiarAt, ownerIds: cfg.ownerIds || [] });
   const topicTracker = new TopicFocusTracker({
     focusWindowMs: cfg.wake?.topicFocusWindowMs ?? 180000,
     idleTimeoutMs: cfg.wake?.topicIdleTimeoutMs ?? 60000,
@@ -1542,6 +1542,23 @@ export async function handleTurn({ bot, brain, human, memory, waker, rel, selfPo
         setRoomState(null, { message: r.parts.join('').slice(0, 80), recentInput: text.slice(0, 20) });
       } catch {}
     }
+  }
+
+  // 被戳之后的回戳：只回戳老铁瓷，60 秒内同一人不重复，避免机器人和机器人无限对戳
+  if (voiceSentSuccess || textSentSuccess) {
+    try {
+      const canPoke = last.isPoke && rel?.permissionFor?.(last.userId)?.familiar;
+      if (canPoke && typeof bot.sendPoke === 'function') {
+        const key59 = String(last.userId);
+        const now59 = Date.now();
+        const lastPokeAt = (globalThis.__xyPokeBack ||= new Map()).get(key59) || 0;
+        if (now59 - lastPokeAt > 60_000) {
+          globalThis.__xyPokeBack.set(key59, now59);
+          const pr = await bot.sendPoke(key, last.userId);
+          console.log(pr?.ok ? `   [回戳] 已回戳 ${last.name}(${last.userId})` : `   [回戳] 失败 ${last.name}(${last.userId}) ${pr?.error || ''}`);
+        }
+      }
+    } catch (e) { console.warn('   [回戳] 异常', e?.message || e); }
   }
 
   if (voiceSentSuccess || textSentSuccess) {

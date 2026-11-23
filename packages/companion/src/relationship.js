@@ -42,9 +42,12 @@ export class Relationship {
    * @param {boolean} [opts.enabled=true]
    * @param {number} [opts.familiarAt=80] 熟悉的亲密度门槛
    */
-  constructor({ dir = './data', enabled = true, familiarAt = 80 } = {}) {
+  constructor({ dir = './data', enabled = true, familiarAt = 80, ownerIds = [] } = {}) {
+    this.ownerIds = (ownerIds || []).map(String);
     this.enabled = enabled;
     this.familiarAt = Number.isFinite(familiarAt) ? familiarAt : 80;
+    this.ownerIntimacy = 100;
+    this.ownerTrust = 95;
     this.file = path.join(dir, 'relationships.json');
     /** @type {Record<string, any>} */
     this.book = {};
@@ -76,7 +79,23 @@ export class Relationship {
   }
 
   /** 获取指定人的实时关系与许可；陌生人或禁用账本时不开放 */
+  /** 老爸固定满亲密，不吃衰减、不吃扣分 */
+  isOwnerLocked(userId) {
+    return this.ownerIds.includes(String(userId));
+  }
+
   permissionFor(userId) {
+    if (this.enabled && this.isOwnerLocked(userId)) {
+      const key = String(userId);
+      const rec = this.book[key] || {};
+      if (rec.intimacy !== this.ownerIntimacy || rec.trust !== this.ownerTrust) {
+        rec.intimacy = this.ownerIntimacy;
+        rec.trust = this.ownerTrust;
+        this.book[key] = rec;
+        this._save();
+      }
+      return { intimacy: this.ownerIntimacy, trust: this.ownerTrust, tier: tierOf(this.ownerIntimacy), familiar: true };
+    }
     const rec = this.enabled ? this.book[String(userId)] : null;
     const current = rec ? this._current(rec) : { intimacy: 0, trust: 50 };
     return { ...current, tier: tierOf(current.intimacy), familiar: !!rec && current.intimacy >= this.familiarAt };
@@ -105,6 +124,15 @@ export class Relationship {
   observe(userId, text, { isOwner = false } = {}) {
     if (!this.enabled) return { delta: 0, kind: 'none' };
     const t = String(text || '');
+    if (this.isOwnerLocked(userId)) {
+      const rec = this._rec(userId);
+      rec.intimacy = this.ownerIntimacy;
+      rec.trust = this.ownerTrust;
+      rec.lastSeen = Date.now();
+      delete rec.decayAt;
+      this._save();
+      return { delta: 0, kind: 'owner_locked' };
+    }
     const rec = this._rec(userId);
     Object.assign(rec, this._current(rec));
     rec.lastSeen = Date.now();

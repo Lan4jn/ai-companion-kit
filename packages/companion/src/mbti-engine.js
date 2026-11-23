@@ -226,7 +226,7 @@ export function refreshCode({ file = MBTI_FILE, now = Date.now(), radarWeek = nu
   if (flipped) {
     next.code = match.code;
     next.history = [...(st.history || []), {
-      at: now, from: st.code, to: match.code, dist: match.dist, oldDist: Math.round(oldDist),
+      at: now, from: st.code, to: match.code, minMargin: Math.round(Number(match.minMargin) || 0),
     }].slice(-30);
   }
   return writeMbti(next, file) || next;

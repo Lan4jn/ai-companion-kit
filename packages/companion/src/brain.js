@@ -377,7 +377,7 @@ export class Brain {
   /**
    * 轻量直接调用底层 LLM 进行内部反思、提炼或总结（不走角色外壳和工具系统）
    */
-  async complete({ system = '', prompt, max_tokens = 1000, temperature = 0.7, json = false, signal, diagnostic = false } = {}) {
+  async complete({ system = '', prompt, max_tokens = 1000, temperature = 0.7, json = false, signal, diagnostic = false, thinking = null } = {}) {
     if (!prompt) return null;
     const messages = [];
     if (system) messages.push({ role: 'system', content: String(system) });
@@ -393,6 +393,8 @@ export class Brain {
     if (json) {
       payload.response_format = { type: 'json_object' };
     }
+    // 推理型模型会把 max_tokens 吃在思考上，导致 JSON 被截断；这里允许调用方关掉
+    if (thinking) payload.thinking = { type: thinking };
 
     try {
       const hdrs = { 'content-type': 'application/json', authorization: 'Bearer ' + this.apiKey };
