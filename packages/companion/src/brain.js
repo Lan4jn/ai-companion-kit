@@ -1,6 +1,6 @@
 import { consumeBrainCandidateAuthorization } from './chat-onebot-queue-bridge.js';
 import { DURABLE_TEXT_PERSONA } from './chat-durable-context.js';
-import { publicSearchQuery, searchForbidden as isSearchForbidden } from './search-privacy.js';
+import { publicSearchQuery, searchForbidden as isSearchForbidden, queryDerivedFromUser } from './search-privacy.js';
 import { stickerGuidance } from './sticker-guidance.js';
 import { CompletionFailure } from './completion-failure.js';
 import { hasFishCliche } from './fish-cliche.js';
@@ -521,7 +521,7 @@ export class Brain {
     const isOwner = isTrustedMemoryMessage(event) && event.platform === 'qq' &&
       event.key === key && event.userId === userId && this.ownerIds.has(String(userId));
     const isGroup = String(key || '').startsWith('group:');
-    const isInternal = !/^(?:private|group):/.test(String(key || '')) && !String(key || '').startsWith('__bili_dm') && (
+    const isInternal = !/^(?:private|group|panel):/.test(String(key || '')) && !String(key || '').startsWith('__bili_dm') && (
       userId === 'system' || userId === 'self' || key === '__diary_generation__' || key === '__proactive__' || String(key || '').startsWith('internal:')
     );
     const isTrusted = (isOwner && String(key || '') === `private:${userId}` && (!input.platform || /^(qq|onebot)$/i.test(input.platform))) || isInternal;
@@ -536,7 +536,7 @@ export class Brain {
     const personalBiliRecall = isOwner && String(key || '') === `private:${userId}` &&
       (!input.platform || /^(qq|onebot)$/i.test(input.platform)) &&
       typeof input.factualSearchText === 'string' && isGeneralBiliFeelingQuery(input.factualSearchText);
-    const factualQuestion = !personalBiliRecall && !searchForbidden && /^(?:private|group):/.test(String(key || '')) && !isBiliDM && !structuredReply && !trapProbe && needsFactualSearch(searchText || text);
+    const factualQuestion = !personalBiliRecall && !searchForbidden && /^(?:private|group|panel):/.test(String(key || '')) && !isBiliDM && !structuredReply && !trapProbe && needsFactualSearch(searchText || text);
     if (input.durableToolEffects?.enabled === true && factualQuestion) throw Error('durable tool preflight unsupported');
     let factualEvidence = '';
     if (factualQuestion) {
@@ -773,7 +773,7 @@ export class Brain {
     let voiceTextToSend = '';
     let voiceClicheRejected = false;
     const isWechatChat = /^wx:(?:private|group):/.test(String(key || ''));
-    const isQQChat = !isWechatChat && /^(?:private|group):/.test(String(key || '')) && !isBiliDM;
+    const isQQChat = !isWechatChat && /^(?:private|group|panel):/.test(String(key || '')) && !isBiliDM;
     const isDirectChat = isQQChat || isWechatChat;
     const isClicheReply = value => {
       const candidate = String(value || '').trim();
@@ -954,8 +954,10 @@ export class Brain {
           } else if (tc.function.name === 'web_search') {
             // Model-produced queries can contain recalled private material; never send
             // them externally unless they exactly match the safe current message.
-            const safe = publicSearchQuery(searchText);
-            if (searchForbidden || !safe || args.query !== safe || !/^(?:private|group):/.test(String(key || '')) || isBiliDM) {
+            const safe = publicSearchQuery(String(args.query || ''));
+            const derived = safe ? queryDerivedFromUser(searchText, safe) : false;
+            if (searchForbidden || !safe || !derived || !/^(?:private|group|panel):/.test(String(key || '')) || isBiliDM) {
+              console.log(`[web_search] 拦截 forbidden=${!!searchForbidden} safe=${!!safe} derived=${derived} keyOk=${/^(?:private|group|panel):/.test(String(key || ''))} biliDM=${!!isBiliDM} qlen=${String(args.query||'').length}`);
               execRes = { success: false, text: '无法安全检索：请仅提供不含个人信息的公开事实问题。' };
             } else {
               if (durable) {

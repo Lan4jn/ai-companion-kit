@@ -70,8 +70,32 @@ function relevant(query, result) {
     if (dates.some(([, y, m, d]) => !allowed.has(`${+y}-${+m}-${+d}`))) return false;
     return true;
   }
-  const subject = q.replace(/^(请查一下|查一下|搜索)/, '').replace(/^什么是/, '').replace(/(是什么时候|是多少|是什么|是谁|怎么样|如何|为什么|什么时候|最新|今天|今日|实时|新闻|消息|查询|搜索|查查|查一下|多少|参数|的|[？?。！!])/g, '');
-  return subject.length >= 2 && text.includes(subject);
+  // 关键词覆盖，而不是整串逐字匹配：
+  // “GTA6 发售时间”这种查询在标题里只会出现“GTA6”，老逻辑直接判 0 条。
+  const stop = /^(?:请查一下|查一下|搜索|什么是|是什么|是多少|是谁|怎么样|如何|为什么|什么时候|最新|最近|目前|现在|今天|今日|实时|今年|新闻|消息|查询|查查|多少|参数|价格|售价|发售|上市|发布|时间|的|了|吗|呢)$/;
+  const raw = query
+    .replace(/^(?:请查一下|查一下|搜索)/, '')
+    .replace(/^什么是/, '')
+    .split(/[\s，,。、；;！!？?：:（）()\[\]【】《》"'“”]+/)
+    .map(t => t.trim())
+    .filter(Boolean);
+  const tokens = [];
+  for (const part of raw) {
+    const low = part.toLowerCase();
+    if (/^[a-z0-9.+-]{2,}$/i.test(low)) { tokens.push(low); continue; }
+    const pieces = low.match(/[\u4e00-\u9fa5]{2,}/g) || [];
+    for (const piece of pieces) {
+      if (stop.test(piece)) continue;
+      tokens.push(piece);
+      if (piece.length >= 4) {
+        for (let k = 0; k + 2 <= piece.length; k++) tokens.push(piece.slice(k, k + 2));
+      }
+    }
+  }
+  const uniq = [...new Set(tokens)].filter(t => t.length >= 2 && !stop.test(t));
+  if (!uniq.length) return true;
+  const hits = uniq.filter(t => text.includes(t)).length;
+  return hits >= 1 && hits / uniq.length >= 0.3;
 }
 
 export async function executeSearchTool(name, args = {}, capability = null) {
@@ -81,6 +105,8 @@ export async function executeSearchTool(name, args = {}, capability = null) {
 
   const query = publicSearchQuery(args.query) || (matchesTrendingCapability(capability, args.query) ? args.query : '');
   if (!query) {
+    // 只记长度和失败类别，不记正文，方便事后定位是隐私拦截还是别的
+    console.log(`[web_search] 拒绝检索 reason=privacy-or-format len=${String(args.query || '').length}`);
     return { success: false, text: '无法安全检索：请提供不含个人信息的独立公开事实问题。' };
   }
 

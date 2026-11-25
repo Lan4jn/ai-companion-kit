@@ -31,9 +31,16 @@ test('public feeds do not make private or injected titles safe', async () => {
 });
 
 test('untrusted search callers cannot forge ranking provenance', async () => {
- const {executeSearchTool}=await import('../src/search-tools.js');
- const old=globalThis.fetch; let calls=0; globalThis.fetch=async()=>{calls++;throw Error('unexpected');};
- try {for(const capability of [undefined,{}, {source:'微博',title:'新款掌机发布引发热议'}]) {const r=await executeSearchTool('web_search',{query:'新款掌机发布引发热议', source:'微博',trusted:true},capability); assert.equal(r.success,false);} assert.equal(calls,0);} finally {globalThis.fetch=old;}
+  // 策略调整：模型自己拟的公开问题允许检索（否则 GTA6、新游戏这类一律搜不到），
+  // 但伪造的 capability 不能成为绕过隐私判定的通行证。
+  const { executeSearchTool } = await import('../src/search-tools.js');
+  const old = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; throw Error('unexpected'); };
+  try {
+    const r = await executeSearchTool('web_search', { query: '张三的检查结果曝光', source: '微博', trusted: true }, { source: '微博', title: '张三的检查结果曝光' });
+    assert.equal(r.success, false);
+    assert.equal(calls, 0);
+  } finally { globalThis.fetch = old; }
 });
 
 test('model selection must match a candidate byte for byte', async () => {

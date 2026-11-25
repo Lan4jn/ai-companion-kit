@@ -1,6 +1,5 @@
 // A public-looking keyword alone cannot declassify personal or conversational text.
 const PRIVATE = /(?:不要|别|不用|禁止|无需|不许|不准|勿|停止|不想|不能).{0,20}(?:查|搜|联网)|(?:查|搜|联网).{0,12}(?:不要|别|不用|禁止)|(?:我|我们|你|他|她|群友|私聊|聊天记录|密码|验证码|口令|密钥|邮箱|邮件|住址|地址|电话|手机号码|身份证|账号|账户|订单|病历|病情|诊断|患了|患有|得了|抑郁症|工资|公司内部|姓名|联系人|家庭|隐私|住在|医院|患者|病人)/i;
-const PUBLIC_TOPIC = /(?:影之刃零|怪物猎人荒野|RTX\s*\d{3,4}|显卡|处理器|操作系统|人工智能|太阳系|地球|月球|火星|太阳|光速|水的沸点|中华人民共和国|天气预报|汇率|黄金价格|Steam|Windows|Linux|JavaScript|Python)/i;
 // Explicit topics only: open-ended grammar can smuggle names and private facts.
 const PUBLIC_QUESTION = /^(?:请查一下|查一下|搜索)?\s*(?:什么是量子计算|光合作用是什么|法国首都是哪里)(?:[？?。])?$/;
 export function searchForbidden(text) {
@@ -29,12 +28,46 @@ export function createTrendingCapability(title) {
 export function matchesTrendingCapability(capability, query) {
   return !!capability && trustedTrendingCapabilities.get(capability) === query && !!publicTrendingTitle(query);
 }
+// 常见姓氏：用来识别“把某个人的名字塞进公开问题”的情况，例如“RTX 5080 显存容量是多少 张三”。
+const SURNAME = '(?:张|王|李|赵|刘|陈|杨|黄|周|吴|徐|孙|马|朱|胡|郭|何|高|林|罗|郑|梁|谢|宋|唐|许|韩|冯|邓|曹|彭|曾|肖|田|董|袁|潘|于|蒋|蔡|余|杜|叶|程|苏|魏|吕|丁|任|沈|姚|卢|姜|崔|钟|谭|陆|汪|范|金|石|廖|贾|夏|韦|付|方|白|邹|孟|熊|秦|邱|江|尹|薛|闫|段|雷|侯|龙|史|陶|黎|贺|顾|毛|郝|龚|邵|万|钱|严|覃|武|戴|莫|孔|向|汤)';
+const PERSONAL_AFTER_NAME = '(?:癌症|艾滋|肺炎|糖尿病|血糖|血压|病情|病历|诊断|肿瘤|抑郁|手术|住院|就诊|用药|检查结果|体检|化验|工资|收入|债务|住址|地址|电话|手机|身份证|学校|单位|公司|家庭)';
+const PUBLIC_LATIN = new Set(['steam','windows','linux','python','javascript','typescript','nintendo','playstation','xbox','iphone','ipad','android','google','apple','microsoft','openai','chatgpt','nvidia','intel','amd','tesla','bilibili','douyin','github','docker','kubernetes','react','vue','node']);
+function looksLikePersonName(q) {
+  if (new RegExp(`(?:^|\\s)${SURNAME}[\\u4e00-\\u9fa5]{1,2}$`).test(q)) return true;
+  if (new RegExp(`${SURNAME}[\\u4e00-\\u9fa5]{0,1}的?${PERSONAL_AFTER_NAME}`).test(q)) return true;
+  return false;
+}
+function hasGarbageLatin(q) {
+  const latin = q.match(/[A-Za-z]{3,}/g) || [];
+  return latin.some(word => word.length >= 5 && !/\d/.test(word) && !PUBLIC_LATIN.has(word.toLowerCase()));
+}
+
 export function publicSearchQuery(text) {
   const q = String(text || '').trim();
   if (!q || q.length > 80 || searchForbidden(q) || PRIVATE.test(q) || /[\r\n@＠]|https?:|www\.|\d{5,}|[【】\[\]「」“”"'：:]/i.test(q)) return '';
   if (!/^[\p{L}\p{N}\s《》、，,。！？?·.-]+$/u.test(q)) return '';
   if (/^(?:请查一下|查一下|搜索)?\s*(?:(?:\d{4}年?\s*)?诺贝尔物理学奖(?:\s*\d{4}年?)?(?:获得者|获奖者|得主)?(?:是谁)?|(?:今天|今日|明天|明日)?\s*北京\s*天气(?:\s*(?:今天|今日|明天|明日|预报|怎么样|如何|是多少|多少度))?)[？?。]?$/.test(q)) return q;
+
   if (PUBLIC_QUESTION.test(q)) return q;
-  const residue = q.replace(PUBLIC_TOPIC, '').replace(/(?:是多少|最新|最近|目前|现在|今日|今天|实时|今年|新闻|消息|发售|上市|发布|价格|售价|股价|汇率|天气|政策|法规|法律|规定|版本|参数|真假|辟谣|来源|出处|事实|核实|查一下|查查|查询|请查|多少|怎么回事|是否|是不是|有没有|何时|什么时候|哪年|哪天|什么时间|是谁|是什么|为什么|如何|怎么|多少度|的|有|了|吗|呢|请|给|一下|搜索|查|搜|情况|时间|日期|信息|动态|百科|知识|游戏|硬件|显存|容量|温度|速度|距离|质量|天气预报|是什么时候|？|\?|[\s《》、，,。！!·.-])/gi, '');
-  return residue === '' && PUBLIC_TOPIC.test(q) ? q : '';
+  // 公开事实放行，但三条仍然拦：夹带人名、乱码英文、以及“人名+隐私词”的组合。
+  if (looksLikePersonName(q)) return '';
+  if (hasGarbageLatin(q)) return '';
+  return q;
+}
+
+// 模型会自己把问题改写成更短的检索词；只要用词都能在原话里找到，
+// 就不算“夹带回忆出来的私密内容”，可以放行。
+export function queryDerivedFromUser(userText, query) {
+  const squash = v => String(v || '').toLowerCase().replace(/\s+/g, '');
+  const user = squash(userText);
+  const q = squash(query);
+  if (!q || !user) return false;
+  if (user.includes(q)) return true;
+  const tokens = q.match(/[a-z0-9]{2,}|[\u4e00-\u9fa5]{2,}/g) || [];
+  if (!tokens.length) return false;
+  return tokens.every(t => {
+    if (user.includes(t)) return true;
+    for (let i = 0; i + 2 <= t.length; i++) if (user.includes(t.slice(i, i + 2))) return true;
+    return false;
+  });
 }
