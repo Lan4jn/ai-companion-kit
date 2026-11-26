@@ -29,9 +29,10 @@ import { loopGuard } from './loop-guard.js';
 import { LEGAL_TOOLS, executeLegalTool } from './legal-tools.js';
 import { SEARCH_TOOLS, executeSearchTool } from './search-tools.js';
 import { TDAI_TOOLS, executeTdaiTool, syncTurnToTdai } from './tdai-tools.js';
+import { CODE_TOOLS, executeCodeTool } from './code-tools.js';
 import { cleanAllToolArtifacts, parseDsmlToolCalls } from './safety.js';
 
-const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS];
+const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS, ...CODE_TOOLS];
 // 敏感/内部工具：仅限老爸本人调用，群友或陌生私聊严禁开放，杜绝隐私泄露与提权注入
 const OWNER_ONLY_TOOL_NAMES = new Set([
   'phone_status', 'phone_connect', 'phone_devices', 'phone_pair',
@@ -42,6 +43,7 @@ const OWNER_ONLY_TOOL_NAMES = new Set([
   'send_selfie', 'read_group_chat', 'queue_group_message',
   'call_aunt', 'talk_to_hermes', 'request_feature',
   'discard_image', 'remember_person', 'tdai_search_memories',
+  'run_code',
 ]);
 const PUBLIC_SAFE_TOOLS = ALL_TOOLS.filter((t) => !OWNER_ONLY_TOOL_NAMES.has(t?.function?.name));
 
@@ -525,6 +527,9 @@ export class Brain {
       userId === 'system' || userId === 'self' || key === '__diary_generation__' || key === '__proactive__' || String(key || '').startsWith('internal:')
     );
     const isTrusted = (isOwner && String(key || '') === `private:${userId}` && (!input.platform || /^(qq|onebot)$/i.test(input.platform))) || isInternal;
+    // 面板是老爸本机/局域网的沙箱页面，只额外放开代码沙箱这一件低风险能力，
+    // 手机、记忆、生图等敏感工具仍然只认老爸 QQ 私聊。
+    const isPanelOwner = /^panel:/.test(String(key || '')) && this.ownerIds.has(String(userId));
     const isBiliDM = String(key || '').startsWith('private:bili:');
     // 视频观看回忆只在 QQ 老爸私聊中读取，避免跨平台或群聊扩散。
     const videoQuestionText = Object.hasOwn(input, 'currentTurnText') ? input.currentTurnText : text;
@@ -826,7 +831,7 @@ export class Brain {
           stream: false,
         };
         if (enableTools && round < 4) {
-          const allowedTools = typeof input.turnGroupReadCapability === 'function' ? ALL_TOOLS.filter(t=>t?.function?.name === 'read_group_chat') : (isTrusted ? ALL_TOOLS : PUBLIC_SAFE_TOOLS);
+          const allowedTools = typeof input.turnGroupReadCapability === 'function' ? ALL_TOOLS.filter(t=>t?.function?.name === 'read_group_chat') : (isTrusted ? ALL_TOOLS : isPanelOwner ? [...PUBLIC_SAFE_TOOLS, ...CODE_TOOLS] : PUBLIC_SAFE_TOOLS);
           if (allowedTools.length > 0) {
             reqPayload.tools = allowedTools;
             reqPayload.tool_choice = 'auto';
@@ -948,7 +953,7 @@ export class Brain {
             execRes = typeof input.turnGroupReadCapability === 'function'
               ? await input.turnGroupReadCapability(args)
               : {status:'denied',message:'群历史未授权；跨群读取需要另行授权。'};
-          } else if (!isTrusted && OWNER_ONLY_TOOL_NAMES.has(tc.function.name)) {
+          } else if (!isTrusted && !(isPanelOwner && tc.function.name === 'run_code') && OWNER_ONLY_TOOL_NAMES.has(tc.function.name)) {
             console.warn(`[Security] 拦截非老爸(${userId})触发敏感工具: ${tc.function.name}`);
             execRes = { status: 'denied', message: '非老爸无权调用该内部/隐私工具，请直接用真实人类群友语气随口拒绝。' };
           } else if (tc.function.name === 'web_search') {
@@ -971,6 +976,8 @@ export class Brain {
                 execRes = { success: false, text: '检索没有返回可用结果；不要编造细节，可以直说没查到。' };
               }
             }
+          } else if (tc.function.name === 'run_code') {
+            execRes = await executeCodeTool(tc.function.name, args);
           } else if (tc.function.name === 'legal_lookup') {
             execRes = await executeLegalTool(tc.function.name, args);
           } else if (tc.function.name === 'tdai_search_memories') {
