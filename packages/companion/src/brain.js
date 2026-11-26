@@ -30,9 +30,10 @@ import { LEGAL_TOOLS, executeLegalTool } from './legal-tools.js';
 import { SEARCH_TOOLS, executeSearchTool } from './search-tools.js';
 import { TDAI_TOOLS, executeTdaiTool, syncTurnToTdai } from './tdai-tools.js';
 import { CODE_TOOLS, executeCodeTool } from './code-tools.js';
+import { DEV_AGENT_TOOLS, executeDevAgent } from './dev-agent.js';
 import { cleanAllToolArtifacts, parseDsmlToolCalls } from './safety.js';
 
-const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS, ...CODE_TOOLS];
+const ALL_TOOLS = [...PHONE_TOOLS, ...LEGAL_TOOLS, ...SEARCH_TOOLS, ...TDAI_TOOLS, ...CODE_TOOLS, ...DEV_AGENT_TOOLS];
 // 敏感/内部工具：仅限老爸本人调用，群友或陌生私聊严禁开放，杜绝隐私泄露与提权注入
 const OWNER_ONLY_TOOL_NAMES = new Set([
   'phone_status', 'phone_connect', 'phone_devices', 'phone_pair',
@@ -43,7 +44,7 @@ const OWNER_ONLY_TOOL_NAMES = new Set([
   'send_selfie', 'read_group_chat', 'queue_group_message',
   'call_aunt', 'talk_to_hermes', 'request_feature',
   'discard_image', 'remember_person', 'tdai_search_memories',
-  'run_code',
+  'run_code', 'dev_task',
 ]);
 const PUBLIC_SAFE_TOOLS = ALL_TOOLS.filter((t) => !OWNER_ONLY_TOOL_NAMES.has(t?.function?.name));
 
@@ -831,7 +832,7 @@ export class Brain {
           stream: false,
         };
         if (enableTools && round < 4) {
-          const allowedTools = typeof input.turnGroupReadCapability === 'function' ? ALL_TOOLS.filter(t=>t?.function?.name === 'read_group_chat') : (isTrusted ? ALL_TOOLS : isPanelOwner ? [...PUBLIC_SAFE_TOOLS, ...CODE_TOOLS] : PUBLIC_SAFE_TOOLS);
+          const allowedTools = typeof input.turnGroupReadCapability === 'function' ? ALL_TOOLS.filter(t=>t?.function?.name === 'read_group_chat') : (isTrusted ? ALL_TOOLS : isPanelOwner ? [...PUBLIC_SAFE_TOOLS, ...CODE_TOOLS, ...DEV_AGENT_TOOLS] : PUBLIC_SAFE_TOOLS);
           if (allowedTools.length > 0) {
             reqPayload.tools = allowedTools;
             reqPayload.tool_choice = 'auto';
@@ -953,7 +954,7 @@ export class Brain {
             execRes = typeof input.turnGroupReadCapability === 'function'
               ? await input.turnGroupReadCapability(args)
               : {status:'denied',message:'群历史未授权；跨群读取需要另行授权。'};
-          } else if (!isTrusted && !(isPanelOwner && tc.function.name === 'run_code') && OWNER_ONLY_TOOL_NAMES.has(tc.function.name)) {
+          } else if (!isTrusted && !(isPanelOwner && (tc.function.name === 'run_code' || tc.function.name === 'dev_task')) && OWNER_ONLY_TOOL_NAMES.has(tc.function.name)) {
             console.warn(`[Security] 拦截非老爸(${userId})触发敏感工具: ${tc.function.name}`);
             execRes = { status: 'denied', message: '非老爸无权调用该内部/隐私工具，请直接用真实人类群友语气随口拒绝。' };
           } else if (tc.function.name === 'web_search') {
@@ -978,6 +979,8 @@ export class Brain {
             }
           } else if (tc.function.name === 'run_code') {
             execRes = await executeCodeTool(tc.function.name, args);
+          } else if (tc.function.name === 'dev_task') {
+            execRes = await executeDevAgent(tc.function.name, args);
           } else if (tc.function.name === 'legal_lookup') {
             execRes = await executeLegalTool(tc.function.name, args);
           } else if (tc.function.name === 'tdai_search_memories') {
